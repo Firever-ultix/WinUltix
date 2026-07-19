@@ -1,5 +1,3 @@
-windows-11 debloater powershell system-optimization performance-tuning privacy-tool gaming-optimization gui-tool
-
 # WinUltix Pro 🚀
 **A 200KB, Zero-Dependency, Diagnostic Windows 11 Optimizer**
 
