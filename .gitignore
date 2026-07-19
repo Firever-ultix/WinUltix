@@ -1,0 +1,35 @@
+# Narzędzia i edytory (np. ustawienia przestrzeni roboczej VS Code)
+.vscode/
+.idea/
+
+# Logi z działania skryptów i testów wdrożeniowych
+*.log
+logs/
+Transcripts/
+
+# Pliki tymczasowe i zrzuty błędów
+*.bak
+*.tmp
+*~
+err/
+
+# Wyniki działania skryptów (jeśli WinUltix generuje jakieś raporty po optymalizacji)
+*.csv
+*.xml
+*.json
+*.html
+
+# Pliki z zaszyfrowanymi poświadczeniami (KRYTYCZNE - zapobiega wrzuceniu haseł!)
+*.clixml
+*secret*
+*cred*
+
+# Archiwa z gotowymi wersjami do dystrybucji (nie trzymamy ich w kodzie źródłowym)
+*.zip
+*.rar
+*.7z
+
+WinUltix_Pro.exe
+WinUltix_Monolith_EN.ps1
+O.cmd
+build/
