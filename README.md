@@ -6,6 +6,9 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 **WinUltix Pro** takes an engineering approach. Built for IT professionals, hardware enthusiasts, and gamers who need to squeeze maximum performance out of high-end setups. It surgically removes telemetry, bloatware, and background noise—while acting as a **full diagnostic toolkit** that is **100% transparent and fully reversible.**
 
 ---
+# WinUltix Pro
+![WinUltix Main Interface](assets/1.jpg)
+---
 
 ### 🛡️ Core Philosophy
 * **Diagnostic First (No Black Boxes):** Featuring an onboard interactive **Diagnostic Audit** module. Before making any changes, WinUltix calculates wasted MBs in caches, scans your registry for exact telemetry keys, and lists active bloatware. You always know *what* will be changed.
@@ -36,6 +39,9 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 * **Interactive Grids:** Features GUI tables (`Out-GridView`) to selectively remove startup entries, deprovision Windows Capabilities (FOD), or hard-disable running services.
 * **Fast DNS Switch:** Rapidly apply secure DNS providers (Cloudflare, Quad9, AdGuard) with a single click.
 
+---
+## Funkcje i moduły
+![WinUltix Tabs Overview](assets/8.jpg)
 ---
 
 ### 🚀 Getting Started
