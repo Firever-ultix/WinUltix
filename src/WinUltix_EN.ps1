@@ -1,6 +1,7 @@
 ﻿# ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT (EN)
 # ==========================================
+$Global:AppVersion = "v1.0.0"
 
 # Loading the main engine, audit, and rescue modules
 . "$PSScriptRoot\Optimizer_Core_EN.ps1"
@@ -14,7 +15,7 @@ Add-Type -AssemblyName System.Drawing
 # MAIN APPLICATION WINDOW
 # ==========================================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "WinUltix Pro - Ultimate System Toolkit"
+$form.Text = "WinUltix Pro - Ultimate System Toolkit $AppVersion"
 $form.Size = New-Object System.Drawing.Size(1200, 800)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
@@ -194,7 +195,7 @@ $btnCredits.Add_Click({
     $lblAbout.Size = New-Object System.Drawing.Size(340, 80)
     $lblAbout.ForeColor = [System.Drawing.Color]::LightGray
     $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lblAbout.Text = "WinUltix Pro - Ultimate System Toolkit`n`nConcept, architecture and combat tests: Firever`nCode generation: Gemini AI`n`nLet your hardware breathe!"
+    $lblAbout.Text = "WinUltix Pro - Ultimate System Toolkit $AppVersion`n`nConcept, architecture and combat tests: Firever`nCoding assistance: Gemini AI`n`nLet your hardware breathe!"
     
     # Klikalny link
     $linkGit = New-Object System.Windows.Forms.LinkLabel
