@@ -46,7 +46,12 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 3. We highly recommend running the **Diagnostic Audits** (`?` buttons) to analyze your current system state before applying any optimizations.
 
 ### ⚖️ License
-This project is licensed under the **GNU GPLv3 License**.
+This project is licensed under the **MIT License**.
 
 ### ⚠️ Disclaimer
 *Provided "AS IS". While WinUltix Pro uses safe MDM policies, cache clearing, and standard service configurations rather than destructive file-deletion hacks, registry manipulation always carries inherent risks. Creating a system restore point before deployment is highly recommended.*
+
+### Coffee
+Software is free of charge. Instead you can buy me a coffee.
+buymeacoffee.com/firever
+Thank you!
