@@ -40,7 +40,7 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 * **Fast DNS Switch:** Rapidly apply secure DNS providers (Cloudflare, Quad9, AdGuard) with a single click.
 
 ---
-## Funkcje i moduły
+## Functions & modules
 ![WinUltix Tabs Overview](assets/8.jpg)
 ---
 
