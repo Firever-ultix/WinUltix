@@ -97,7 +97,7 @@ function Audit-OneDrive { Write-GUI "--- AUDIT: OneDrive ---"; if ((Test-Path "$
 
 function Audit-Capabilities { 
     Write-GUI "--- AUDIT: Built-in FOD Features ---"
-    $capsList = @("*Print.Fax.Scan*", "*App.StepsRecorder*", "*Media.WindowsMediaPlayer*", "*MathRecognizer*", "*App.Support.QuickAssist*", "*Microsoft.Windows.WordPad*", "*Hello.Face*", "*OneCoreUAP.OneSync*", "*Browser.InternetExplorer*", "*VBSCRIPT*", "*Print.Management.Console*")
+    $capsList = @("*Print.Fax.Scan*", "*App.StepsRecorder*", "*Media.WindowsMediaPlayer*", "*MathRecognizer*", "*App.Support.QuickAssist*", "*Microsoft.Windows.WordPad*", "*Hello.Face*", "*OneCoreUAP.OneSync*", "*Browser.InternetExplorer*", "*Microsoft.Wallpapers.Extended*", "*Print.Management.Console*", "*Language.Handwriting*", "*Language.Speech*", "*Wifi.Client*")
     Write-GUI "Target packages list: $($capsList -join ', ')"
     $found = @()
     foreach ($cap in $capsList) { 
@@ -113,11 +113,11 @@ function Audit-Capabilities {
 
 function Audit-Bloatware { 
     Write-GUI "--- AUDIT: Bloatware (Appx) ---"
-    $appList = @("*3DBuilder*", "*3DViewer*", "*Bing*", "*BingNews*", "*BingWeather*", "*Clipchamp*", "*DevHome*", "*PowerAutomateDesktop*", "*Copilot*", "*Edge.GameAssist*", "*Family*", "*FeedbackHub*", "*GetHelp*", "*windowscommunicationsapps*", "*WindowsMaps*", "*MixedReality*", "*ZuneVideo*", "*ZuneMusic*", "*Gaming*", "*MicrosoftOfficeHub*", "*OneDriveSync*", "*OneNote*", "*OutlookForWindows*", "*Photos*", "*QuickAssist*", "*SkypeApp*", "*SolitaireCollection*", "*MSTeams*", "*MicrosoftTeams*", "*Getstarted*", "*Todos*", "*XboxApp*", "*XboxGamingOverlay*", "*XboxSpeechToTextOverlay*", "*Cortana*", "*SoundRecorder*", "*Client.WebExperience*", "*CrossDevice*", "*YourPhone*", "*WindowsAlarms*", "*TikTok*", "*Instagram*", "*Netflix*", "*Spotify*", "*McAfee*", "*Norton*")
+    $appList = @("*3DBuilder*", "*3DViewer*", "*Bing*", "*BingNews*", "*BingWeather*", "*Clipchamp*", "*DevHome*", "*PowerAutomateDesktop*", "*Copilot*", "*Store.Engagement*", "*Edge.GameAssist*", "*Family*", "*FeedbackHub*", "*GetHelp*", "*windowscommunicationsapps*", "*WindowsMaps*", "*MixedReality*", "*ZuneVideo*", "*ZuneMusic*", "*Gaming*", "*MicrosoftOfficeHub*", "*OneDriveSync*", "*OneNote*", "*OutlookForWindows*", "*People*", "*Photos*", "*QuickAssist*", "*SkypeApp*", "*SolitaireCollection*", "*MSTeams*", "*MicrosoftTeams*", "*Getstarted*", "*Todos*", "*XboxApp*", "*XboxGamingOverlay*", "*XboxSpeechToTextOverlay*", "*YourPhone*", "*Cortana*", "*WindowsAlarms*", "*SoundRecorder*", "*Client.WebExperience*", "*CrossDevice*", "*TikTok*", "*Instagram*", "*Facebook*", "*Twitter*", "*Netflix*", "*Spotify*", "*Disney*", "*McAfee*", "*Norton*", "*Lenovo*", "*Dell*", "*HP*", "*StickyNotes*")
     Write-GUI "Scanned applications: $($appList -join ', ')"
     $found = @()
     foreach ($app in $appList) { 
-        $packages = Get-AppxPackage -Name $app -AllUsers | Where-Object { $_.Name -notmatch "PeopleExperienceHost|XboxGameCallableUI" }
+        $packages = Get-AppxPackage -Name $app -AllUsers | Where-Object { $_.Name -notmatch "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider" }
         if ($packages) { 
             foreach ($p in $packages) { 
                 if ($p.Name -notin $found) { $found += $p.Name; Write-GUI "  [!] Found: $($p.Name)" } 
@@ -161,9 +161,22 @@ function Audit-ServicesLight {
 }
 
 function Audit-ServicesHeavy { 
-    Write-GUI "--- AUDIT: Services (Gaming Profile) ---"
-    $svcs = @("wuqisvc", "whesvc", "MapsBroker", "RetailDemo", "PcaSvc", "DiagTrack", "edgeupdate", "edgeupdatem", "InventorySvc", "CDPSvc", "lfsvc", "SysMain", "WSLService", "WSAIFabricSvc", "Spooler", "PrintNotify", "Fax", "TermService", "RemoteRegistry", "WbioSrvc", "XblAuthManager", "XblGameSave", "XboxNetApiSvc", "XboxGipSvc", "SensorDataService", "SensorService", "SensrSvc", "PhoneSvc", "icssvc", "WwanSvc", "WSearch", "FrameServer", "CscService", "SharedAccess", "dmwappushservice", "wermgr")
-    $err=0; foreach ($s in $svcs) { $err += Assert-Service $s }; Write-GUI "-> STATUS: $err active services." 
+    Write-GUI "--- AUDIT: Gaming Profile Services ---"
+    $servicesToDisable = @("wuqisvc", "whesvc", "MapsBroker", "RetailDemo", "PcaSvc", "DiagTrack", "edgeupdate", "edgeupdatem", "InventorySvc", "CDPSvc", "lfsvc", "SysMain", "WSLService", "WSAIFabricSvc", "Spooler", "PrintNotify", "Fax", "TermService", "RemoteRegistry", "WbioSrvc", "SensorDataService", "SensorService", "SensrSvc", "PhoneSvc", "icssvc", "WwanSvc", "WSearch", "CscService", "SharedAccess", "dmwappushservice", "wermgr")
+    $servicesToManual = @("XblAuthManager", "XblGameSave", "XboxNetApiSvc", "XboxGipSvc", "FrameServer", "FrameServerMonitor")
+    
+    $mismatch = 0
+    foreach ($svc in $servicesToDisable) { 
+        $val = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "Start" -ErrorAction SilentlyContinue).Start
+        if ($val -ne $null -and $val -ne 4) { Write-GUI "  [!] To Disable: $svc is currently set to $val"; $mismatch++ }
+    }
+    foreach ($svc in $servicesToManual) { 
+        $val = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "Start" -ErrorAction SilentlyContinue).Start
+        if ($val -ne $null -and $val -ne 3 -and $val -ne 4) { Write-GUI "  [!] To Manual (Safe): $svc is currently set to $val"; $mismatch++ }
+    }
+    
+    if ($mismatch -eq 0) { Write-GUI "  [OK] Gaming Profile correctly enforced (bloat disabled, essential gaming/camera services set to manual)." } 
+    else { Write-GUI "  -> STATUS: $mismatch services require configuration." }
 }
 
 function Audit-RegTaskbar { 

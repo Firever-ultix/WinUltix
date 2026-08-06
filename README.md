@@ -20,6 +20,7 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 * **Task Scheduler Purge:** Safely disables Customer Experience tasks, Windows Error Reporting, and AI Feedback loops.
 * **PowerShell & Defender Telemetry Block:** Injects machine-level variables to stop Microsoft from collecting background samples.
 * **Hard MDM Policies:** Leverages enterprise-grade `ContentDeliveryManager` keys to permanently block Windows 11 from silently downloading promoted store apps.
+* **Explorer Privacy Shield:** Hides recent files, frequent folders, and blocks search box cloud suggestions directly in the registry.
 
 #### 2. Deep Bloatware Removal & Smart Garbage Collection
 * **Aggressive Appx Cleansing:** Uninstalls and *deprovisions* consumer bloatware (TikTok, Xbox Game Bar, Copilot) without breaking core UI.
@@ -30,8 +31,10 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 * **Raw Input Enforcement:** Hard-disables mouse pointer acceleration (Enhance Pointer Precision) at the registry level for true 1:1 sensor tracking.
 * **Network Latency Reduction:** Injects `TCPNoDelay` into active network adapters to prevent packet queuing in competitive gaming.
 * **Priority MMCSS Tuning:** Forces SystemResponsiveness limits to 0% and elevates gaming processes via Multimedia Class Scheduler tweaks.
+* **Safe Core Services:** Safely sets Xbox Live APIs and Camera (FrameServer) services to Manual instead of forcefully disabling them, ensuring full compatibility for game logins and streaming.
 
-#### 4. Interactive Utilities & Layout Fixes
+#### 4. Interactive Utilities & UI Upgrades
+* **Dynamic Visual Progress:** Features real-time UI progress bars for heavy tracking operations (Appx removal, Garbage Collection).
 * **Start Menu Reset:** Safely wipes the internal `start2.bin` database, clearing all locked/bloated tiles for a fresh, fully customizable layout.
 * **Interactive Grids:** Features GUI tables (`Out-GridView`) to selectively remove startup entries, deprovision Windows Capabilities (FOD), or hard-disable running services.
 * **Fast DNS Switch:** Rapidly apply secure DNS providers (Cloudflare, Quad9, AdGuard) with a single click.
@@ -51,7 +54,7 @@ This project is licensed under the **MIT License**.
 ### ⚠️ Disclaimer
 *Provided "AS IS". While WinUltix Pro uses safe MDM policies, cache clearing, and standard service configurations rather than destructive file-deletion hacks, registry manipulation always carries inherent risks. Creating a system restore point before deployment is highly recommended.*
 
-### Coffee
-Software is free of charge. Instead you can buy me a coffee.
+### ☕ Coffee
+This project is, and will be, free of charge. Instead, if you like it, you can buy me a coffee.
 buymeacoffee.com/firever
 Thank you!

@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT (EN)
 # ==========================================
-$Global:AppVersion = "v1.0.0"
+$Global:AppVersion = "v1.1.0"
 
 # Loading the main engine, audit, and rescue modules
 . "$PSScriptRoot\Optimizer_Core_EN.ps1"
@@ -170,6 +170,22 @@ $tabControl.TabPages.AddRange(@($tabClean, $tabApps, $tabReg, $tabServices, $tab
 # MAIN CONTROLS
 $btnClearLog = New-Object System.Windows.Forms.Button; $btnClearLog.Text = "[ Clear Log ]"; $btnClearLog.Location = New-Object System.Drawing.Point(1050, 725); $btnClearLog.Size = New-Object System.Drawing.Size(110, 25); $btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45); $btnClearLog.ForeColor = [System.Drawing.Color]::LightGray; $btnClearLog.FlatStyle = "Flat"; $btnClearLog.Add_Click({ $global:LastLog = "--- WINULTIX PRO ---`r`n`r`nReady for deployment."; $infoBox.Text = $global:LastLog })
 $form.Controls.Add($btnClearLog)
+
+$global:progBar = New-Object System.Windows.Forms.ProgressBar
+$global:progBar.Location = New-Object System.Drawing.Point(440, 725)
+$global:progBar.Size = New-Object System.Drawing.Size(600, 25)
+$global:progBar.Style = "Continuous"
+$global:progBar.Minimum = 0
+$global:progBar.Maximum = 100
+$form.Controls.Add($global:progBar)
+
+function Update-Progress { 
+    param([int]$Percent)
+    if ($Percent -lt 0) { $Percent = 0 }
+    if ($Percent -gt 100) { $Percent = 100 }
+    $global:progBar.Value = $Percent
+    [System.Windows.Forms.Application]::DoEvents() 
+}
 
 $btnCredits = New-Object System.Windows.Forms.Button
 $btnCredits.Text = "[ About / GitHub ]"
