@@ -55,6 +55,6 @@ This project is licensed under the **MIT License**.
 *Provided "AS IS". While WinUltix Pro uses safe MDM policies, cache clearing, and standard service configurations rather than destructive file-deletion hacks, registry manipulation always carries inherent risks. Creating a system restore point before deployment is highly recommended.*
 
 ### ☕ Coffee
-This project is, and will be, free of charge. Instead, if you like it, you can buy me a coffee.
-buymeacoffee.com/firever
+This project is, and will be, free of charge. Instead, if you like it, you can buy me a coffee.<br>
+https://buymeacoffee.com/firever<br>
 Thank you!
