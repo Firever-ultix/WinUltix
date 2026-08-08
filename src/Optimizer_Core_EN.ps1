@@ -14,94 +14,75 @@ function Clean-RecycleBinHard { Clear-RecycleBin -Force -ErrorAction SilentlyCon
 function Remove-OneDrive { Stop-Process -Name "OneDrive", "OneDriveSetup" -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; if (Test-Path "$env:SystemRoot\SysWOW64\OneDriveSetup.exe") { Start-Process "$env:SystemRoot\SysWOW64\OneDriveSetup.exe" -ArgumentList "/uninstall" -NoNewWindow -Wait } elseif (Test-Path "$env:SystemRoot\System32\OneDriveSetup.exe") { Start-Process "$env:SystemRoot\System32\OneDriveSetup.exe" -ArgumentList "/uninstall" -NoNewWindow -Wait }; reg.exe delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>$null; $pathsToClean = @("$env:PROGRAMDATA\Microsoft OneDrive", "C:\OneDriveTemp"); Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object { $pathsToClean += "$($_.FullName)\AppData\Local\Microsoft\OneDrive" }; foreach ($targetPath in $pathsToClean) { if (Test-Path -Path $targetPath) { Remove-Item -Path $targetPath -Force -Recurse -ErrorAction SilentlyContinue } } }
 
 # --- 2. BLOATWARE & APPS ---
-function Remove-WindowsCapabilities { 
-    Write-GUI "Scanning built-in FOD features..."
-    $capsWildcards = @("*Print.Fax.Scan*", "*App.StepsRecorder*", "*Media.WindowsMediaPlayer*", "*MathRecognizer*", "*App.Support.QuickAssist*", "*Microsoft.Windows.WordPad*", "*Hello.Face*", "*OneCoreUAP.OneSync*", "*Browser.InternetExplorer*", "*Microsoft.Wallpapers.Extended*", "*Print.Management.Console*", "*Language.Handwriting*", "*Language.Speech*", "*Wifi.Client*")
-    $total = $capsWildcards.Count
-    $current = 0
-    foreach ($capName in $capsWildcards) { 
-        $current++
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        Get-WindowsCapability -Online | Where-Object { $_.Name -like $capName -and $_.State -eq 'Installed' } | ForEach-Object { 
-            Write-GUI " -> Removing: $($_.Name)"
-            Remove-WindowsCapability -Online -Name $_.Name -ErrorAction SilentlyContinue 
-        } 
-    }
-    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-}
 
-function Remove-Bloatware { 
-    Write-GUI "Starting aggressive Appx package scan..."
-    Stop-Process -Name "*Widget*" -Force -ErrorAction SilentlyContinue
-    $appxToRemove = @("*3DBuilder*", "*3DViewer*", "*Bing*", "*BingNews*", "*BingWeather*", "*Clipchamp*", "*DevHome*", "*PowerAutomateDesktop*", "*Copilot*", "*Store.Engagement*", "*Edge.GameAssist*", "*Family*", "*FeedbackHub*", "*GetHelp*", "*windowscommunicationsapps*", "*WindowsMaps*", "*MixedReality*", "*ZuneVideo*", "*ZuneMusic*", "*Gaming*", "*MicrosoftOfficeHub*", "*OneDriveSync*", "*OneNote*", "*OutlookForWindows*", "*People*", "*Photos*", "*QuickAssist*", "*SkypeApp*", "*SolitaireCollection*", "*MSTeams*", "*MicrosoftTeams*", "*Getstarted*", "*Todos*", "*XboxApp*", "*XboxGamingOverlay*", "*XboxSpeechToTextOverlay*", "*YourPhone*", "*Cortana*", "*WindowsAlarms*", "*SoundRecorder*", "*Client.WebExperience*", "*CrossDevice*", "*TikTok*", "*Instagram*", "*Facebook*", "*Twitter*", "*Netflix*", "*Spotify*", "*Disney*", "*McAfee*", "*Norton*", "*Lenovo*", "*Dell*", "*HP*", "*StickyNotes*")
-    $total = $appxToRemove.Count
+function Invoke-RemoveCapabilities {
+    param([Parameter(Mandatory=$true)][array]$SelectedItems)
+
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { Write-GUI " -> No items selected. Operation aborted."; return }
     $current = 0
-    foreach ($app in $appxToRemove) { 
+
+    foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        $foundApps = Get-AppxPackage -Name $app -AllUsers | Where-Object { $_.Name -notmatch "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider" }
-        foreach ($found in $foundApps) { 
-            Write-GUI " -> Removing Appx: $($found.Name)"
-            Remove-AppxPackage -Package $found.PackageFullName -AllUsers -ErrorAction SilentlyContinue 
+        
+        Write-GUI " -> Removing Capability: $($item.UIDisplayName)"
+        foreach ($cap in $item.ActionData) {
+            try { Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop } catch { }
         }
-        $foundProv = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like $app -and $_.DisplayName -notmatch "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider" }
-        foreach ($prov in $foundProv) { 
-            Write-GUI " -> Deprovisioning: $($prov.DisplayName)"
-            Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction SilentlyContinue 
-        } 
     }
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
+    Write-GUI " -> System features removal completed."
 }
 
-function Run-AppxGarbageCollector { 
-    Write-GUI "Scanning orphaned frameworks..."
-    $allPackages = Get-AppxPackage -AllUsers
-    $standardApps = $allPackages | Where-Object { $_.IsFramework -eq $false }
-    
-    $activeDependencies = @()
-    foreach ($app in $standardApps) { 
-        if ($app.Dependencies) { 
-            foreach ($dep in $app.Dependencies) { $activeDependencies += $dep.PackageFullName }
-        } 
-    }
-    $activeDependencies = $activeDependencies | Select-Object -Unique
-    
-    $critical = "Microsoft.VCLibs|Microsoft.NET.Native|Microsoft.UI.Xaml|Microsoft.WinJS|Microsoft.Services.Store|Microsoft.WindowsAppRuntime|Microsoft.AIFabric|Microsoft.Windows.AugLoop"
-    $frameworks = $allPackages | Where-Object { $_.IsFramework -eq $true -and $_.Name -notmatch $critical }
-    $provisioned = Get-AppxProvisionedPackage -Online
-    
-    $total = $frameworks.Count + $provisioned.Count
+function Invoke-GarbageCollector {
+    param([Parameter(Mandatory=$true)][array]$SelectedItems)
+
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { Write-GUI " -> System clean or operation aborted."; return }
     $current = 0
-    $cleanedCount = 0
-    
-    foreach ($fw in $frameworks) { 
+
+    foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
         
-        if ($fw.PackageFullName -notin $activeDependencies) { 
-            try { 
-                Remove-AppxPackage -Package $fw.PackageFullName -AllUsers -ErrorAction Stop 
-                Write-GUI " -> Cleaned: $($fw.Name)"
-                $cleanedCount++
-            } catch {}
-        } 
+        Write-GUI " -> Cleaning: $($item.UIDisplayName)"
+        try {
+            if ($item.ActionData.Type -eq "Framework") {
+                Remove-AppxPackage -Package $item.ActionData.Target -AllUsers -ErrorAction Stop
+            } elseif ($item.ActionData.Type -eq "Provisioned") {
+                Remove-AppxProvisionedPackage -Online -PackageName $item.ActionData.Target -ErrorAction Stop
+            }
+        } catch { }
     }
-    
-    foreach ($prov in $provisioned) { 
+    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
+    Write-GUI " -> Appx Garbage Collector finished its run."
+}
+
+function Invoke-RemoveBloatware {
+    param([Parameter(Mandatory=$true)][array]$SelectedItems)
+
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { Write-GUI " -> No items selected. Operation aborted."; return }
+    $current = 0
+
+    Stop-Process -Name "*Widget*" -Force -ErrorAction SilentlyContinue
+
+    foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
         
-        if (-not ($allPackages | Where-Object { $_.Name -eq $prov.DisplayName })) { 
-            try { 
-                Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop
-                Write-GUI " -> Deprovisioned base: $($prov.DisplayName)"
-                $cleanedCount++
-            } catch {}
-        } 
-    } 
-    
+        Write-GUI " -> Purging: $($item.UIDisplayName)"
+        
+        foreach ($pkg in $item.ActionData.Installed) {
+            try { Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop } catch { }
+        }
+        foreach ($prov in $item.ActionData.Provisioned) {
+            try { Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop } catch { }
+        }
+    }
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-    if ($cleanedCount -eq 0) { Write-GUI " -> No orphaned frameworks found. System clean." }
+    Write-GUI " -> Aggressive Bloatware Removal completed."
 }
 
 # --- 3. SYSTEM & NETWORK ---
@@ -110,22 +91,37 @@ function Optimize-Network { $adapters = Get-WmiObject Win32_NetworkAdapterConfig
 
 # --- 4. SERVICES & TASKS ---
 function Disable-TelemetryTasks { $tasksToDisable = @("\Microsoft\Windows\Customer Experience Improvement Program\*", "\Microsoft\Windows\Feedback\*", "\Microsoft\Windows\PerformanceTrace\*", "\Microsoft\Windows\Windows Error Reporting\*", "\Microsoft\XblGameSave\*"); foreach ($t in $tasksToDisable) { $tasks = Get-ScheduledTask | Where-Object { $_.TaskPath -like $t }; foreach ($task in $tasks) { Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null } } }
-function Disable-ServicesLight { $servicesToDisable = @("wuqisvc", "whesvc", "MapsBroker", "RetailDemo", "PcaSvc", "DiagTrack", "edgeupdate", "edgeupdatem"); foreach ($service in $servicesToDisable) { $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$service"; if (Test-Path $regPath) { Set-ItemProperty -Path $regPath -Name "Start" -Value 4 -Type DWord -ErrorAction SilentlyContinue } } }
 
-function Disable-ServicesHeavy { 
-    $servicesToDisable = @("wuqisvc", "whesvc", "MapsBroker", "RetailDemo", "PcaSvc", "DiagTrack", "edgeupdate", "edgeupdatem", "InventorySvc", "CDPSvc", "lfsvc", "SysMain", "WSLService", "WSAIFabricSvc", "Spooler", "PrintNotify", "Fax", "TermService", "RemoteRegistry", "WbioSrvc", "SensorDataService", "SensorService", "SensrSvc", "PhoneSvc", "icssvc", "WwanSvc", "WSearch", "CscService", "SharedAccess", "dmwappushservice", "wermgr")
-    
-    $servicesToManual = @("XblAuthManager", "XblGameSave", "XboxNetApiSvc", "XboxGipSvc", "FrameServer", "FrameServerMonitor")
-    
-    foreach ($service in $servicesToDisable) { 
-        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$service"
-        if (Test-Path $regPath) { Set-ItemProperty -Path $regPath -Name "Start" -Value 4 -Type DWord -ErrorAction SilentlyContinue } 
+function Invoke-ApplyServices {
+    param(
+        [Parameter(Mandatory=$true)][array]$SelectedItems,
+        [Parameter(Mandatory=$true)][string]$ProfileName
+    )
+
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { Write-GUI " -> All target services are already optimized."; return }
+    $current = 0
+
+    foreach ($item in $SelectedItems) {
+        $current++
+        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
+        
+        Write-GUI " -> Configuring: $($item.UIDisplayName)"
+        $svc = $item.ActionData
+        
+        try {
+            # Zatrzymanie usługi w locie (jeśli to możliwe)
+            Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
+            
+            # Wymuszenie startu przez Rejestr (niezawodne)
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)" -Name "Start" -Value $svc.ExpectedStart -Type DWord -ErrorAction Stop
+        } catch {
+            Write-GUI "    [!] Failed to modify service: $($svc.Name)"
+        }
     }
     
-    foreach ($service in $servicesToManual) { 
-        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$service"
-        if (Test-Path $regPath) { Set-ItemProperty -Path $regPath -Name "Start" -Value 3 -Type DWord -ErrorAction SilentlyContinue } 
-    }
+    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
+    Write-GUI " -> $ProfileName services enforcement completed."
 }
 
 function Force-CleanStartMenu { 
@@ -142,13 +138,42 @@ function Optimize-WinSXS { Start-Process -FilePath "cmd.exe" -ArgumentList "/c t
 function Check-SystemIntegrity { Start-Process -FilePath "cmd.exe" -ArgumentList "/c title System Scan & color 0A & echo RestoreHealth... & dism /online /cleanup-image /restorehealth & echo. & echo SFC Scanning... & sfc /scannow & echo. & pause >nul" -Wait }
 
 # --- 6. SYSTEM REGISTRY ---
-function Apply-RegTaskbar { Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarAl" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowSecondsInSystemClock" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_Layout" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings" "TaskbarEndTask" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings" "IsDynamicSearchBoxEnabled" 0; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" "HideTaskViewButton" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" "HideRecommendedSection" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" "NoRecentDocsHistory" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" "AllowNewsAndInterests" 0; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Chat" "ChatIcon" 3 }
-function Apply-RegExplorer { Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu" "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LaunchTo" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Hidden" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideFileExt" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "SeparateProcess" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "NavPaneExpandToCurrentFolder" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowCloudFilesInQuickAccess" 0; Set-RegKey "Registry::HKEY_CLASSES_ROOT\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}" "System.IsPinnedToNameSpaceTree" 0; Set-RegKey "Registry::HKEY_CLASSES_ROOT\Wow6432Node\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}" "System.IsPinnedToNameSpaceTree" 0; Set-RegKey "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" "" $null "String"; Set-RegKey "HKCU:\Control Panel\Desktop" "MenuShowDelay" "50" "String" }
-function Apply-RegAnnoyances { Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" "NoDriveTypeAutoRun" 255; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers" "DisableAutoplay" 1; Set-RegKey "HKCU:\Control Panel\Accessibility\StickyKeys" "Flags" "506" "String"; Set-RegKey "HKCU:\Control Panel\Accessibility\Keyboard Response" "Flags" "122" "String"; Set-RegKey "HKCU:\Control Panel\Accessibility\ToggleKeys" "Flags" "58" "String" }
-function Apply-RegPrivacy { Write-GUI "Applying hard privacy policies..."; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "AllowTelemetry" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" "GlobalUserDisabled" 1; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 0; Set-RegKey "HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy" "HasAccepted" 0; Set-RegKey "HKCU:\Software\Microsoft\Input\TIPC" "Enabled" 0; Set-RegKey "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitInkCollection" 1; Set-RegKey "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitTextCollection" 1; Set-RegKey "HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore" "HarvestContacts" 0; Set-RegKey "HKCU:\Software\Microsoft\Personalization\Settings" "AcceptedPrivacyPolicy" 0; Set-RegKey "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 0; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" "PublishUserActivities" 0; Set-RegKey "HKCU:\Software\Microsoft\Siuf\Rules" "NumberOfSIUFInPeriod" 0; $cdm = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; Set-RegKey $cdm "OemPreInstalledAppsEnabled" 0; Set-RegKey $cdm "PreInstalledAppsEnabled" 0; Set-RegKey $cdm "SilentInstalledAppsEnabled" 0; Set-RegKey $cdm "ContentDeliveryAllowed" 0; Set-RegKey $cdm "FeatureManagementEnabled" 0; Set-RegKey $cdm "PreInstalledAppsEverEnabled" 0; Set-RegKey $cdm "SoftLandingEnabled" 0; Set-RegKey $cdm "SubscribedContentEnabled" 0; Set-RegKey $cdm "SystemPaneSuggestionsEnabled" 0; Set-RegKey $cdm "SubscribedContent-310093Enabled" 0; Set-RegKey $cdm "SubscribedContent-338388Enabled" 0; Set-RegKey $cdm "SubscribedContent-338389Enabled" 0; Set-RegKey $cdm "SubscribedContent-338393Enabled" 0; Set-RegKey $cdm "SubscribedContent-353694Enabled" 0; Set-RegKey $cdm "SubscribedContent-353696Enabled" 0; Remove-Item -Path "$cdm\Subscriptions" -Recurse -ErrorAction SilentlyContinue; Remove-Item -Path "$cdm\SuggestedApps" -Recurse -ErrorAction SilentlyContinue; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableConsumerAccountStateContent" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableCloudOptimizedContent" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\PushToInstall" "DisablePushToInstall" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\MRT" "DontOfferThroughWUAU" 1; Set-MpPreference -SubmitSamplesConsent 2 -ErrorAction SilentlyContinue; [Environment]::SetEnvironmentVariable('POWERSHELL_TELEMETRY_OPTOUT', '1', 'Machine'); $edgeKeys = @("StartupBoostEnabled", "BackgroundModeEnabled", "CreateDesktopShortcutDefault", "PersonalizationReportingEnabled", "ShowRecommendationsEnabled", "UserFeedbackAllowed", "AlternateErrorPagesEnabled", "EdgeCollectionsEnabled", "EdgeShoppingAssistantEnabled", "MicrosoftEdgeInsiderPromotionEnabled", "ShowMicrosoftRewards", "WebWidgetAllowed", "DiagnosticData", "EdgeAssetDeliveryServiceEnabled", "WalletDonationEnabled", "DefaultBrowserSettingsCampaignEnabled"); foreach ($k in $edgeKeys) { Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Edge" $k 0 }; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Edge" "HideFirstRunExperience" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Edge" "ConfigureDoNotTrack" 1; $privacyKeys = @("LetAppsActivateWithVoice", "LetAppsAccessNotifications", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessRadios", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar", "LetAppsAccessAccountInfo"); foreach ($key in $privacyKeys) { Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" $key 2 }; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" "LetAppsAccessCamera" 0; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" "LetAppsAccessMicrophone" 0 }
-function Apply-RegSystemBoot { Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive" "DisableFileSyncNGSC" 1; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PreviewBuilds" "AllowBuildPreview" 0; Set-RegKey "HKLM:\System\CurrentControlSet\Control\Terminal Server" "fDenyTSConnections" 1; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Services\WSearch" "Start" 4; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 0; Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" "verbosestatus" 1; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" "DisableWpbtExecution" 1 }
-function Apply-RegMouse { Set-RegKey "HKCU:\Control Panel\Mouse" "MouseSpeed" "0" "String"; Set-RegKey "HKCU:\Control Panel\Mouse" "MouseThreshold1" "0" "String"; Set-RegKey "HKCU:\Control Panel\Mouse" "MouseThreshold2" "0" "String" }
-function Apply-RegGaming { Set-RegKey "HKLM:\SOFTWARE\Microsoft\PolicyManager\default\ApplicationManagement\AllowGameDVR" "value" 0; Set-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" "AllowGameDVR" 0; Set-RegKey "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0; Set-RegKey "HKCU:\System\GameConfigStore" "GameDVR_FSEBehavior" 2; Set-RegKey "HKCU:\System\GameConfigStore" "GameDVR_FSEBehaviorMode" 2; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode" 2; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" "DisablePagingExecutive" 1; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" "Enabled" 0; Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "NetworkThrottlingIndex" 4294967295; Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "SystemResponsiveness" 0; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" "Win32PrioritySeparation" 40; Set-RegKey "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" "PowerThrottlingOff" 1; Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" "GPU Priority" 8; Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" "Priority" 6; Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" "Scheduling Category" "High" "String"; Set-RegKey "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" "SFIO Priority" "High" "String" }
+function Invoke-ApplyRegistry {
+    param(
+        [Parameter(Mandatory=$true)][array]$SelectedItems,
+        [Parameter(Mandatory=$true)][string]$CategoryName
+    )
+
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { Write-GUI " -> No tweaks selected."; return }
+    $current = 0
+
+    foreach ($item in $SelectedItems) {
+        $current++
+        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
+        
+        # Wyświetlamy w logu przyjazną, edukacyjną nazwę
+        Write-GUI " -> Enforcing: $($item.UIDisplayName)"
+        $reg = $item.ActionData
+        
+        try {
+            if (-not (Test-Path $reg.Path)) { 
+                New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null 
+            }
+            
+            if ($reg.Expected -eq "" -and $reg.Type -eq "String") { 
+                Set-ItemProperty -Path $reg.Path -Name $reg.Name -Value "" -Type String -Force -ErrorAction Stop | Out-Null 
+            } else { 
+                Set-ItemProperty -Path $reg.Path -Name $reg.Name -Value $reg.Expected -Type $reg.Type -Force -ErrorAction Stop | Out-Null 
+            }
+        } catch {
+            Write-GUI "    [!] Failed to set key (Permissions/Lock): $($reg.Name)"
+        }
+    }
+    
+    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
+    Write-GUI " -> $CategoryName registry modifications completed."
+}
 
 # --- 7. UTILITIES & INSPECTION ---
 function Show-AppxGrid { Write-GUI "Generating Appx table..."; $selected = Get-AppxPackage -AllUsers | Select-Object Name, PackageFullName, IsFramework, Status | Out-GridView -Title "Select packages to REMOVE (Ctrl+Click to select, then click OK)" -PassThru; if ($selected) { foreach ($app in $selected) { Write-GUI "Removing: $($app.Name)"; Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction SilentlyContinue } } }
@@ -163,3 +188,39 @@ function Open-ClassicNet { Start-Process "ncpa.cpl" }
 function Open-ClassicApps { Start-Process "appwiz.cpl" }
 function Open-ClassicSound { Start-Process "mmsys.cpl" }
 function Open-ClassicPrinters { Start-Process "explorer.exe" -ArgumentList "shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{A8A91A66-3A7D-4424-8D24-04E180695C7A}" }
+
+function Invoke-Rescue {
+    param([Parameter(Mandatory=$true)][array]$SelectedItems)
+    
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { Write-GUI " -> System is fully at factory defaults."; return }
+    $current = 0
+
+    foreach ($item in $SelectedItems) {
+        $current++
+        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
+        
+        Write-GUI " -> Restoring: $($item.UIDisplayName)"
+        $data = $item.ActionData
+        
+        try {
+            if ($data.Type -eq "DeleteKey") {
+                if (Test-Path $data.Path) { Remove-Item -Path $data.Path -Recurse -Force -ErrorAction Stop }
+            } elseif ($data.Type -eq "Delete") {
+                if (Test-Path $data.Path) { Remove-ItemProperty -Path $data.Path -Name $data.Name -ErrorAction Stop }
+            } elseif ($data.ExpectedStart) {
+                # To jest usługa
+                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($data.Name)" -Name "Start" -Value $data.ExpectedStart -Type DWord -ErrorAction Stop
+            } else {
+                # To jest standardowe nadpisanie wartości fabrycznej
+                if (-not (Test-Path $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
+                Set-ItemProperty -Path $data.Path -Name $data.Name -Value $data.DefaultValue -Type $data.Type -Force -ErrorAction Stop | Out-Null
+            }
+        } catch { 
+            Write-GUI "    [!] Failed to restore item (Permissions/Lock)." 
+        }
+    }
+    
+    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
+    Write-GUI " -> Rescue operations completed. System restart is highly recommended."
+}

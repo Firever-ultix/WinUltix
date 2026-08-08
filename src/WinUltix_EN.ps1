@@ -1,15 +1,96 @@
 ﻿# ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT (EN)
 # ==========================================
-$Global:AppVersion = "v1.1.0"
+$Global:AppVersion = "v2.0.0"
 
 # Loading the main engine, audit, and rescue modules
 . "$PSScriptRoot\Optimizer_Core_EN.ps1"
 . "$PSScriptRoot\Optimizer_Audit_EN.ps1"
-. "$PSScriptRoot\Optimizer_Restore_EN.ps1"
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+function Show-ActionModal {
+    param (
+        [Parameter(Mandatory=$true)][string]$Title,
+        [Parameter(Mandatory=$true)][string]$Description,
+        [Parameter(Mandatory=$true)][array]$AuditResults
+    )
+    $modal = New-Object System.Windows.Forms.Form
+    $modal.Text = $Title
+    # Zwiększony rozmiar startowy
+    $modal.Size = New-Object System.Drawing.Size(750, 650) 
+    $modal.StartPosition = "CenterParent"
+    # Sizable pozwala na dowolne rozciąganie okna myszką
+    $modal.FormBorderStyle = "Sizable" 
+    $modal.MaximizeBox = $true
+    $modal.MinimizeBox = $false
+    $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+    $modal.ForeColor = [System.Drawing.Color]::White
+
+    $lblDesc = New-Object System.Windows.Forms.Label
+    $lblDesc.Text = $Description
+    $lblDesc.Location = New-Object System.Drawing.Point(15, 15)
+    $lblDesc.Size = New-Object System.Drawing.Size(700, 40)
+    $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $lblDesc.Anchor = 'Top, Left, Right'
+    
+    $chkList = New-Object System.Windows.Forms.CheckedListBox
+    $chkList.Location = New-Object System.Drawing.Point(15, 60)
+    $chkList.Size = New-Object System.Drawing.Size(700, 480)
+    $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $chkList.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $chkList.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $chkList.CheckOnClick = $false
+    # Magia WinForms: Lista rośnie razem z oknem
+    $chkList.Anchor = 'Top, Bottom, Left, Right' 
+    
+    if ($null -ne $AuditResults -and $AuditResults.Count -gt 0) {
+        foreach ($item in $AuditResults) {
+            if ($item.IsDetected) {
+                [void]$chkList.Items.Add("[ DETECTED ]  " + $item.UIDisplayName, $true)
+            } else {
+                # Zmieniony tekst z CLEAN na OPTIMIZED
+                [void]$chkList.Items.Add("[ OPTIMIZED ] " + $item.UIDisplayName, $false)
+            }
+        }
+    } else {
+        [void]$chkList.Items.Add("No data returned from audit scanner.", $false)
+    }
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Text = "Execute Selected"
+    $btnApply.Location = New-Object System.Drawing.Point(15, 555)
+    $btnApply.Size = New-Object System.Drawing.Size(340, 35)
+    $btnApply.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
+    $btnApply.FlatStyle = "Flat"
+    $btnApply.DialogResult = "OK"
+    # Przycisk przyklejony do lewego dolnego rogu
+    $btnApply.Anchor = 'Bottom, Left'
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.Location = New-Object System.Drawing.Point(375, 555)
+    $btnCancel.Size = New-Object System.Drawing.Size(340, 35)
+    $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = "Cancel"
+    # Przycisk przyklejony do prawego dolnego rogu
+    $btnCancel.Anchor = 'Bottom, Right'
+
+    $modal.Controls.AddRange(@($lblDesc, $chkList, $btnApply, $btnCancel))
+    $modal.AcceptButton = $btnApply
+    $modal.CancelButton = $btnCancel
+
+    $result = $modal.ShowDialog()
+    if ($result -eq "OK") {
+        $selectedItems = @()
+        for ($i = 0; $i -lt $chkList.Items.Count; $i++) {
+            if ($chkList.GetItemChecked($i)) { $selectedItems += $AuditResults[$i] }
+        }
+        return $selectedItems
+    } else { return $null }
+}
 
 # ==========================================
 # MAIN APPLICATION WINDOW
@@ -19,6 +100,8 @@ $form.Text = "WinUltix Pro - Ultimate System Toolkit $AppVersion"
 $form.Size = New-Object System.Drawing.Size(1200, 800)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
 
 $descBox = New-Object System.Windows.Forms.TextBox
 $descBox.Multiline = $true; $descBox.Location = New-Object System.Drawing.Point(440, 20); 
@@ -87,9 +170,8 @@ $btnRegMouse = New-Object System.Windows.Forms.Button; $btnRegMouse.Text = "Hard
 $btnAudMouse = New-Object System.Windows.Forms.Button; $btnAudMouse.Text = "?"; $btnAudMouse.Location = New-Object System.Drawing.Point(345, 280); $btnAudMouse.Size = New-Object System.Drawing.Size(40, 40); $btnAudMouse.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 100, 150); $btnAudMouse.ForeColor = [System.Drawing.Color]::White; $btnAudMouse.FlatStyle = "Flat"
 $btnRegGaming = New-Object System.Windows.Forms.Button; $btnRegGaming.Text = "Hardware & Gaming (Extreme)"; $btnRegGaming.Location = New-Object System.Drawing.Point(15, 330); $btnRegGaming.Size = New-Object System.Drawing.Size(320, 40); $btnRegGaming.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60); $btnRegGaming.ForeColor = [System.Drawing.Color]::White; $btnRegGaming.FlatStyle = "Flat"
 $btnAudGaming = New-Object System.Windows.Forms.Button; $btnAudGaming.Text = "?"; $btnAudGaming.Location = New-Object System.Drawing.Point(345, 330); $btnAudGaming.Size = New-Object System.Drawing.Size(40, 40); $btnAudGaming.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60); $btnAudGaming.ForeColor = [System.Drawing.Color]::White; $btnAudGaming.FlatStyle = "Flat"
-$lblRescueReg = New-Object System.Windows.Forms.Label; $lblRescueReg.Text = "--- RESCUE OPTIONS ---"; $lblRescueReg.Location = New-Object System.Drawing.Point(15, 420); $lblRescueReg.Size = New-Object System.Drawing.Size(370, 20); $lblRescueReg.ForeColor = [System.Drawing.Color]::DarkOrange
-$btnRestoreReg = New-Object System.Windows.Forms.Button; $btnRestoreReg.Text = "Revert Changes & Restore Default Registry"; $btnRestoreReg.Location = New-Object System.Drawing.Point(15, 445); $btnRestoreReg.Size = New-Object System.Drawing.Size(370, 40); $btnRestoreReg.BackColor = [System.Drawing.Color]::FromArgb(255, 100, 60, 20); $btnRestoreReg.ForeColor = [System.Drawing.Color]::White; $btnRestoreReg.FlatStyle = "Flat"
-$tabReg.Controls.AddRange(@($btnRegTaskbar, $btnAudTaskbar, $btnRegExplorer, $btnAudExplorer, $btnRegAnnoyances, $btnAudAnnoyances, $btnRegPrivacy, $btnAudPrivacy, $btnRegSystemBoot, $btnAudSystemBoot, $btnRegMouse, $btnAudMouse, $btnRegGaming, $btnAudGaming, $lblRescueReg, $btnRestoreReg))
+
+$tabReg.Controls.AddRange(@($btnRegTaskbar, $btnAudTaskbar, $btnRegExplorer, $btnAudExplorer, $btnRegAnnoyances, $btnAudAnnoyances, $btnRegPrivacy, $btnAudPrivacy, $btnRegSystemBoot, $btnAudSystemBoot, $btnRegMouse, $btnAudMouse, $btnRegGaming, $btnAudGaming))
 
 # Z4: Services
 $btnTelemetry = New-Object System.Windows.Forms.Button; $btnTelemetry.Text = "Disable Telemetry Tasks (Scheduler)"; $btnTelemetry.Location = New-Object System.Drawing.Point(15, 20); $btnTelemetry.Size = New-Object System.Drawing.Size(320, 40); $btnTelemetry.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60); $btnTelemetry.ForeColor = [System.Drawing.Color]::White; $btnTelemetry.FlatStyle = "Flat"
@@ -104,9 +186,7 @@ $btnSvcLight = New-Object System.Windows.Forms.Button; $btnSvcLight.Text = "Back
 $btnAudSvcLight = New-Object System.Windows.Forms.Button; $btnAudSvcLight.Text = "?"; $btnAudSvcLight.Location = New-Object System.Drawing.Point(345, 230); $btnAudSvcLight.Size = New-Object System.Drawing.Size(40, 40); $btnAudSvcLight.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80); $btnAudSvcLight.ForeColor = [System.Drawing.Color]::White; $btnAudSvcLight.FlatStyle = "Flat"
 $btnSvcHeavy = New-Object System.Windows.Forms.Button; $btnSvcHeavy.Text = "Background Services: GAMING PROFILE"; $btnSvcHeavy.Location = New-Object System.Drawing.Point(15, 280); $btnSvcHeavy.Size = New-Object System.Drawing.Size(320, 40); $btnSvcHeavy.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60); $btnSvcHeavy.ForeColor = [System.Drawing.Color]::White; $btnSvcHeavy.FlatStyle = "Flat"
 $btnAudSvcHeavy = New-Object System.Windows.Forms.Button; $btnAudSvcHeavy.Text = "?"; $btnAudSvcHeavy.Location = New-Object System.Drawing.Point(345, 280); $btnAudSvcHeavy.Size = New-Object System.Drawing.Size(40, 40); $btnAudSvcHeavy.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80); $btnAudSvcHeavy.ForeColor = [System.Drawing.Color]::White; $btnAudSvcHeavy.FlatStyle = "Flat"
-$lblRescueSvc = New-Object System.Windows.Forms.Label; $lblRescueSvc.Text = "--- RESCUE OPTIONS ---"; $lblRescueSvc.Location = New-Object System.Drawing.Point(15, 420); $lblRescueSvc.Size = New-Object System.Drawing.Size(370, 20); $lblRescueSvc.ForeColor = [System.Drawing.Color]::DarkOrange
-$btnRestoreSvc = New-Object System.Windows.Forms.Button; $btnRestoreSvc.Text = "Revert Restrictions & Restore Default Services"; $btnRestoreSvc.Location = New-Object System.Drawing.Point(15, 445); $btnRestoreSvc.Size = New-Object System.Drawing.Size(370, 40); $btnRestoreSvc.BackColor = [System.Drawing.Color]::FromArgb(255, 100, 60, 20); $btnRestoreSvc.ForeColor = [System.Drawing.Color]::White; $btnRestoreSvc.FlatStyle = "Flat"
-$tabServices.Controls.AddRange(@($btnTelemetry, $btnAudTelemetry, $btnStartMenu, $btnAudStartMenu, $btnPower, $btnAudPower, $btnNetwork, $btnAudNetwork, $btnSvcLight, $btnAudSvcLight, $btnSvcHeavy, $btnAudSvcHeavy, $lblRescueSvc, $btnRestoreSvc))
+$tabServices.Controls.AddRange(@($btnTelemetry, $btnAudTelemetry, $btnStartMenu, $btnAudStartMenu, $btnPower, $btnAudPower, $btnNetwork, $btnAudNetwork, $btnSvcLight, $btnAudSvcLight, $btnSvcHeavy, $btnAudSvcHeavy))
 
 # Z5: Utilities
 $lblInspect = New-Object System.Windows.Forms.Label; $lblInspect.Text = "Interactive Inspection Tables (Ctrl+Click to remove)"; $lblInspect.Location = New-Object System.Drawing.Point(15, 15); $lblInspect.Size = New-Object System.Drawing.Size(370, 20); $lblInspect.ForeColor = [System.Drawing.Color]::DarkGray
@@ -168,6 +248,28 @@ $tabWinSXS.Controls.AddRange(@($btnCheckSystem, $btnResetBase))
 $tabControl.TabPages.AddRange(@($tabClean, $tabApps, $tabReg, $tabServices, $tabUtil, $tabWinSXS))
 
 # MAIN CONTROLS
+
+# --- GLOBAL RESCUE BUTTON (Zawsze widoczny pod zakładkami) ---
+$btnRescue = New-Object System.Windows.Forms.Button
+$btnRescue.Text = "--- REVERT REGISTRY AND SERVICE CHANGES ---"
+$btnRescue.Location = New-Object System.Drawing.Point(10, 595)
+$btnRescue.Size = New-Object System.Drawing.Size(350, 40)
+$btnRescue.BackColor = [System.Drawing.Color]::FromArgb(255, 100, 40, 20) # Nieco bardziej czerwony/ostrzegawczy
+$btnRescue.ForeColor = [System.Drawing.Color]::White
+$btnRescue.FlatStyle = "Flat"
+
+$form.Controls.Add($btnRescue)
+
+$audRescue = New-Object System.Windows.Forms.Button
+$audRescue.Text = "?"
+$audRescue.Location = New-Object System.Drawing.Point(370, 595)
+$audRescue.Size = New-Object System.Drawing.Size(50, 40)
+$audRescue.BackColor = [System.Drawing.Color]::FromArgb(255, 100, 40, 20)
+$audRescue.ForeColor = [System.Drawing.Color]::White
+$audRescue.FlatStyle = "Flat"
+
+$form.Controls.Add($audRescue)
+
 $btnClearLog = New-Object System.Windows.Forms.Button; $btnClearLog.Text = "[ Clear Log ]"; $btnClearLog.Location = New-Object System.Drawing.Point(1050, 725); $btnClearLog.Size = New-Object System.Drawing.Size(110, 25); $btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45); $btnClearLog.ForeColor = [System.Drawing.Color]::LightGray; $btnClearLog.FlatStyle = "Flat"; $btnClearLog.Add_Click({ $global:LastLog = "--- WINULTIX PRO ---`r`n`r`nReady for deployment."; $infoBox.Text = $global:LastLog })
 $form.Controls.Add($btnClearLog)
 
@@ -198,7 +300,7 @@ $btnCredits.Add_Click({
     # Tworzymy dedykowane okienko About
     $aboutForm = New-Object System.Windows.Forms.Form
     $aboutForm.Text = "About WinUltix Pro"
-    $aboutForm.Size = New-Object System.Drawing.Size(380, 240)
+    $aboutForm.Size = New-Object System.Drawing.Size(380, 265)
     $aboutForm.StartPosition = "CenterParent"
     $aboutForm.FormBorderStyle = "FixedDialog"
     $aboutForm.MaximizeBox = $false
@@ -224,18 +326,30 @@ $btnCredits.Add_Click({
     $linkGit.Add_LinkClicked({ 
         Start-Process "https://github.com/Firever-ultix/WinUltix" -ErrorAction SilentlyContinue 
     })
+	
+	# Klikalny link
+    $linkcoffee = New-Object System.Windows.Forms.LinkLabel
+    $linkcoffee.Location = New-Object System.Drawing.Point(20, 140)
+    $linkcoffee.Size = New-Object System.Drawing.Size(340, 20)
+    $linkcoffee.LinkColor = [System.Drawing.Color]::LightSkyBlue
+    $linkcoffee.ActiveLinkColor = [System.Drawing.Color]::Cyan
+    $linkcoffee.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $linkcoffee.Text = "https://buymeacoffee.com/firever"
+    $linkcoffee.Add_LinkClicked({ 
+        Start-Process "https://buymeacoffee.com/firever" -ErrorAction SilentlyContinue 
+    })
 
     # Przycisk zamykający
     $btnAboutOK = New-Object System.Windows.Forms.Button
     $btnAboutOK.Text = "Close"
-    $btnAboutOK.Location = New-Object System.Drawing.Point(140, 155)
+    $btnAboutOK.Location = New-Object System.Drawing.Point(140, 185)
     $btnAboutOK.Size = New-Object System.Drawing.Size(80, 25)
     $btnAboutOK.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnAboutOK.ForeColor = [System.Drawing.Color]::White
     $btnAboutOK.FlatStyle = "Flat"
     $btnAboutOK.Add_Click({ $aboutForm.Close() })
 
-    $aboutForm.Controls.AddRange(@($lblAbout, $linkGit, $btnAboutOK))
+    $aboutForm.Controls.AddRange(@($lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
     [void]$aboutForm.ShowDialog()
 })
 $form.Controls.Add($btnCredits)
@@ -254,12 +368,100 @@ $btnRecycle.Add_MouseEnter({ Show-Description "Hard reset of the Recycle Bin. Ta
 $btnAudRecycle.Add_MouseEnter({ Show-Description "AUDIT: Scans corrupted and standard Recycle Bins across all physical drives." }); $btnAudRecycle.Add_Click({ Audit-RecycleBin; Write-GUI "" })
 $btnOneDrive.Add_MouseEnter({ Show-Description "Completely uninstalls OneDrive, burns it from the Registry, and physically deletes folders across all profiles." }); $btnOneDrive.Add_Click({ Remove-OneDrive; Write-GUI "Completed."; Write-GUI "" })
 $btnAudOneDrive.Add_MouseEnter({ Show-Description "AUDIT: Scans for active OneDrive installers and startup keys." }); $btnAudOneDrive.Add_Click({ Audit-OneDrive; Write-GUI "" })
-$btnCaps.Add_MouseEnter({ Show-Description "Removes optional built-in Features on Demand (FOD)." }); $btnCaps.Add_Click({ Remove-WindowsCapabilities; Write-GUI "Completed."; Write-GUI "" })
-$btnAudCaps.Add_MouseEnter({ Show-Description "AUDIT: Verifies installed unnecessary Capabilities (FOD)." }); $btnAudCaps.Add_Click({ Audit-Capabilities; Write-GUI "" })
-$btnBloat.Add_MouseEnter({ Show-Description "Massive, aggressive removal of junk Appx applications from the system." }); $btnBloat.Add_Click({ Remove-Bloatware; Write-GUI "Completed."; Write-GUI "" })
-$btnAudBloat.Add_MouseEnter({ Show-Description "AUDIT: Scans the system for the full list of target Bloatware." }); $btnAudBloat.Add_Click({ Audit-Bloatware; Write-GUI "" })
-$btnGC.Add_MouseEnter({ Show-Description "Intelligent detective. Scans application dependencies and removes orphaned frameworks." }); $btnGC.Add_Click({ Run-AppxGarbageCollector; Write-GUI "Completed."; Write-GUI "" })
-$btnAudGC.Add_MouseEnter({ Show-Description "AUDIT: Scans and lists all orphaned frameworks that will be removed." }); $btnAudGC.Add_Click({ Audit-GarbageCollector; Write-GUI "" })
+
+$btnAudBloat.Add_MouseEnter({ Show-Description "AUDIT: Scans the system for target Appx Bloatware and prints a report." })
+$btnAudBloat.Add_Click({ 
+    Write-GUI "--- AUDIT: Bloatware (Appx) ---"
+    Write-GUI "Scanning packages in memory, please wait..."
+    $state = Get-BloatwareState
+    $detected = $state | Where-Object { $_.IsDetected -eq $true }
+    if ($detected.Count -gt 0) {
+        foreach ($d in $detected) { Write-GUI "  [!] Found: $($d.UIDisplayName)" }
+        Write-GUI "-> STATUS: $($detected.Count) junk apps detected."
+    } else {
+        Write-GUI "  [OK] System clean. No target Appx packages found."
+    }
+    Write-GUI "" 
+})
+
+$btnBloat.Add_MouseEnter({ Show-Description "Aggressive, interactive removal of junk Appx applications from the system." })
+$btnBloat.Add_Click({ 
+    Write-GUI "Initializing Appx Scanner..."
+    $auditData = Get-BloatwareState
+    
+    $selectedData = Show-ActionModal -Title "WinUltix - Bloatware Removal" -Description "Select components to remove. Detected items are checked by default." -AuditResults $auditData
+    
+    if ($null -ne $selectedData) {
+        Write-GUI "Executing targeted Appx removal..."
+        Invoke-RemoveBloatware -SelectedItems $selectedData
+        Write-GUI ""
+    } else {
+        Write-GUI "Operation cancelled by user."
+        Write-GUI ""
+    }
+})
+
+$btnAudCaps.Add_MouseEnter({ Show-Description "AUDIT: Verifies installed unnecessary Capabilities (FOD)." })
+$btnAudCaps.Add_Click({
+    Write-GUI "--- AUDIT: Built-in FOD Features ---"
+    Write-GUI "Scanning built-in features, please wait..."
+    $state = Get-CapabilitiesState
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) {
+        foreach ($d in $detected) { Write-GUI "  [!] Found: $($d.UIDisplayName)" }
+    } else { Write-GUI "  [OK] Base image clean. Target features not detected." }
+    Write-GUI ""
+})
+
+$btnCaps.Add_MouseEnter({ Show-Description "Interactive removal of optional built-in Features on Demand (FOD)." })
+$btnCaps.Add_Click({
+    Write-GUI "Initializing Capabilities Scanner..."
+    $auditData = Get-CapabilitiesState
+    $selectedData = Show-ActionModal -Title "WinUltix - FOD Removal" -Description "Select features to remove. Detected items are checked by default." -AuditResults $auditData
+    
+    if ($null -ne $selectedData) {
+        Write-GUI "Executing FOD removal..."
+        Invoke-RemoveCapabilities -SelectedItems $selectedData
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+$btnAudGC.Add_MouseEnter({ Show-Description "AUDIT: Scans and lists all orphaned frameworks that will be removed." })
+$btnAudGC.Add_Click({
+    Write-GUI "--- AUDIT: Garbage Collector ---"
+    Write-GUI "Scanning application dependencies..."
+    $state = Get-GarbageCollectorState
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) {
+        foreach ($d in $detected) { Write-GUI "  [!] $($d.UIDisplayName)" }
+        Write-GUI "-> STATUS: $($detected.Count) obsolete packages ready for cleanup."
+    } else { Write-GUI "  [OK] System clean. No orphaned frameworks to remove." }
+    Write-GUI ""
+})
+
+$btnGC.Add_MouseEnter({ Show-Description "Intelligently scans application dependencies and removes orphaned frameworks." })
+$btnGC.Add_Click({
+    Write-GUI "Initializing Garbage Collector Scanner..."
+    $auditData = Get-GarbageCollectorState
+    $detected = $auditData | Where-Object { $_.IsDetected }
+    
+    # Przechwytujemy sytuację idealną jeszcze przed otwarciem Modala
+    if ($detected.Count -eq 0) {
+        Write-GUI "  [OK] System is perfectly clean! No orphaned components found."
+        Write-GUI "  -> Operation isn't needed."
+        Write-GUI ""
+        return
+    }
+
+    $selectedData = Show-ActionModal -Title "WinUltix - Garbage Collector" -Description "Select orphaned packages to remove." -AuditResults $auditData
+    
+    if ($null -ne $selectedData) {
+        Write-GUI "Executing Garbage Collection..."
+        Invoke-GarbageCollector -SelectedItems $selectedData
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled by user."; Write-GUI "" }
+})
+
 $btnTelemetry.Add_MouseEnter({ Show-Description "Paralyzes the Task Scheduler. Disables analytics, error reporting, Windows AI, and feedback. Severs telemetry from the OS core." }); $btnTelemetry.Add_Click({ Disable-TelemetryTasks; Write-GUI "Completed."; Write-GUI "" })
 $btnAudTelemetry.Add_MouseEnter({ Show-Description "AUDIT: Verifies if telemetry tasks are active in the scheduler." }); $btnAudTelemetry.Add_Click({ Audit-TelemetryTasks; Write-GUI "" })
 $btnStartMenu.Add_MouseEnter({ Show-Description "Wipes the internal Start Menu database (start2.bin) and removes MDM locks. This safely unpins all bloated tiles and gives you a fresh, fully customizable layout." }); $btnStartMenu.Add_Click({ Force-CleanStartMenu; Write-GUI "Completed."; Write-GUI "" })
@@ -268,28 +470,232 @@ $btnPower.Add_MouseEnter({ Show-Description "Disables the hibernation file, syst
 $btnAudPower.Add_MouseEnter({ Show-Description "AUDIT: Verifies power profile (hibernation, sleep state, and display)." }); $btnAudPower.Add_Click({ Audit-Power; Write-GUI "" })
 $btnNetwork.Add_MouseEnter({ Show-Description "Disables Nagle's algorithm on all network adapters, drastically reducing latency in games." }); $btnNetwork.Add_Click({ Optimize-Network; Write-GUI "Completed."; Write-GUI "" })
 $btnAudNetwork.Add_MouseEnter({ Show-Description "AUDIT: Verifies TCPNoDelay status on network adapters." }); $btnAudNetwork.Add_Click({ Audit-Network; Write-GUI "" })
-$btnSvcLight.Add_MouseEnter({ Show-Description "OFFICE PROFILE: Kills telemetry, leaving print services and indexing intact." }); $btnSvcLight.Add_Click({ Disable-ServicesLight; Write-GUI "Completed."; Write-GUI "" })
-$btnAudSvcLight.Add_MouseEnter({ Show-Description "AUDIT: Thoroughly verifies Office Profile services shutdown." }); $btnAudSvcLight.Add_Click({ Audit-ServicesLight; Write-GUI "" })
-$btnSvcHeavy.Add_MouseEnter({ Show-Description "GAMING PROFILE: Disables almost everything in the background, including print and cloud services." }); $btnSvcHeavy.Add_Click({ Disable-ServicesHeavy; Write-GUI "Completed."; Write-GUI "" })
-$btnAudSvcHeavy.Add_MouseEnter({ Show-Description "AUDIT: Thoroughly verifies Gaming Profile services shutdown." }); $btnAudSvcHeavy.Add_Click({ Audit-ServicesHeavy; Write-GUI "" })
-$btnRestoreSvc.Add_MouseEnter({ Show-Description "RESCUE: Lifts locks from system services and restores them to factory settings (Manual/Automatic). Use in case of system issues." }); $btnRestoreSvc.Add_Click({ Restore-ServicesLight; Write-GUI "Completed."; Write-GUI "" })
+
+# --- BINDING: Office Profile Services (Light) ---
+$btnAudSvcLight.Add_MouseEnter({ Show-Description "AUDIT: Verifies standard telemetry and background bloat services." })
+$btnAudSvcLight.Add_Click({
+    Write-GUI "--- AUDIT: Services (Office Profile) ---"
+    $state = Get-ServicesState_Light
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Disable: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Office Profile services are fully optimized." }
+    Write-GUI ""
+})
+
+$btnSvcLight.Add_MouseEnter({ Show-Description "OFFICE PROFILE: Kills telemetry and tracking, leaving print and network services intact." })
+$btnSvcLight.Add_Click({
+    $auditData = Get-ServicesState_Light
+    $selectedData = Show-ActionModal -Title "WinUltix - Office Services Profile" -Description "Select services to configure. Unoptimized services are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyServices -SelectedItems $selectedData -ProfileName "Office Profile"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: Gaming Profile Services (Heavy) ---
+$btnAudSvcHeavy.Add_MouseEnter({ Show-Description "AUDIT: Verifies heavy background services including indexer and print spooler." })
+$btnAudSvcHeavy.Add_Click({
+    Write-GUI "--- AUDIT: Services (Gaming Profile) ---"
+    $state = Get-ServicesState_Heavy
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Configure: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Gaming Profile services are fully optimized." }
+    Write-GUI ""
+})
+
+$btnSvcHeavy.Add_MouseEnter({ Show-Description "GAMING PROFILE: Disables almost everything in the background, including print spooler and file indexing." })
+$btnSvcHeavy.Add_Click({
+    $auditData = Get-ServicesState_Heavy
+    $selectedData = Show-ActionModal -Title "WinUltix - Gaming Services Profile" -Description "Select services to configure. Unoptimized services are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyServices -SelectedItems $selectedData -ProfileName "Gaming Profile"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
 $btnCheckSystem.Add_MouseEnter({ Show-Description "System First Aid: Scans the core Windows OS files for corruption and replaces damaged components with fresh copies downloaded directly from Microsoft servers (SFC & DISM)." }); $btnCheckSystem.Add_Click({ Check-SystemIntegrity; Write-GUI "Completed."; Write-GUI "" })
 $btnResetBase.Add_MouseEnter({ Show-Description "WinSXS Deep Clean: Permanently deletes superseded Windows Update backup files. Reclaims gigabytes of C: drive space, but you will NOT be able to uninstall previously applied Windows Updates." }); $btnResetBase.Add_Click({ Optimize-WinSXS; Write-GUI "Completed."; Write-GUI "" })
-$btnRegTaskbar.Add_MouseEnter({ Show-Description "Aligns the taskbar to the left, kills Bing assistants, and hides widgets." }); $btnRegTaskbar.Add_Click({ Apply-RegTaskbar; Write-GUI "Completed."; Write-GUI "" })
-$btnAudTaskbar.Add_MouseEnter({ Show-Description "AUDIT: Verifies taskbar alignment policy and Bing locks." }); $btnAudTaskbar.Add_Click({ Audit-RegTaskbar; Write-GUI "" })
-$btnRegExplorer.Add_MouseEnter({ Show-Description "Restores the full context menu, launches folder processes in isolation." }); $btnRegExplorer.Add_Click({ Apply-RegExplorer; Write-GUI "Completed."; Write-GUI "" })
-$btnAudExplorer.Add_MouseEnter({ Show-Description "AUDIT: Verifies the presence of the key enforcing the classic context menu." }); $btnAudExplorer.Add_Click({ Audit-RegExplorer; Write-GUI "" })
-$btnRegAnnoyances.Add_MouseEnter({ Show-Description "Deactivates AutoPlay and Sticky Keys shortcuts." }); $btnRegAnnoyances.Add_Click({ Apply-RegAnnoyances; Write-GUI "Completed."; Write-GUI "" })
-$btnAudAnnoyances.Add_MouseEnter({ Show-Description "AUDIT: Verifies AutoPlay and Sticky Keys blockade." }); $btnAudAnnoyances.Add_Click({ Audit-RegAnnoyances; Write-GUI "" })
-$btnRegPrivacy.Add_MouseEnter({ Show-Description "Blocks app access to history and enables GPO cutting off full telemetry. Blocks MS Store background execution." }); $btnRegPrivacy.Add_Click({ Apply-RegPrivacy; Write-GUI "Completed."; Write-GUI "" })
-$btnAudPrivacy.Add_MouseEnter({ Show-Description "AUDIT: Checks the registry for telemetry, Edge, and background execution blocks." }); $btnAudPrivacy.Add_Click({ Audit-RegPrivacy; Write-GUI "" })
-$btnRegSystemBoot.Add_MouseEnter({ Show-Description "Disables Fast Boot, OneDrive, RDP, and blocks software injections from BIOS/UEFI (WPBT)." }); $btnRegSystemBoot.Add_Click({ Apply-RegSystemBoot; Write-GUI "Completed."; Write-GUI "" })
-$btnAudSystemBoot.Add_MouseEnter({ Show-Description "AUDIT: Verifies kernel hibernation logic (Fast Boot), WPBT, and RDP." }); $btnAudSystemBoot.Add_Click({ Audit-RegSystemBoot; Write-GUI "" })
-$btnRegMouse.Add_MouseEnter({ Show-Description "Pure 1:1 input. Hard-disables 'Enhance pointer precision'." }); $btnRegMouse.Add_Click({ Apply-RegMouse; Write-GUI "Completed."; Write-GUI "" })
-$btnAudMouse.Add_MouseEnter({ Show-Description "AUDIT: Scans registry keys for system pointer acceleration." }); $btnAudMouse.Add_Click({ Audit-RegMouse; Write-GUI "" })
-$btnRegGaming.Add_MouseEnter({ Show-Description "Enforces MMCSS priorities, disables core isolation, enables HAGS." }); $btnRegGaming.Add_Click({ Apply-RegGaming; Write-GUI "Completed."; Write-GUI "" })
-$btnAudGaming.Add_MouseEnter({ Show-Description "AUDIT: Verifies MMCSS limits and HAGS acceleration." }); $btnAudGaming.Add_Click({ Audit-RegGaming; Write-GUI "" })
-$btnRestoreReg.Add_MouseEnter({ Show-Description "RESCUE: Reverts Registry modifications, including the removal of BIOS locks, Bing assistants, and the standard Win11 menu." }); $btnRestoreReg.Add_Click({ Restore-Registry; Write-GUI "Completed."; Write-GUI "" })
+
+# --- BINDING: Taskbar & Start Menu ---
+$btnAudTaskbar.Add_MouseEnter({ Show-Description "AUDIT: Verifies taskbar alignment policy, Start Menu layouts, and Bing locks." })
+$btnAudTaskbar.Add_Click({
+    Write-GUI "--- AUDIT: Taskbar & Start Menu ---"
+    $state = Get-RegState_Taskbar
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Taskbar is fully optimized." }
+    Write-GUI ""
+})
+
+$btnRegTaskbar.Add_MouseEnter({ Show-Description "Aligns the taskbar to the left, kills Bing assistants, and hides widgets." })
+$btnRegTaskbar.Add_Click({
+    $auditData = Get-RegState_Taskbar
+    $selectedData = Show-ActionModal -Title "WinUltix - Taskbar Tweaks" -Description "Select tweaks to apply. Unoptimized keys are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyRegistry -SelectedItems $selectedData -CategoryName "Taskbar"
+        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue # Opcjonalny restart powłoki
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: File Explorer ---
+$btnAudExplorer.Add_MouseEnter({ Show-Description "AUDIT: Verifies the presence of classic context menu and Explorer performance flags." })
+$btnAudExplorer.Add_Click({
+    Write-GUI "--- AUDIT: File Explorer ---"
+    $state = Get-RegState_Explorer
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Explorer is fully optimized." }
+    Write-GUI ""
+})
+
+$btnRegExplorer.Add_MouseEnter({ Show-Description "Restores the full context menu, launches folder processes in isolation." })
+$btnRegExplorer.Add_Click({
+    $auditData = Get-RegState_Explorer
+    $selectedData = Show-ActionModal -Title "WinUltix - Explorer Tweaks" -Description "Select tweaks to apply. Unoptimized keys are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyRegistry -SelectedItems $selectedData -CategoryName "Explorer"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: OS Annoyances ---
+$btnAudAnnoyances.Add_MouseEnter({ Show-Description "AUDIT: Verifies AutoPlay and Sticky Keys blockade." })
+$btnAudAnnoyances.Add_Click({
+    Write-GUI "--- AUDIT: OS Annoyances ---"
+    $state = Get-RegState_Annoyances
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Annoyances are blocked." }
+    Write-GUI ""
+})
+
+$btnRegAnnoyances.Add_MouseEnter({ Show-Description "Deactivates AutoPlay and Accessibility shortcuts (Sticky Keys)." })
+$btnRegAnnoyances.Add_Click({
+    $auditData = Get-RegState_Annoyances
+    $selectedData = Show-ActionModal -Title "WinUltix - OS Annoyances" -Description "Select tweaks to apply. Unoptimized keys are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyRegistry -SelectedItems $selectedData -CategoryName "Annoyances"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: Privacy & Background Apps ---
+$btnAudPrivacy.Add_MouseEnter({ Show-Description "AUDIT: Checks the registry for telemetry, Edge, and background execution blocks." })
+$btnAudPrivacy.Add_Click({
+    Write-GUI "--- AUDIT: Privacy Policies ---"
+    $state = Get-RegState_Privacy
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Privacy policies are strict." }
+    Write-GUI ""
+})
+
+$btnRegPrivacy.Add_MouseEnter({ Show-Description "Blocks telemetry, background UWP apps execution, and limits Edge processes." })
+$btnRegPrivacy.Add_Click({
+    $auditData = Get-RegState_Privacy
+    $selectedData = Show-ActionModal -Title "WinUltix - Privacy Policies" -Description "Select tweaks to apply. Unoptimized keys are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyRegistry -SelectedItems $selectedData -CategoryName "Privacy"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: Boot & WPBT ---
+$btnAudSystemBoot.Add_MouseEnter({ Show-Description "AUDIT: Verifies kernel hibernation logic (Fast Boot), WPBT, and RDP." })
+$btnAudSystemBoot.Add_Click({
+    Write-GUI "--- AUDIT: Boot & WPBT ---"
+    $state = Get-RegState_SystemBoot
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Boot and Security logic is fully optimized." }
+    Write-GUI ""
+})
+
+$btnRegSystemBoot.Add_MouseEnter({ Show-Description "Disables Fast Boot, OneDrive, RDP, and blocks software injections from BIOS/UEFI (WPBT)." })
+$btnRegSystemBoot.Add_Click({
+    $auditData = Get-RegState_SystemBoot
+    $selectedData = Show-ActionModal -Title "WinUltix - Boot & Security" -Description "Select tweaks to apply. Unoptimized keys are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyRegistry -SelectedItems $selectedData -CategoryName "SystemBoot"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: Hardware & Gaming ---
+$btnAudGaming.Add_MouseEnter({ Show-Description "AUDIT: Verifies MMCSS limits, CPU priority, and HAGS acceleration." })
+$btnAudGaming.Add_Click({
+    Write-GUI "--- AUDIT: Hardware & Gaming ---"
+    $state = Get-RegState_Gaming
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Gaming features are strictly optimized." }
+    Write-GUI ""
+})
+
+$btnRegGaming.Add_MouseEnter({ Show-Description "Enforces MMCSS priorities, disables GameDVR, enabling maximum hardware performance." })
+$btnRegGaming.Add_Click({
+    $auditData = Get-RegState_Gaming
+    $selectedData = Show-ActionModal -Title "WinUltix - Extreme Gaming Profile" -Description "Select tweaks to apply. Unoptimized keys are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyRegistry -SelectedItems $selectedData -CategoryName "Gaming"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: Mouse Acceleration (Raw Input) ---
+$btnAudMouse.Add_MouseEnter({ Show-Description "AUDIT: Scans registry keys for system pointer acceleration." })
+$btnAudMouse.Add_Click({
+    Write-GUI "--- AUDIT: Mouse Acceleration ---"
+    $state = Get-RegState_Mouse
+    $detected = $state | Where-Object { $_.IsDetected }
+    if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Mouse acceleration is fully disabled (Raw Input active)." }
+    Write-GUI ""
+})
+
+$btnRegMouse.Add_MouseEnter({ Show-Description "Pure 1:1 input. Hard-disables 'Enhance pointer precision' to eliminate system smoothing." })
+$btnRegMouse.Add_Click({
+    $auditData = Get-RegState_Mouse
+    $selectedData = Show-ActionModal -Title "WinUltix - Raw Input Enforcer" -Description "Select tweaks to apply. Unoptimized keys are checked by default." -AuditResults $auditData
+    if ($null -ne $selectedData) {
+        Invoke-ApplyRegistry -SelectedItems $selectedData -CategoryName "Mouse"
+        Write-GUI ""
+    } else { Write-GUI "Operation cancelled."; Write-GUI "" }
+})
+
+# --- BINDING: INTERACTIVE RESCUE MODULE ---
+$audRescue.Add_MouseEnter({ Show-Description "AUDIT: Scans the system for modified tweaks and blocked services." })
+$audRescue.Add_Click({
+    Write-GUI "--- AUDIT: Rescue Module ---"
+    # Łączymy wyniki z rejestru i usług
+    $rReg = Get-RescueState_Registry
+    $rSvc = Get-RescueState_Services
+    $detected = ($rReg + $rSvc) | Where-Object { $_.IsDetected }
+    
+    if ($detected.Count -gt 0) { 
+        foreach ($d in $detected) { Write-GUI "  [!] Found Modified: $($d.UIDisplayName)" }
+        Write-GUI "-> STATUS: $($detected.Count) elements differ from factory defaults."
+    } else { 
+        Write-GUI "  [OK] System is entirely at factory defaults." 
+    }
+    Write-GUI ""
+})
+
+$btnRescue.Add_MouseEnter({ Show-Description "--- REVERT REGISTRY & SERVICE CHANGES ---" })
+$btnRescue.Add_Click({
+    Write-GUI "Scanning for active tweaks..."
+    $rReg = Get-RescueState_Registry
+    $rSvc = Get-RescueState_Services
+    $aggregatedData = $rReg + $rSvc
+    
+    # Przechwytujemy sytuację, w której system jest czysty
+    $detected = $aggregatedData | Where-Object { $_.IsDetected }
+    if ($detected.Count -eq 0) {
+        Write-GUI "  [OK] System is perfectly clean! No modifications detected."
+        Write-GUI ""
+        return
+    }
+    
+    # Puszczamy połączoną tablicę do Modala
+    $selectedData = Show-ActionModal -Title "WinUltix - Interactive Rescue" -Description "Select components to restore to factory defaults. Modified items are checked by default." -AuditResults $aggregatedData
+    
+    if ($null -ne $selectedData) {
+        Invoke-Rescue -SelectedItems $selectedData
+        Write-GUI ""
+    } else { Write-GUI "Rescue operation cancelled."; Write-GUI "" }
+})
 
 $btnUtilAppx.Add_MouseEnter({ Show-Description "Interactive Appx table. Use Ctrl+Click to remove selected apps." }); $btnUtilAppx.Add_Click({ Show-AppxGrid; Write-GUI "" })
 $btnUtilAppxProv.Add_MouseEnter({ Show-Description "Interactive Provisioned table. Use Ctrl+Click to deprovision installers." }); $btnUtilAppxProv.Add_Click({ Show-AppxProvGrid; Write-GUI "" })

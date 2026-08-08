@@ -17,7 +17,6 @@ if (-not (Test-Path $outDir)) {
 $sourceFiles = @(
     ".\src\Optimizer_Core_EN.ps1", 
     ".\src\Optimizer_Audit_EN.ps1", 
-    ".\src\Optimizer_Restore_EN.ps1", 
     ".\src\WinUltix_EN.ps1"
 )
 $outputFile = "$outDir\WinUltix_Monolith_EN.ps1"
