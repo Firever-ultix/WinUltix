@@ -5,19 +5,42 @@
 if (-not (Get-Command Write-GUI -ErrorAction SilentlyContinue)) { function Write-GUI { param([string]$Message) Write-Host $Message -ForegroundColor Cyan } }
 function Set-RegKey { param($Path, $Name, $Value, $Type="DWord"); if (-not (Test-Path $Path)) { New-Item -Path $Path -Force -ErrorAction SilentlyContinue | Out-Null }; if ($Value -eq $null -and $Type -eq "String") { Set-ItemProperty -Path $Path -Name $Name -Value "" -Type String -Force -ErrorAction SilentlyContinue | Out-Null } else { Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction SilentlyContinue | Out-Null } }
 
-# --- 1. CLEANING ---
-function Clean-WindowsUpdateCache { Stop-Service -Name "wuauserv", "bits", "cryptsvc" -Force -ErrorAction SilentlyContinue; Remove-Item -Path "$env:windir\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue; Start-Service -Name "wuauserv", "bits", "cryptsvc" -ErrorAction SilentlyContinue }
-function Clean-TempFiles { $globalTempPaths = @("$env:TEMP\*", "$env:windir\Temp\*", "$env:windir\Prefetch\*"); foreach ($path in $globalTempPaths) { Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue }; Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object { $tempPath = "$($_.FullName)\AppData\Local\Temp"; if (Test-Path $tempPath) { Remove-Item -Path "$tempPath\*" -Recurse -Force -ErrorAction SilentlyContinue } } }
-function Clean-EventLogs { Start-Process -FilePath "cmd.exe" -ArgumentList "/c for /F `"tokens=*`" %1 in ('wevtutil el') do wevtutil cl `"%1`" >nul 2>&1" -WindowStyle Hidden -Wait }
-function Clean-ThirdPartyCache { $appCachePaths = @("AppData\Local\Microsoft\Edge\User Data\Default\Cache\Cache_Data", "AppData\Local\Google\Chrome\User Data\Default\Cache\Cache_Data", "AppData\Local\Discord\Cache", "AppData\Local\NVIDIA\DXCache", "AppData\Local\AMD\DxCache"); Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object { $userDir = $_.FullName; foreach ($partialPath in $appCachePaths) { $fullPath = "$userDir\$partialPath"; if (Test-Path $fullPath) { Remove-Item -Path "$fullPath\*" -Recurse -Force -ErrorAction SilentlyContinue } } } }
-function Clean-RecycleBinHard { Clear-RecycleBin -Force -ErrorAction SilentlyContinue; foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) { $recyclePath = "$($drive.Root)`$Recycle.Bin"; if (Test-Path $recyclePath) { & takeown.exe /F "$recyclePath\*" /R /A /D Y 2>$null; & icacls.exe "$recyclePath\*" /grant Administrators:F /T /C /Q 2>$null; Remove-Item -Path "$recyclePath\*" -Recurse -Force -ErrorAction SilentlyContinue } } }
-function Remove-OneDrive { Stop-Process -Name "OneDrive", "OneDriveSetup" -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; if (Test-Path "$env:SystemRoot\SysWOW64\OneDriveSetup.exe") { Start-Process "$env:SystemRoot\SysWOW64\OneDriveSetup.exe" -ArgumentList "/uninstall" -NoNewWindow -Wait } elseif (Test-Path "$env:SystemRoot\System32\OneDriveSetup.exe") { Start-Process "$env:SystemRoot\System32\OneDriveSetup.exe" -ArgumentList "/uninstall" -NoNewWindow -Wait }; reg.exe delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>$null; $pathsToClean = @("$env:PROGRAMDATA\Microsoft OneDrive", "C:\OneDriveTemp"); Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object { $pathsToClean += "$($_.FullName)\AppData\Local\Microsoft\OneDrive" }; foreach ($targetPath in $pathsToClean) { if (Test-Path -Path $targetPath) { Remove-Item -Path $targetPath -Force -Recurse -ErrorAction SilentlyContinue } } }
+# ------------------------------------------
+# Z1: CLEANING ENGINE
+# ------------------------------------------
+function Invoke-InteractiveCleanup {
+    param([array]$SelectedItems)
+    
+    if ($SelectedItems.Count -eq 0) { return }
 
-# --- 2. BLOATWARE & APPS ---
+    foreach ($item in $SelectedItems) {
+        $rule = $item.ActionData
+        Write-GUI " -> Purging: $($rule.UIDisplayName)..."
+
+        try {
+            if ($rule.Type -eq "EventLogs") {
+                Start-Process -FilePath "cmd.exe" -ArgumentList "/c for /F `"tokens=*`" %1 in ('wevtutil el') do wevtutil cl `"%1`" >nul 2>&1" -WindowStyle Hidden -Wait
+            }
+            elseif ($rule.Type -eq "RecycleBin") {
+                $path = $rule.Path
+                & takeown.exe /F "$path\*" /R /A /D Y 2>$null
+                & icacls.exe "$path\*" /grant Administrators:F /T /C /Q 2>$null
+                Remove-Item -Path "$path\*" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            elseif ($rule.Type -eq "Files") {
+                Remove-Item -Path "$($rule.Path)\*" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+}
+
+# ------------------------------------------
+# Z2: BLOATWARE & APPS ENGINE
+# ------------------------------------------
+function Remove-OneDrive { Stop-Process -Name "OneDrive", "OneDriveSetup" -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; if (Test-Path "$env:SystemRoot\SysWOW64\OneDriveSetup.exe") { Start-Process "$env:SystemRoot\SysWOW64\OneDriveSetup.exe" -ArgumentList "/uninstall" -NoNewWindow -Wait } elseif (Test-Path "$env:SystemRoot\System32\OneDriveSetup.exe") { Start-Process "$env:SystemRoot\System32\OneDriveSetup.exe" -ArgumentList "/uninstall" -NoNewWindow -Wait }; reg.exe delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>$null; $pathsToClean = @("$env:PROGRAMDATA\Microsoft OneDrive", "C:\OneDriveTemp"); Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object { $pathsToClean += "$($_.FullName)\AppData\Local\Microsoft\OneDrive" }; foreach ($targetPath in $pathsToClean) { if (Test-Path -Path $targetPath) { Remove-Item -Path $targetPath -Force -Recurse -ErrorAction SilentlyContinue } } }
 
 function Invoke-RemoveCapabilities {
     param([Parameter(Mandatory=$true)][array]$SelectedItems)
-
     $total = $SelectedItems.Count
     if ($total -eq 0) { Write-GUI " -> No items selected. Operation aborted."; return }
     $current = 0
@@ -25,7 +48,6 @@ function Invoke-RemoveCapabilities {
     foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        
         Write-GUI " -> Removing Capability: $($item.UIDisplayName)"
         foreach ($cap in $item.ActionData) {
             try { Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop } catch { }
@@ -37,7 +59,6 @@ function Invoke-RemoveCapabilities {
 
 function Invoke-GarbageCollector {
     param([Parameter(Mandatory=$true)][array]$SelectedItems)
-
     $total = $SelectedItems.Count
     if ($total -eq 0) { Write-GUI " -> System clean or operation aborted."; return }
     $current = 0
@@ -45,7 +66,6 @@ function Invoke-GarbageCollector {
     foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        
         Write-GUI " -> Cleaning: $($item.UIDisplayName)"
         try {
             if ($item.ActionData.Type -eq "Framework") {
@@ -61,7 +81,6 @@ function Invoke-GarbageCollector {
 
 function Invoke-RemoveBloatware {
     param([Parameter(Mandatory=$true)][array]$SelectedItems)
-
     $total = $SelectedItems.Count
     if ($total -eq 0) { Write-GUI " -> No items selected. Operation aborted."; return }
     $current = 0
@@ -71,7 +90,6 @@ function Invoke-RemoveBloatware {
     foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        
         Write-GUI " -> Purging: $($item.UIDisplayName)"
         
         foreach ($pkg in $item.ActionData.Installed) {
@@ -85,11 +103,44 @@ function Invoke-RemoveBloatware {
     Write-GUI " -> Aggressive Bloatware Removal completed."
 }
 
-# --- 3. SYSTEM & NETWORK ---
+# ------------------------------------------
+# Z3: REGISTRY ENGINE
+# ------------------------------------------
+function Invoke-ApplyRegistry {
+    param(
+        [Parameter(Mandatory=$true)][array]$SelectedItems,
+        [Parameter(Mandatory=$true)][string]$CategoryName
+    )
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { Write-GUI " -> No tweaks selected."; return }
+    $current = 0
+
+    foreach ($item in $SelectedItems) {
+        $current++
+        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
+        Write-GUI " -> Enforcing: $($item.UIDisplayName)"
+        $reg = $item.ActionData
+        
+        try {
+            if (-not (Test-Path $reg.Path)) { New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null }
+            
+            if ($reg.Name -eq "" -or $reg.Name -eq "(Default)") {
+                Set-Item -Path $reg.Path -Value $reg.Expected -Force -ErrorAction Stop | Out-Null
+            } 
+            else { 
+                Set-ItemProperty -Path $reg.Path -Name $reg.Name -Value $reg.Expected -Type $reg.Type -Force -ErrorAction Stop | Out-Null 
+            }
+        } catch { Write-GUI "    [!] Failed to set key (Permissions/Lock): $($reg.Name)" }
+    }
+    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
+    Write-GUI " -> $CategoryName registry modifications completed."
+}
+
+# ------------------------------------------
+# Z4: SERVICES & SYSTEM ENGINE
+# ------------------------------------------
 function Optimize-PowerSettings { powercfg.exe /hibernate off; powercfg.exe /change standby-timeout-ac 0; powercfg.exe /change standby-timeout-dc 0; powercfg.exe /change monitor-timeout-ac 60; powercfg.exe /change monitor-timeout-dc 60 }
 function Optimize-Network { $adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true}; foreach ($adapter in $adapters) { $path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.SettingID)"; New-ItemProperty -Path $path -Name "TcpAckFrequency" -Value 1 -PropertyType DWORD -Force | Out-Null; New-ItemProperty -Path $path -Name "TCPNoDelay" -Value 1 -PropertyType DWORD -Force | Out-Null } }
-
-# --- 4. SERVICES & TASKS ---
 function Disable-TelemetryTasks { $tasksToDisable = @("\Microsoft\Windows\Customer Experience Improvement Program\*", "\Microsoft\Windows\Feedback\*", "\Microsoft\Windows\PerformanceTrace\*", "\Microsoft\Windows\Windows Error Reporting\*", "\Microsoft\XblGameSave\*"); foreach ($t in $tasksToDisable) { $tasks = Get-ScheduledTask | Where-Object { $_.TaskPath -like $t }; foreach ($task in $tasks) { Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null } } }
 
 function Invoke-ApplyServices {
@@ -97,7 +148,6 @@ function Invoke-ApplyServices {
         [Parameter(Mandatory=$true)][array]$SelectedItems,
         [Parameter(Mandatory=$true)][string]$ProfileName
     )
-
     $total = $SelectedItems.Count
     if ($total -eq 0) { Write-GUI " -> All target services are already optimized."; return }
     $current = 0
@@ -105,21 +155,13 @@ function Invoke-ApplyServices {
     foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        
         Write-GUI " -> Configuring: $($item.UIDisplayName)"
         $svc = $item.ActionData
-        
         try {
-            # Zatrzymanie usługi w locie (jeśli to możliwe)
             Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
-            
-            # Wymuszenie startu przez Rejestr (niezawodne)
             Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)" -Name "Start" -Value $svc.ExpectedStart -Type DWord -ErrorAction Stop
-        } catch {
-            Write-GUI "    [!] Failed to modify service: $($svc.Name)"
-        }
+        } catch { Write-GUI "    [!] Failed to modify service: $($svc.Name)" }
     }
-    
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
     Write-GUI " -> $ProfileName services enforcement completed."
 }
@@ -133,49 +175,9 @@ function Force-CleanStartMenu {
     Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
 }
 
-# --- 5. SYSTEM INTEGRITY ---
-function Optimize-WinSXS { Start-Process -FilePath "cmd.exe" -ArgumentList "/c title WinSXS Optimization & color 0A & echo Aggressive cleaning in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & echo. & pause >nul" -Wait }
-function Check-SystemIntegrity { Start-Process -FilePath "cmd.exe" -ArgumentList "/c title System Scan & color 0A & echo RestoreHealth... & dism /online /cleanup-image /restorehealth & echo. & echo SFC Scanning... & sfc /scannow & echo. & pause >nul" -Wait }
-
-# --- 6. SYSTEM REGISTRY ---
-function Invoke-ApplyRegistry {
-    param(
-        [Parameter(Mandatory=$true)][array]$SelectedItems,
-        [Parameter(Mandatory=$true)][string]$CategoryName
-    )
-
-    $total = $SelectedItems.Count
-    if ($total -eq 0) { Write-GUI " -> No tweaks selected."; return }
-    $current = 0
-
-    foreach ($item in $SelectedItems) {
-        $current++
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        
-        # Wyświetlamy w logu przyjazną, edukacyjną nazwę
-        Write-GUI " -> Enforcing: $($item.UIDisplayName)"
-        $reg = $item.ActionData
-        
-        try {
-            if (-not (Test-Path $reg.Path)) { 
-                New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null 
-            }
-            
-            if ($reg.Expected -eq "" -and $reg.Type -eq "String") { 
-                Set-ItemProperty -Path $reg.Path -Name $reg.Name -Value "" -Type String -Force -ErrorAction Stop | Out-Null 
-            } else { 
-                Set-ItemProperty -Path $reg.Path -Name $reg.Name -Value $reg.Expected -Type $reg.Type -Force -ErrorAction Stop | Out-Null 
-            }
-        } catch {
-            Write-GUI "    [!] Failed to set key (Permissions/Lock): $($reg.Name)"
-        }
-    }
-    
-    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-    Write-GUI " -> $CategoryName registry modifications completed."
-}
-
-# --- 7. UTILITIES & INSPECTION ---
+# ------------------------------------------
+# Z5: UTILITIES ENGINE
+# ------------------------------------------
 function Show-AppxGrid { Write-GUI "Generating Appx table..."; $selected = Get-AppxPackage -AllUsers | Select-Object Name, PackageFullName, IsFramework, Status | Out-GridView -Title "Select packages to REMOVE (Ctrl+Click to select, then click OK)" -PassThru; if ($selected) { foreach ($app in $selected) { Write-GUI "Removing: $($app.Name)"; Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction SilentlyContinue } } }
 function Show-AppxProvGrid { Write-GUI "Generating Provisioned Appx table..."; $selected = Get-AppxProvisionedPackage -Online | Select-Object DisplayName, PackageName, Version | Out-GridView -Title "Select packages to DEPROVISION (Ctrl+Click to select, then click OK)" -PassThru; if ($selected) { foreach ($app in $selected) { Write-GUI "Deprovisioning: $($app.DisplayName)"; Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction SilentlyContinue } } }
 function Show-CapsGrid { Write-GUI "Generating Capabilities table..."; $selected = Get-WindowsCapability -Online | Where-Object State -eq 'Installed' | Select-Object Name | Out-GridView -Title "Select features to REMOVE (Ctrl+Click to select, then click OK)" -PassThru; if ($selected) { foreach ($cap in $selected) { Write-GUI "Removing: $($cap.Name)"; Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction SilentlyContinue } } }
@@ -189,6 +191,15 @@ function Open-ClassicApps { Start-Process "appwiz.cpl" }
 function Open-ClassicSound { Start-Process "mmsys.cpl" }
 function Open-ClassicPrinters { Start-Process "explorer.exe" -ArgumentList "shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{A8A91A66-3A7D-4424-8D24-04E180695C7A}" }
 
+# ------------------------------------------
+# Z6: SYSTEM INTEGRITY ENGINE
+# ------------------------------------------
+function Optimize-WinSXS { Start-Process -FilePath "cmd.exe" -ArgumentList "/c title WinSXS Optimization & color 0A & echo Aggressive cleaning in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & echo. & pause >nul" -Wait }
+function Check-SystemIntegrity { Start-Process -FilePath "cmd.exe" -ArgumentList "/c title System Scan & color 0A & echo RestoreHealth... & dism /online /cleanup-image /restorehealth & echo. & echo SFC Scanning... & sfc /scannow & echo. & pause >nul" -Wait }
+
+# ------------------------------------------
+# GLOBAL: RESCUE ENGINE
+# ------------------------------------------
 function Invoke-Rescue {
     param([Parameter(Mandatory=$true)][array]$SelectedItems)
     
@@ -199,7 +210,6 @@ function Invoke-Rescue {
     foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        
         Write-GUI " -> Restoring: $($item.UIDisplayName)"
         $data = $item.ActionData
         
@@ -209,18 +219,13 @@ function Invoke-Rescue {
             } elseif ($data.Type -eq "Delete") {
                 if (Test-Path $data.Path) { Remove-ItemProperty -Path $data.Path -Name $data.Name -ErrorAction Stop }
             } elseif ($data.ExpectedStart) {
-                # To jest usługa
                 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($data.Name)" -Name "Start" -Value $data.ExpectedStart -Type DWord -ErrorAction Stop
             } else {
-                # To jest standardowe nadpisanie wartości fabrycznej
                 if (-not (Test-Path $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
                 Set-ItemProperty -Path $data.Path -Name $data.Name -Value $data.DefaultValue -Type $data.Type -Force -ErrorAction Stop | Out-Null
             }
-        } catch { 
-            Write-GUI "    [!] Failed to restore item (Permissions/Lock)." 
-        }
+        } catch { Write-GUI "    [!] Failed to restore item (Permissions/Lock)." }
     }
-    
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
     Write-GUI " -> Rescue operations completed. System restart is highly recommended."
 }

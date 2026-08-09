@@ -28,72 +28,136 @@ function Assert-Power {
     Write-GUI "  [!] $Desc (Read error)"; return 1 
 }
 
-function Audit-TempFiles { 
-    Write-GUI "--- AUDIT: Temporary Files ---"
-    $tempPaths = @("$env:TEMP\*", "$env:windir\Temp\*", "$env:windir\Prefetch\*")
-    Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object { $tempPaths += "$($_.FullName)\AppData\Local\Temp\*" }
+function Invoke-ServicesAudit {
+    param([array]$Rules)
     
-    $totalSize = 0
-    foreach ($p in $tempPaths) { 
-        $size = (Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        $size = (Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        $totalSize += $size
+    $results = @()
+    foreach ($rule in $Rules) {
+        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
+        
+        $isDetected = $true
+        if ($null -eq $currentStart -or $currentStart -eq $rule.ExpectedStart) {
+            $isDetected = $false
+        }
+
+        $results += [PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        }
     }
-    if ($totalSize -gt 0) { Write-GUI "  [!] Found: $([math]::Round($totalSize / 1MB, 2)) MB of temporary files." } 
-    else { Write-GUI "  [OK] Buffers clean." }
+    return $results
 }
 
-function Audit-WindowsUpdate {
-    Write-GUI "--- AUDIT: Windows Update Cache ---"
-    $path = "$env:windir\SoftwareDistribution\Download"
-    Write-GUI "  Target path: $path"
-    if (Test-Path $path) {
-        $size = (Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if ($size -gt 0) { Write-GUI "  [!] Found: $([math]::Round($size / 1MB, 2)) MB of temporary update files." }
-        else { Write-GUI "  [OK] Update cache is empty." }
-    } else { Write-GUI "  [OK] Update cache folder missing or empty." }
-}
+function Invoke-RegistryAudit {
+    param([array]$Rules)
+    
+    $results = @()
+    foreach ($rule in $Rules) {
+        $isDetected = $true
+        
+        if ($rule.Name -eq "" -or $rule.Name -eq "(Default)") {
+            $regKey = Get-Item -Path $rule.Path -ErrorAction SilentlyContinue
+            if ($null -ne $regKey) { $currentValue = $regKey.GetValue("") } else { $currentValue = $null }
+        } else {
+            $currentValue = (Get-ItemProperty -Path $rule.Path -Name $rule.Name -ErrorAction SilentlyContinue).$($rule.Name)
+        }
+        
+        if ($rule.ContainsKey("ValidValues")) {
+            if ($rule.ValidValues -contains $currentValue) { 
+                $isDetected = $false 
+            }
+        } else {
+            if ($null -ne $currentValue -and [string]$currentValue -eq [string]$rule.Expected) { 
+                $isDetected = $false 
+            }
+        }
 
-function Audit-EventLogs {
-    Write-GUI "--- AUDIT: Event Viewer Logs ---"
-    $logs = (wevtutil el).Count
-    Write-GUI "  [INFO] System maintains $logs event log categories (channels)."
-    Write-GUI "  -> Clearing them will safely flush all stored records and reset old error history."
-}
-
-function Audit-ThirdPartyCache {
-    Write-GUI "--- AUDIT: Third-Party App Cache ---"
-    Write-GUI "  Targets: Edge, Chrome, Discord, NVIDIA & AMD Shaders"
-    $appCachePaths = @("AppData\Local\Microsoft\Edge\User Data\Default\Cache\Cache_Data", "AppData\Local\Google\Chrome\User Data\Default\Cache\Cache_Data", "AppData\Local\Discord\Cache", "AppData\Local\NVIDIA\DXCache", "AppData\Local\AMD\DxCache")
-    $totalSize = 0
-    Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object { 
-        $userDir = $_.FullName
-        foreach ($partialPath in $appCachePaths) { 
-            $fullPath = "$userDir\$partialPath"
-            if (Test-Path $fullPath) { 
-                $size = (Get-ChildItem -Path "$fullPath\*" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-                $totalSize += $size
-            } 
-        } 
+        $results += [PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        }
     }
-    if ($totalSize -gt 0) { Write-GUI "  [!] Found: $([math]::Round($totalSize / 1MB, 2)) MB of temporary app data." } 
-    else { Write-GUI "  [OK] Targeted app caches are clean." }
+    return $results
 }
 
-function Audit-RecycleBin {
-    Write-GUI "--- AUDIT: Recycle Bin ---"
-    $totalSize = 0
-    foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) { 
-        $recyclePath = "$($drive.Root)`$Recycle.Bin"
-        if (Test-Path $recyclePath) { 
-            $size = (Get-ChildItem -Path "$recyclePath\*" -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-            $totalSize += $size
-        } 
+# ------------------------------------------
+# Z1: CLEANUP AUDITS
+# ------------------------------------------
+function Get-CleanupState {
+    param([string]$Category)
+    $rules = @()
+
+    if ($Category -eq "WU") {
+        $rules += @{ UIDisplayName = "Windows Update Download Cache"; Path = "$env:windir\SoftwareDistribution\Download"; Type = "Files" }
     }
-    if ($totalSize -gt 0) { Write-GUI "  [!] Found: $([math]::Round($totalSize / 1MB, 2)) MB of trashed files across all drives." } 
-    else { Write-GUI "  [OK] All Recycle Bins are empty." }
+    if ($Category -eq "Temp") {
+        $rules += @{ UIDisplayName = "Windows System Temp"; Path = "$env:windir\Temp"; Type = "Files" }
+        $rules += @{ UIDisplayName = "Global User Temp"; Path = "$env:TEMP"; Type = "Files" }
+        $rules += @{ UIDisplayName = "Windows Prefetch"; Path = "$env:windir\Prefetch"; Type = "Files" }
+        Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '^(Public|Default.*|All Users)$' } | ForEach-Object {
+            $rules += @{ UIDisplayName = "User Temp ($($_.Name))"; Path = "$($_.FullName)\AppData\Local\Temp"; Type = "Files" }
+        }
+    }
+    if ($Category -eq "EventLogs") {
+        $rules += @{ UIDisplayName = "Windows Event Logs"; Path = "$env:windir\System32\winevt\Logs"; Type = "EventLogs" }
+    }
+    if ($Category -eq "ThirdParty") {
+        $appCaches = @(
+            @{ Name = "Edge"; Path = "AppData\Local\Microsoft\Edge\User Data\Default\Cache\Cache_Data" }
+            @{ Name = "Chrome"; Path = "AppData\Local\Google\Chrome\User Data\Default\Cache\Cache_Data" }
+            @{ Name = "Discord"; Path = "AppData\Local\Discord\Cache" }
+            @{ Name = "NVIDIA DXCache"; Path = "AppData\Local\NVIDIA\DXCache" }
+            @{ Name = "AMD DxCache"; Path = "AppData\Local\AMD\DxCache" }
+        )
+        Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '^(Public|Default.*|All Users)$' } | ForEach-Object {
+            $usr = $_.Name
+            $base = $_.FullName
+            foreach ($app in $appCaches) {
+                $rules += @{ UIDisplayName = "$($app.Name) Cache ($usr)"; Path = "$base\$($app.Path)"; Type = "Files" }
+            }
+        }
+    }
+    if ($Category -eq "RecycleBin") {
+        foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) {
+            $rules += @{ UIDisplayName = "Recycle Bin ($($drive.Name):)"; Path = "$($drive.Root)`$Recycle.Bin"; Type = "RecycleBin" }
+        }
+    }
+
+    $results = @()
+    foreach ($rule in $rules) {
+        $isDetected = $false
+        $sizeMB = 0
+
+        if (Test-Path $rule.Path -ErrorAction SilentlyContinue) {
+            $files = @(Get-ChildItem -Path $rule.Path -Recurse -File -Force -ErrorAction SilentlyContinue)
+            
+            if ($files.Count -gt 0) {
+                $bytes = ($files | Measure-Object -Property Length -Sum).Sum
+                $sizeMB = [math]::Round(($bytes / 1MB), 2)
+            }
+        }
+
+        if ($sizeMB -ge 1) {
+            $isDetected = $true
+            $displayName = "$($rule.UIDisplayName) [ $sizeMB MB ]"
+        } else {
+            $displayName = "$($rule.UIDisplayName) [ Clean ]"
+        }
+
+        $results += [PSCustomObject]@{
+            UIDisplayName = $displayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        }
+    }
+    return $results
 }
 
+# ------------------------------------------
+# Z2: BLOATWARE AUDITS
+# ------------------------------------------
 function Audit-OneDrive { Write-GUI "--- AUDIT: OneDrive ---"; if ((Test-Path "$env:SystemRoot\SysWOW64\OneDriveSetup.exe") -or (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\OneDriveSetup")) { Write-GUI "[!] OneDrive traces found." } else { Write-GUI "[OK] OneDrive eradicated." } }
 
 function Get-CapabilitiesState {
@@ -154,28 +218,19 @@ function Get-GarbageCollectorState {
 }
 
 function Get-BloatwareState {
-
-$appList = @(
-    # --- Systemowe, Telemetria i AI ---
-    "*3DBuilder*", "*3DViewer*", "*Bing*", "*BingNews*", "*BingWeather*", "*Clipchamp*", 
-    "*DevHome*", "*PowerAutomateDesktop*", "*Copilot*", "*Store.Engagement*", "*Edge.GameAssist*", 
-    "*Family*", "*FeedbackHub*", "*GetHelp*", "*windowscommunicationsapps*", "*WindowsMaps*", 
-    "*MixedReality*", "*ZuneVideo*", "*ZuneMusic*", "*Gaming*", "*MicrosoftOfficeHub*", 
-    "*OneDriveSync*", "*OneNote*", "*OutlookForWindows*", "*People*", "*Photos*", "*QuickAssist*", 
-    "*SkypeApp*", "*SolitaireCollection*", "*MSTeams*", "*MicrosoftTeams*", "*Getstarted*", 
-    "*Todos*", "*XboxApp*", "*XboxGamingOverlay*", "*XboxSpeechToTextOverlay*", "*YourPhone*", 
-    "*Cortana*", "*WindowsAlarms*", "*SoundRecorder*", "*Client.WebExperience*", "*CrossDevice*", "*StickyNotes*",
-    
-    # --- Gry i śmieci reklamowe (Consumer Features) ---
-    "*CandyCrush*", "*BubbleWitch*", "*FarmHeroes*", "*MarchofEmpires*", "*Homescapes*", "*Township*",
-    
-    # --- Social Media, Rozrywka i Zakupy ---
-    "*TikTok*", "*Instagram*", "*Facebook*", "*Twitter*", "*LinkedIn*", "*Netflix*", "*Spotify*", 
-    "*Disney*", "*Amazon*", 
-    
-    # --- Bloatware od dostawców sprzętu (OEM) i antywirusy ---
-    "*McAfee*", "*Norton*", "*Lenovo*", "*Dell*", "*HP*"
-)
+    $appList = @(
+        "*3DBuilder*", "*3DViewer*", "*Bing*", "*BingNews*", "*BingWeather*", "*Clipchamp*", 
+        "*DevHome*", "*PowerAutomateDesktop*", "*Copilot*", "*Store.Engagement*", "*Edge.GameAssist*", 
+        "*Family*", "*FeedbackHub*", "*GetHelp*", "*windowscommunicationsapps*", "*WindowsMaps*", 
+        "*MixedReality*", "*ZuneVideo*", "*ZuneMusic*", "*Gaming*", "*MicrosoftOfficeHub*", 
+        "*OneDriveSync*", "*OneNote*", "*OutlookForWindows*", "*People*", "*Photos*", "*QuickAssist*", 
+        "*SkypeApp*", "*SolitaireCollection*", "*MSTeams*", "*MicrosoftTeams*", "*Getstarted*", 
+        "*Todos*", "*XboxApp*", "*XboxGamingOverlay*", "*XboxSpeechToTextOverlay*", "*YourPhone*", 
+        "*Cortana*", "*WindowsAlarms*", "*SoundRecorder*", "*Client.WebExperience*", "*CrossDevice*", "*StickyNotes*",
+        "*CandyCrush*", "*BubbleWitch*", "*FarmHeroes*", "*MarchofEmpires*", "*Homescapes*", "*Township*",
+        "*TikTok*", "*Instagram*", "*Facebook*", "*Twitter*", "*LinkedIn*", "*Netflix*", "*Spotify*", 
+        "*Disney*", "*Amazon*", "*McAfee*", "*Norton*", "*Lenovo*", "*Dell*", "*HP*"
+    )
     
     $installedAppx = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider" }
     $provAppx = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -notmatch "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider" }
@@ -191,157 +246,15 @@ $appList = @(
         $results += [PSCustomObject]@{
             UIDisplayName = $cleanName
             IsDetected    = $isDetected
-            ActionData    = @{
-                Installed   = $foundInstalled
-                Provisioned = $foundProv
-            }
+            ActionData    = @{ Installed = $foundInstalled; Provisioned = $foundProv }
         }
     }
     return $results
 }
 
-function Audit-TelemetryTasks { 
-    Write-GUI "--- AUDIT: Task Scheduler ---"
-    $tasksToCheck = @("\Microsoft\Windows\Customer Experience Improvement Program\*", "\Microsoft\Windows\Feedback\*", "\Microsoft\Windows\PerformanceTrace\*", "\Microsoft\Windows\Windows Error Reporting\*", "\Microsoft\XblGameSave\*")
-    Write-GUI "Scanned telemetry areas: $($tasksToCheck -join ', ')"
-    $foundActive = @()
-    foreach ($t in $tasksToCheck) { 
-        $active = Get-ScheduledTask | Where-Object { $_.TaskPath -like $t -and ($_.State -eq 'Ready' -or $_.State -eq 'Running') }
-        foreach ($a in $active) { $foundActive += "$($a.TaskPath)$($a.TaskName)" }
-    }
-    if ($foundActive.Count -gt 0) { 
-        Write-GUI "[!] Active telemetry tasks:"
-        foreach ($task in $foundActive) { Write-GUI "  -> $task" } 
-    } 
-    else { Write-GUI "[OK] All targeted telemetry tasks are disabled." } 
-}
-
-function Audit-Power { 
-    Write-GUI "--- AUDIT: Power Profile ---"; $err = 0
-    $hiber = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue
-    if ($hiber -and $hiber.HibernateEnabled -eq 0) { Write-GUI "  [OK] Hibernation (Disabled)" } else { Write-GUI "  [!] Hibernation (Likely active)"; $err++ }
-    $err += Assert-Power "SUB_SLEEP" "STANDBYIDLE" 999999 "System Sleep"
-    $err += Assert-Power "SUB_VIDEO" "VIDEOIDLE" 3600 "Display Turn Off"
-    Write-GUI "-> STATUS: $err issues with power profile." 
-}
-
-function Audit-Network { Write-GUI "--- AUDIT: Nagle's Algorithm ---"; $adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true}; $err=0; foreach ($a in $adapters) { $p = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($a.SettingID)"; $val = (Get-ItemProperty -Path $p -Name "TCPNoDelay" -ErrorAction SilentlyContinue).TCPNoDelay; if ($val -eq 1) { Write-GUI "  [OK] $($a.Description)" } else { Write-GUI "  [!] $($a.Description) (Missing TCPNoDelay)"; $err++ } }; Write-GUI "-> STATUS: $err network adapters without optimization." }
-
-function Invoke-ServicesAudit {
-    param([array]$Rules)
-    
-    $results = @()
-    foreach ($rule in $Rules) {
-        # Pobranie statusu z Rejestru (4 = Disabled, 3 = Manual, 2 = Auto)
-        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
-        
-        $isDetected = $true
-        # Jeśli usługi nie ma w rejestrze (usunięta) lub ma już poprawny start
-        if ($null -eq $currentStart -or $currentStart -eq $rule.ExpectedStart) {
-            $isDetected = $false
-        }
-
-        $results += [PSCustomObject]@{
-            UIDisplayName = $rule.UIDisplayName
-            IsDetected    = $isDetected
-            ActionData    = $rule
-        }
-    }
-    return $results
-}
-
-function Get-ServicesState_Light {
-    $rules = @(
-        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Updates: Windows Update Medic Service (wuqisvc)"; Name = "wuqisvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Telemetry: Windows Health Service (whesvc)"; Name = "whesvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4 }
-    )
-    return Invoke-ServicesAudit -Rules $rules
-}
-
-function Get-ServicesState_Heavy {
-    $rules = @(
-        # --- Zestaw z profilu Light (Dziedziczone) ---
-        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Updates: Windows Update Medic Service (wuqisvc)"; Name = "wuqisvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Telemetry: Windows Health Service (whesvc)"; Name = "whesvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4 }
-
-        # --- Zestaw Heavy (Ciężkie usługi tła, sensory, drukarki i telemetria) ---
-        @{ UIDisplayName = "Telemetry: Device Inventory Service (InventorySvc)"; Name = "InventorySvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Networking: Connected Devices Platform (CDPSvc)"; Name = "CDPSvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Location: Geolocation Service (lfsvc)"; Name = "lfsvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Performance: SysMain / Superfetch - Disables RAM caching (SysMain)"; Name = "SysMain"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4 }
-        @{ UIDisplayName = "AI: Windows AI Fabric Service (WSAIFabricSvc)"; Name = "WSAIFabricSvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Printers: Fax Service (Fax)"; Name = "Fax"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Remote: Remote Registry (RemoteRegistry)"; Name = "RemoteRegistry"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Biometrics: Windows Biometric Service (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Sensors: Sensor Data Service (SensorDataService)"; Name = "SensorDataService"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Sensors: Sensor Service (SensorService)"; Name = "SensorService"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Sensors: Sensor Monitoring Service (SensrSvc)"; Name = "SensrSvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Mobile: Phone Service (PhoneSvc)"; Name = "PhoneSvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Network: WWAN AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Search: Windows Search - Disables file indexing (WSearch)"; Name = "WSearch"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Networking: Offline Files (CscService)"; Name = "CscService"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Network: Internet Connection Sharing (SharedAccess)"; Name = "SharedAccess"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Telemetry: WAP Push Message Routing (dmwappushservice)"; Name = "dmwappushservice"; ExpectedStart = 4 }
-        @{ UIDisplayName = "Telemetry: Windows Error Reporting (wermgr)"; Name = "wermgr"; ExpectedStart = 4 }
-        
-        # --- Usługi ustawiane na tryb ręczny (Manual = 3). Bezpieczne, odpalają się tylko na żądanie. ---
-        @{ UIDisplayName = "Xbox: Xbox Live Auth Manager [Manual] (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Live Game Save [Manual] (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Live Networking Service [Manual] (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Accessory Management [Manual] (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 3 }
-        @{ UIDisplayName = "Camera: Windows Camera Frame Server [Manual] (FrameServer)"; Name = "FrameServer"; ExpectedStart = 3 }
-        @{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor [Manual] (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 3 }
-    )
-    return Invoke-ServicesAudit -Rules $rules
-}
-
-function Invoke-RegistryAudit {
-    param([array]$Rules)
-    
-    $results = @()
-    foreach ($rule in $Rules) {
-        $currentValue = (Get-ItemProperty -Path $rule.Path -Name $rule.Name -ErrorAction SilentlyContinue).$($rule.Name)
-        $isDetected = $true
-        
-        # Jeśli reguła definiuje tablicę dopuszczalnych wartości (np. dla HAGS)
-        if ($rule.ContainsKey("ValidValues")) {
-            if ($rule.ValidValues -contains $currentValue) { 
-                $isDetected = $false 
-            }
-        } 
-        # Standardowe sprawdzanie, jeśli nie ma tablicy
-        else {
-            if ($null -ne $currentValue -and [string]$currentValue -eq [string]$rule.Expected) { 
-                $isDetected = $false 
-            }
-        }
-
-        $results += [PSCustomObject]@{
-            UIDisplayName = $rule.UIDisplayName
-            IsDetected    = $isDetected
-            ActionData    = $rule
-        }
-    }
-    return $results
-}
-
+# ------------------------------------------
+# Z3: REGISTRY AUDITS
+# ------------------------------------------
 function Get-RegState_Taskbar {
     $rules = @(
         @{ UIDisplayName = "Taskbar: Align to Left (Disables Windows 11 center alignment)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "TaskbarAl"; Expected = 0; Type = "DWord" }
@@ -392,8 +305,6 @@ function Get-RegState_Annoyances {
 
 function Get-RegState_Privacy {
     $rules = @()
-    
-    # Podstawowa Telemetria
     $rules += @{ UIDisplayName = "Privacy: Block OS Telemetry & Data Collection"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"; Name = "AllowTelemetry"; Expected = 0; Type = "DWord" }
     $rules += @{ UIDisplayName = "Privacy: Disable App Advertising ID"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"; Name = "Enabled"; Expected = 0; Type = "DWord" }
     $rules += @{ UIDisplayName = "Privacy: Disable Timeline & Activity History tracking"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"; Name = "PublishUserActivities"; Expected = 0; Type = "DWord" }
@@ -402,18 +313,15 @@ function Get-RegState_Privacy {
     $rules += @{ UIDisplayName = "Privacy: Restrict Implicit Ink/Text Collection"; Path = "HKCU:\Software\Microsoft\InputPersonalization"; Name = "RestrictImplicitInkCollection"; Expected = 1; Type = "DWord" }
     $rules += @{ UIDisplayName = "Background Apps: Block UWP apps from running globally"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; Name = "GlobalUserDisabled"; Expected = 1; Type = "DWord" }
     
-    # Blokowanie uprawnień aplikacji (Pętla by nie zaśmiecać kodu)
     $uwpBlocks = @("LetAppsActivateWithVoice", "LetAppsAccessNotifications", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessRadios", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar", "LetAppsAccessAccountInfo")
     foreach ($app in $uwpBlocks) { $rules += @{ UIDisplayName = "UWP Permissions: Block $app"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $app; Expected = 2; Type = "DWord" } }
     $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessCamera"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessCamera"; Expected = 0; Type = "DWord" }
     $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessMicrophone"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessMicrophone"; Expected = 0; Type = "DWord" }
     
-    # Blokady Edge i Defendera
     $rules += @{ UIDisplayName = "Edge: Disable Startup Boost (Background Process)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "StartupBoostEnabled"; Expected = 0; Type = "DWord" }
     $rules += @{ UIDisplayName = "Edge: Disable Background Mode"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "BackgroundModeEnabled"; Expected = 0; Type = "DWord" }
     $rules += @{ UIDisplayName = "Defender: Prevent automatic sample submission"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet"; Name = "SubmitSamplesConsent"; Expected = 2; Type = "DWord" }
     
-    # Blokada natrętnych powiadomień i reklam z ContentDeliveryManager
     $cdm = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
     $cdmKeys = @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "FeatureManagementEnabled", "PreInstalledAppsEverEnabled", "SoftLandingEnabled", "SubscribedContentEnabled", "SystemPaneSuggestionsEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled")
     foreach ($k in $cdmKeys) { $rules += @{ UIDisplayName = "Junk Blocker: Disable Content Delivery ($k)"; Path = $cdm; Name = $k; Expected = 0; Type = "DWord" } }
@@ -461,6 +369,24 @@ function Get-RegState_Gaming {
     return Invoke-RegistryAudit -Rules $rules
 }
 
+# ------------------------------------------
+# Z4: SERVICES & TASKS AUDITS
+# ------------------------------------------
+function Audit-TelemetryTasks { 
+    Write-GUI "--- AUDIT: Task Scheduler ---"
+    $tasksToCheck = @("\Microsoft\Windows\Customer Experience Improvement Program\*", "\Microsoft\Windows\Feedback\*", "\Microsoft\Windows\PerformanceTrace\*", "\Microsoft\Windows\Windows Error Reporting\*", "\Microsoft\XblGameSave\*")
+    Write-GUI "Scanned telemetry areas: $($tasksToCheck -join ', ')"
+    $foundActive = @()
+    foreach ($t in $tasksToCheck) { 
+        $active = Get-ScheduledTask | Where-Object { $_.TaskPath -like $t -and ($_.State -eq 'Ready' -or $_.State -eq 'Running') }
+        foreach ($a in $active) { $foundActive += "$($a.TaskPath)$($a.TaskName)" }
+    }
+    if ($foundActive.Count -gt 0) { 
+        Write-GUI "[!] Active telemetry tasks:"
+        foreach ($task in $foundActive) { Write-GUI "  -> $task" } 
+    } else { Write-GUI "[OK] All targeted telemetry tasks are disabled." } 
+}
+
 function Audit-StartMenu {
     Write-GUI "--- AUDIT: Start Menu Pins Database ---"
     $smPath = "$env:LOCALAPPDATA\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState\start2.bin"
@@ -473,10 +399,80 @@ function Audit-StartMenu {
     }
 }
 
+function Audit-Power { 
+    Write-GUI "--- AUDIT: Power Profile ---"; $err = 0
+    $hiber = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue
+    if ($hiber -and $hiber.HibernateEnabled -eq 0) { Write-GUI "  [OK] Hibernation (Disabled)" } else { Write-GUI "  [!] Hibernation (Likely active)"; $err++ }
+    $err += Assert-Power "SUB_SLEEP" "STANDBYIDLE" 999999 "System Sleep"
+    $err += Assert-Power "SUB_VIDEO" "VIDEOIDLE" 3600 "Display Turn Off"
+    Write-GUI "-> STATUS: $err issues with power profile." 
+}
+
+function Audit-Network { Write-GUI "--- AUDIT: Nagle's Algorithm ---"; $adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true}; $err=0; foreach ($a in $adapters) { $p = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($a.SettingID)"; $val = (Get-ItemProperty -Path $p -Name "TCPNoDelay" -ErrorAction SilentlyContinue).TCPNoDelay; if ($val -eq 1) { Write-GUI "  [OK] $($a.Description)" } else { Write-GUI "  [!] $($a.Description) (Missing TCPNoDelay)"; $err++ } }; Write-GUI "-> STATUS: $err network adapters without optimization." }
+
+function Get-ServicesState_Light {
+    $rules = @(
+        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Updates: Windows Update Medic Service (wuqisvc)"; Name = "wuqisvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Telemetry: Windows Health Service (whesvc)"; Name = "whesvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4 }
+    )
+    return Invoke-ServicesAudit -Rules $rules
+}
+
+function Get-ServicesState_Heavy {
+    $rules = @(
+        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Updates: Windows Update Medic Service (wuqisvc)"; Name = "wuqisvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Telemetry: Windows Health Service (whesvc)"; Name = "whesvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Telemetry: Device Inventory Service (InventorySvc)"; Name = "InventorySvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Networking: Connected Devices Platform (CDPSvc)"; Name = "CDPSvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Location: Geolocation Service (lfsvc)"; Name = "lfsvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Performance: SysMain / Superfetch - Disables RAM caching (SysMain)"; Name = "SysMain"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4 }
+        @{ UIDisplayName = "AI: Windows AI Fabric Service (WSAIFabricSvc)"; Name = "WSAIFabricSvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Printers: Fax Service (Fax)"; Name = "Fax"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Remote: Remote Registry (RemoteRegistry)"; Name = "RemoteRegistry"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Biometrics: Windows Biometric Service (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Sensors: Sensor Data Service (SensorDataService)"; Name = "SensorDataService"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Sensors: Sensor Service (SensorService)"; Name = "SensorService"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Sensors: Sensor Monitoring Service (SensrSvc)"; Name = "SensrSvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Mobile: Phone Service (PhoneSvc)"; Name = "PhoneSvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Network: WWAN AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Search: Windows Search - Disables file indexing (WSearch)"; Name = "WSearch"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Networking: Offline Files (CscService)"; Name = "CscService"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Network: Internet Connection Sharing (SharedAccess)"; Name = "SharedAccess"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Telemetry: WAP Push Message Routing (dmwappushservice)"; Name = "dmwappushservice"; ExpectedStart = 4 }
+        @{ UIDisplayName = "Telemetry: Windows Error Reporting (wermgr)"; Name = "wermgr"; ExpectedStart = 4 }
+        
+        @{ UIDisplayName = "Xbox: Xbox Live Auth Manager [Manual] (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 3 }
+        @{ UIDisplayName = "Xbox: Xbox Live Game Save [Manual] (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 3 }
+        @{ UIDisplayName = "Xbox: Xbox Live Networking Service [Manual] (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 3 }
+        @{ UIDisplayName = "Xbox: Xbox Accessory Management [Manual] (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 3 }
+        @{ UIDisplayName = "Camera: Windows Camera Frame Server [Manual] (FrameServer)"; Name = "FrameServer"; ExpectedStart = 3 }
+        @{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor [Manual] (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 3 }
+    )
+    return Invoke-ServicesAudit -Rules $rules
+}
+
+# ------------------------------------------
+# GLOBAL: RESCUE AUDITS
+# ------------------------------------------
 function Get-RescueState_Registry {
     $rescueRules = @()
-
-    # --- 1. TASKBAR & START MENU ---
     $rescueRules += @{ UIDisplayName = "Restore: Centered Taskbar Alignment"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "TaskbarAl"; DefaultValue = 1; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: Hide Seconds in Clock"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "ShowSecondsInSystemClock"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: Show Taskbar Search Box"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"; Name = "SearchboxTaskbarMode"; DefaultValue = $null; Type = "Delete" }
@@ -490,8 +486,6 @@ function Get-RescueState_Registry {
     $rescueRules += @{ UIDisplayName = "Restore: Recent Docs History"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "NoRecentDocsHistory"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: News & Interests Widgets"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"; Name = "AllowNewsAndInterests"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: Windows Consumer Features (Sponsored Apps)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; Name = "DisableWindowsConsumerFeatures"; DefaultValue = $null; Type = "Delete" }
-
-    # --- 2. EXPLORER & UI ---
     $rescueRules += @{ UIDisplayName = "Restore: Explorer opens to Quick Access"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "LaunchTo"; DefaultValue = 2; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: Hide hidden files and folders"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "Hidden"; DefaultValue = 2; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: Hide known file extensions"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "HideFileExt"; DefaultValue = 1; Type = "DWord" }
@@ -504,15 +498,11 @@ function Get-RescueState_Registry {
     $rescueRules += @{ UIDisplayName = "Restore: OneDrive Pin (64-bit shell)"; Path = "Registry::HKEY_CLASSES_ROOT\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}"; Name = "System.IsPinnedToNameSpaceTree"; DefaultValue = 1; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: OneDrive Pin (32-bit shell)"; Path = "Registry::HKEY_CLASSES_ROOT\Wow6432Node\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}"; Name = "System.IsPinnedToNameSpaceTree"; DefaultValue = 1; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: Default Menu Show Delay (400ms)"; Path = "HKCU:\Control Panel\Desktop"; Name = "MenuShowDelay"; DefaultValue = "400"; Type = "String" }
-
-    # --- 3. ANNOYANCES ---
     $rescueRules += @{ UIDisplayName = "Restore: AutoPlay for all drives"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoDriveTypeAutoRun"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: Autoplay Handlers"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers"; Name = "DisableAutoplay"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: Sticky Keys prompt"; Path = "HKCU:\Control Panel\Accessibility\StickyKeys"; Name = "Flags"; DefaultValue = "510"; Type = "String" }
     $rescueRules += @{ UIDisplayName = "Restore: Filter Keys prompt"; Path = "HKCU:\Control Panel\Accessibility\Keyboard Response"; Name = "Flags"; DefaultValue = "126"; Type = "String" }
     $rescueRules += @{ UIDisplayName = "Restore: Toggle Keys prompt"; Path = "HKCU:\Control Panel\Accessibility\ToggleKeys"; Name = "Flags"; DefaultValue = "63"; Type = "String" }
-
-    # --- 4. PRIVACY ---
     $rescueRules += @{ UIDisplayName = "Restore: OS Telemetry & Data Collection (AllowTelemetry)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"; Name = "AllowTelemetry"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: App Advertising ID"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"; Name = "Enabled"; DefaultValue = 1; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: Timeline & Activity History"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"; Name = "PublishUserActivities"; DefaultValue = 1; Type = "DWord" }
@@ -521,7 +511,6 @@ function Get-RescueState_Registry {
     $rescueRules += @{ UIDisplayName = "Restore: Implicit Ink/Text Collection"; Path = "HKCU:\Software\Microsoft\InputPersonalization"; Name = "RestrictImplicitInkCollection"; DefaultValue = 0; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: Background Apps Global Execution"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; Name = "GlobalUserDisabled"; DefaultValue = 0; Type = "DWord" }
     
-    # Aggregated UWP app blocks reversal
     $uwpBlocks = @("LetAppsActivateWithVoice", "LetAppsAccessNotifications", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessRadios", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar", "LetAppsAccessAccountInfo", "LetAppsAccessCamera", "LetAppsAccessMicrophone")
     foreach ($app in $uwpBlocks) { $rescueRules += @{ UIDisplayName = "Restore UWP Permission: $app"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $app; DefaultValue = $null; Type = "Delete" } }
     
@@ -529,24 +518,18 @@ function Get-RescueState_Registry {
     $rescueRules += @{ UIDisplayName = "Restore: Edge Background Mode"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "BackgroundModeEnabled"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: Defender Automatic Sample Submission"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet"; Name = "SubmitSamplesConsent"; DefaultValue = 1; Type = "DWord" }
     
-    # Aggregated Content Delivery network blocks reversal
     $cdmKeys = @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "FeatureManagementEnabled", "PreInstalledAppsEverEnabled", "SoftLandingEnabled", "SubscribedContentEnabled", "SystemPaneSuggestionsEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled")
     foreach ($k in $cdmKeys) { $rescueRules += @{ UIDisplayName = "Restore Content Delivery: $k"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; Name = $k; DefaultValue = $null; Type = "Delete" } }
 
-    # --- 5. SYSTEM BOOT ---
     $rescueRules += @{ UIDisplayName = "Restore: Fast Startup / Hibernation"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"; Name = "HiberbootEnabled"; DefaultValue = 1; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: BIOS/UEFI Software Injections (WPBT)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"; Name = "DisableWpbtExecution"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: OneDrive File Sync Integration"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; Name = "DisableFileSyncNGSC"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: Remote Desktop (RDP) Access"; Path = "HKLM:\System\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections"; DefaultValue = 0; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: Insider Preview Builds"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PreviewBuilds"; Name = "AllowBuildPreview"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: Default Boot Status Messages"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"; Name = "verbosestatus"; DefaultValue = $null; Type = "Delete" }
-
-    # --- 6. MOUSE ---
     $rescueRules += @{ UIDisplayName = "Restore: 'Enhance pointer precision' (Mouse Acceleration)"; Path = "HKCU:\Control Panel\Mouse"; Name = "MouseSpeed"; DefaultValue = "1"; Type = "String" }
     $rescueRules += @{ UIDisplayName = "Restore: Mouse Acceleration Threshold 1"; Path = "HKCU:\Control Panel\Mouse"; Name = "MouseThreshold1"; DefaultValue = "6"; Type = "String" }
     $rescueRules += @{ UIDisplayName = "Restore: Mouse Acceleration Threshold 2"; Path = "HKCU:\Control Panel\Mouse"; Name = "MouseThreshold2"; DefaultValue = "10"; Type = "String" }
-
-    # --- 7. GAMING ---
     $rescueRules += @{ UIDisplayName = "Restore: Xbox GameDVR"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVR"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: GameDVR Store Config"; Path = "HKCU:\System\GameConfigStore"; Name = "GameDVR_Enabled"; DefaultValue = 1; Type = "DWord" }
     $rescueRules += @{ UIDisplayName = "Restore: FullScreen Exclusive Behavior"; Path = "HKCU:\System\GameConfigStore"; Name = "GameDVR_FSEBehavior"; DefaultValue = $null; Type = "Delete" }
@@ -561,20 +544,16 @@ function Get-RescueState_Registry {
     $rescueRules += @{ UIDisplayName = "Restore: MMCSS Profile Priority"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; DefaultValue = $null; Type = "Delete" }
     $rescueRules += @{ UIDisplayName = "Restore: MMCSS Profile Scheduling Category"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Scheduling Category"; DefaultValue = $null; Type = "Delete" }
 
-    # --- ENGINE EXECUTION CORE ---
     $results = @()
     foreach ($rule in $rescueRules) {
         $isDetected = $false
         
         if ($rule.Type -eq "DeleteKey") {
-            # Jeśli usunięty wcześniej przez WinUltix klucz ISTNIEJE, oznacz go do powtórnego usunięcia
             if (Test-Path $rule.Path) { $isDetected = $true }
         } elseif ($rule.Type -eq "Delete") {
-            # Jeśli wartość usunięta przez WinUltix ISTNIEJE, oznacz do skasowania (wymusza powrót do domyślnych zasad Windows)
             $currentValue = (Get-ItemProperty -Path $rule.Path -Name $rule.Name -ErrorAction SilentlyContinue).$($rule.Name)
             if ($null -ne $currentValue) { $isDetected = $true }
         } else {
-            # Jeśli obecna wartość różni się od narzuconej domyślnej fabrycznej
             $currentValue = (Get-ItemProperty -Path $rule.Path -Name $rule.Name -ErrorAction SilentlyContinue).$($rule.Name)
             if ($null -ne $currentValue -and [string]$currentValue -ne [string]$rule.DefaultValue) { 
                 $isDetected = $true 
@@ -592,14 +571,11 @@ function Get-RescueState_Registry {
 
 function Get-RescueState_Services {
     $rules = @(
-        # --- Usługi Automatyczne (2) ---
         @{ UIDisplayName = "Restore Service: SysMain / Superfetch [Automatic]"; Name = "SysMain"; ExpectedStart = 2 }
         @{ UIDisplayName = "Restore Service: Print Spooler [Automatic]"; Name = "Spooler"; ExpectedStart = 2 }
         @{ UIDisplayName = "Restore Service: Windows Search [Automatic]"; Name = "WSearch"; ExpectedStart = 2 }
         @{ UIDisplayName = "Restore Service: Connected User Experiences [Automatic]"; Name = "DiagTrack"; ExpectedStart = 2 }
         @{ UIDisplayName = "Restore Service: Program Compatibility Assistant [Automatic]"; Name = "PcaSvc"; ExpectedStart = 2 }
-
-        # --- Usługi Ręczne (3) ---
         @{ UIDisplayName = "Restore Service: Downloaded Maps Manager [Manual]"; Name = "MapsBroker"; ExpectedStart = 3 }
         @{ UIDisplayName = "Restore Service: Retail Demo Service [Manual]"; Name = "RetailDemo"; ExpectedStart = 3 }
         @{ UIDisplayName = "Restore Service: Edge Update Service [Manual]"; Name = "edgeupdate"; ExpectedStart = 3 }
@@ -631,6 +607,5 @@ function Get-RescueState_Services {
         @{ UIDisplayName = "Restore Service: WAP Push Message Routing [Manual]"; Name = "dmwappushservice"; ExpectedStart = 3 }
         @{ UIDisplayName = "Restore Service: Windows Error Reporting [Manual]"; Name = "wermgr"; ExpectedStart = 3 }
     )
-    # Wykorzystujemy nasz uniwersalny skaner usług (ten sam, co w zakładce Services!)
     return Invoke-ServicesAudit -Rules $rules
 }
