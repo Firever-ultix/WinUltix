@@ -15,7 +15,7 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 * **Absolute Transparency:** WinUltix reads your live system state before acting. It dynamically weighs your junk files in MBs, flags unoptimized settings as `[ DETECTED ]`, and clearly shows what was already scanned and safe as `[ OPTIMIZED ]` or `[ Clean ]`. Nothing happens behind your back.
 * **100% Reversible:** The onboard **Interactive Rescue Module** scans for changes made and allows you to symmetrically revert any registry tweak or service state back to Windows factory defaults.
 
----
+![WinUltix Modal Interface](assets/2.jpg)
 
 ### ⚙️ Feature Highlights
 
