@@ -1,16 +1,18 @@
-# WinUltix Pro 2.0 🚀
+# WinUltix Pro 2.1 🚀
 **A ~240KB, Portable, Zero-Dependency Windows 11 Optimizer**
 
-Most "debloaters" on the market are black boxes. They force you to click a magic button, silently hijack OS privileges, and leave you guessing what actually changed when your system becomes unstable.
+For years, I’ve been collecting various registry tweaks, optimization scripts, and diagnostics scattered across the internet. I finally decided to put them all together in one project so everything is in one place. That's how WinUltix was born.
 
-**WinUltix Pro 2.0** changes the rules. Built for IT professionals, hardware enthusiasts, and gamers, it surgically removes telemetry, bloatware, and background noise. It is a highly personalized, **100% transparent, and fully reversible** toolkit that puts you in complete control.
+Most "debloaters" on the market are black boxes. They force you to click a magic button, silently hijack OS privileges, and leave you guessing what actually changed when your system becomes unstable. I wanted to build something completely different.
+
+**WinUltix Pro 2.1** is my personal toolkit built for IT professionals, hardware enthusiasts, and gamers. It surgically removes telemetry, bloatware, and background noise, but most importantly—it is a **100% transparent, interactive, and fully reversible** toolkit that puts *you* in complete control.
 
 ![WinUltix Main Interface](assets/1.jpg)
 
 ### 🛡️ Why WinUltix Pro?
 * **Micro-Sized & Portable:** A standalone `~240KB .exe`. No installations, no web-views, no background telemetry, and zero dependencies. Run it straight from a USB drive for a rapid system refresh.
-* **Interactive Modals (New in v2.0):** Total granular control. Every tweak opens an interactive checklist. You can precisely select which specific registry key, service, or Appx package to modify.
-* **Smart Live Detection:** WinUltix reads your live system state before acting. It automatically checks unoptimized settings (`[ DETECTED ]`) and safely ignores elements that are already configured (`[ OPTIMIZED ]`).
+* **Interactive Modals:** Total granular control. Every major action opens an interactive checklist. You can precisely select which specific registry key, service, Appx package, or directory to modify.
+* **Absolute Transparency:** WinUltix reads your live system state before acting. It dynamically weighs your junk files in MBs, flags unoptimized settings as `[ DETECTED ]`, and clearly shows what was already scanned and safe as `[ OPTIMIZED ]` or `[ Clean ]`. Nothing happens behind your back.
 * **100% Reversible:** The onboard **Interactive Rescue Module** scans for changes made and allows you to symmetrically revert any registry tweak or service state back to Windows factory defaults.
 
 ---
@@ -29,8 +31,9 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 * **Hard MDM Policies:** Permanently blocks Windows 11 from silently downloading promoted store apps.
 
 #### 3. Deep Bloatware Removal & Smart Garbage Collection
-* **Aggressive Appx Cleansing:** Interactively uninstalls and *deprovisions* consumer bloatware (TikTok, Xbox Game Bar, Copilot).
+* **Aggressive Appx Cleansing:** Interactively uninstalls and *deprovisions* consumer bloatware (TikTok, Xbox Game Bar, Copilot) across all user profiles.
 * **Intelligent Garbage Collector:** Scans application dependency trees and automatically targets orphaned UWP frameworks left behind by old apps.
+* **Storage Purge:** Safely weighs and cleans Windows Update caches, Temp folders, and third-party app caches without forcibly stopping background services.
 
 #### 4. Utilities & Fast Diagnostics
 * **Diagnostic Audits (`?`):** Generate instant, read-only reports in the console without modifying your system.
@@ -52,6 +55,6 @@ This project is licensed under the **MIT License**.
 *Provided "AS IS". While WinUltix Pro uses safe MDM policies, cache clearing, and standard service configurations rather than destructive file-deletion hacks, registry manipulation always carries inherent risks. Creating a system restore point before deployment is highly recommended.*
 
 ### ☕ Coffee
-This project is, and will be, free of charge. Instead, if you like it, you can buy me a coffee.<br>
+This project is, and always will be, free of charge. However, if you like it, you can buy me a coffee.<br>
 https://buymeacoffee.com/firever<br>
 Thank you!
