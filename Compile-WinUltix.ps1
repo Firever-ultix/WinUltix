@@ -1,52 +1,58 @@
-﻿Write-Host "Initializing environment..." -ForegroundColor Cyan
+﻿Write-Host "Initializing compiler environment..." -ForegroundColor Cyan
 
-# Temporarily bypass execution policy for this specific process
 Set-ExecutionPolicy Bypass -Scope Process -Force
 Import-Module ps2exe -ErrorAction Stop
 
-Write-Host "Merging files into WinUltix Pro monolith..." -ForegroundColor Cyan
+Write-Host "Building monolith via dynamic inline injection..." -ForegroundColor Cyan
 
-# Define output directory and ensure it exists
 $outDir = ".\build"
-if (-not (Test-Path $outDir)) { 
-    New-Item -ItemType Directory -Path $outDir | Out-Null 
+if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+
+$outputFile = "$outDir\WinUltix_Monolith_EN.ps1"
+$mainFile = ".\src\WinUltix_Pro.ps1"
+$modulesDir = ".\src\Modules"
+
+if (-not (Test-Path $mainFile)) {
+    Write-Host "[!] ERROR: Entry point $mainFile not found." -ForegroundColor Red
+    exit
 }
 
-# 1. Define merge order (main WinUltix file always at the end!)
-# Adding 'src' folder path to source files
-$sourceFiles = @(
-    ".\src\Optimizer_Core_EN.ps1", 
-    ".\src\Optimizer_Audit_EN.ps1", 
-    ".\src\WinUltix_EN.ps1"
-)
-$outputFile = "$outDir\WinUltix_Monolith_EN.ps1"
+$monolithContent = [System.Text.StringBuilder]::new()
+$mainLines = Get-Content $mainFile -Encoding UTF8
 
-# Clear old output file (if it exists)
-if (Test-Path $outputFile) { Remove-Item $outputFile -Force }
-
-# 2. Merge content, forcing UTF8 encoding
-foreach ($file in $sourceFiles) {
-    if (Test-Path $file) {
-        # Read as UTF8
-        $content = Get-Content $file -Raw -Encoding UTF8
-        $cleanContent = $content -replace '(?m)^\.\s*"\$PSScriptRoot\\.*', ''
+foreach ($line in $mainLines) {
+    # Inline modules while explicitly keeping the original dot-source reference as a comment
+    if ($line -match '\.\s*\(Join-Path\s+\$ModulesDir\s+"([^"]+)"\)') {
+        $moduleFile = $matches[1]
+        $modulePath = Join-Path $modulesDir $moduleFile
         
-        # Write as UTF8
-        Add-Content $outputFile $cleanContent -Encoding UTF8
-        Add-Content $outputFile "`r`n" -Encoding UTF8
-    } else {
-        Write-Host "[!] ERROR: File $file not found!" -ForegroundColor Red
-        exit
+        [void]$monolithContent.AppendLine("# $line")
+        [void]$monolithContent.AppendLine("# >>> BEGIN INJECTED MODULE: $moduleFile <<<")
+        
+        if (Test-Path $modulePath) {
+            $modContent = Get-Content $modulePath -Raw -Encoding UTF8
+            [void]$monolithContent.AppendLine($modContent)
+            [void]$monolithContent.AppendLine("# <<< END INJECTED MODULE: $moduleFile <<<`r`n")
+        } else {
+            Write-Host "[!] ERROR: Missing module file: $modulePath" -ForegroundColor Red
+            exit
+        }
+    }
+    # Comment out directory variable declarations to prevent execution in monolith
+    elseif ($line -match '^\s*\$ScriptDir\s*=|^\s*\$ModulesDir\s*=') {
+        [void]$monolithContent.AppendLine("# $line")
+    }
+    else {
+        [void]$monolithContent.AppendLine($line)
     }
 }
 
-Write-Host "Base file generated successfully!" -ForegroundColor Green
-Write-Host "Starting compilation to .exe file..." -ForegroundColor Cyan
+# Single I/O dump
+Set-Content -Path $outputFile -Value $monolithContent.ToString() -Encoding UTF8
 
-# 3. Run ps2exe on the merged file
-# Fetching the input file from build directory and icon from assets directory
+Write-Host "Monolith successfully linked. Executing PS2EXE..." -ForegroundColor Cyan
+
 Invoke-ps2exe -InputFile $outputFile -OutputFile "$outDir\WinUltix_Pro.exe" -NoConsole -RequireAdmin -IconFile ".\assets\winultix.ico"
 
-Write-Host "Compilation finished! WinUltix_Pro.exe is ready to run." -ForegroundColor Yellow
-
-Read-Host "Press Enter to close the window..."
+Write-Host "Deployment successful! WinUltix_Pro.exe is ready." -ForegroundColor Yellow
+Read-Host "Press Enter to close."

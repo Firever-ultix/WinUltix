@@ -1,46 +1,53 @@
-# WinUltix Pro 2.1 🚀
-**A ~240KB, Portable, Zero-Dependency Windows 11 Optimizer**
+# WinUltix Pro 2.5 🚀
+**An Advanced, Portable, Zero-Dependency Windows 11 Optimizer & Hardware Tuning Toolkit**
 
-For years, I’ve been collecting various registry tweaks, optimization scripts, and diagnostics scattered across the internet. I finally decided to put them all together in one project so everything is in one place. That's how WinUltix was born.
+For years, I’ve been collecting various registry tweaks, optimization scripts, and diagnostics scattered across the internet. WinUltix was born to unify them. 
 
-Most "debloaters" on the market are black boxes. They force you to click a magic button, silently hijack OS privileges, and leave you guessing what actually changed when your system becomes unstable. I wanted to build something completely different.
+With version 2.5, the project has evolved from a simple debloater (135KB) into a massive, heavily engineered diagnostic suite (~250KB). It abandons legacy WMI functions in favor of modular encapsulation, direct kernel-level registry manipulation, and deep hardware inspection. 
 
-**WinUltix Pro 2.1** is my personal toolkit built for IT professionals, hardware enthusiasts, and gamers. It surgically removes telemetry, bloatware, and background noise, but most importantly—it is a **100% transparent, interactive, and fully reversible** toolkit that puts *you* in complete control.
+Most "optimizers" on the market are black boxes that silently hijack OS privileges and break system integrity. WinUltix Pro is a **100% transparent, interactive, and fully reversible** toolkit that puts *you* in complete control of your OS, network stack, and hardware interrupts.
 
 ![WinUltix Main Interface](assets/1.jpg)
 
-### 🛡️ Why WinUltix Pro?
-* **Micro-Sized & Portable:** A standalone `~240KB .exe`. No installations, no web-views, no background telemetry, and zero dependencies. Run it straight from a USB drive for a rapid system refresh.
-* **Interactive Modals:** Total granular control. Every major action opens an interactive checklist. You can precisely select which specific registry key, service, Appx package, or directory to modify.
-* **Absolute Transparency:** WinUltix reads your live system state before acting. It dynamically weighs your junk files in MBs, flags unoptimized settings as `[ DETECTED ]`, and clearly shows what was already scanned and safe as `[ OPTIMIZED ]` or `[ Clean ]`. Nothing happens behind your back.
-* **100% Reversible:** The onboard **Interactive Rescue Module** scans for changes made and allows you to symmetrically revert any registry tweak or service state back to Windows factory defaults.
+### 🛡️ Core Architecture & Philosophy
+* **Modular Encapsulation:** The main `WinUltix_Pro.ps1` is now purely a UI launcher. All execution logic is safely sandboxed in isolated `Z1` to `Z7` modules.
+* **Symmetric Revert Engine:** Complete peace of mind. Registry (Z3) and Service (Z4) modules now feature a unified `Show-ActionModal` allowing you to apply or symmetrically **revert** any setting back to Windows factory defaults.
+* **Asynchronous Auditing:** Background Runspace threads and UI timers prevent the application from freezing during heavy file I/O operations (like deep Appx payload scans or WinSxS analysis).
+* **Zero-Dependency & Portable:** A standalone, native PowerShell / WinForms application. No installations, no background telemetry.
 
-![WinUltix Modal Interface](assets/2.jpg)
+---
 
-### ⚙️ Feature Highlights
+### ⚙️ Feature Highlights (v2.5)
 
-#### 1. Hardware & Extreme Gaming Profile
-* **Raw Mouse Input:** Hard-disables pointer acceleration at the registry level for true 1:1 sensor tracking.
-* **Network Latency Reduction:** Injects `TCPNoDelay` into active network adapters to prevent packet queuing in competitive gaming.
-* **Priority Tuning:** Forces SystemResponsiveness limits to 0% and elevates gaming processes via Multimedia Class Scheduler (MMCSS) tweaks.
-* **Safe Core Services:** Safely sets Xbox Live APIs and Camera services to Manual instead of forcefully disabling them, ensuring full compatibility.
+![WinUltix Z7](assets/7.jpg)
 
-#### 2. Advanced Telemetry & Privacy Decimation
-* **Task Scheduler Purge:** Safely disables Customer Experience tasks, Windows Error Reporting, and background feedback loops.
-* **PowerShell & Defender Telemetry Block:** Injects machine-level variables to stop Microsoft from collecting background samples.
-* **Hard MDM Policies:** Permanently blocks Windows 11 from silently downloading promoted store apps.
+#### 1. Hardware & Latency Tuning (Z7 - NEW)
+* **Affinity Lasso:** Automatically forces background applications (Discord, Browsers, Launchers) onto specific CPU cores (e.g., Cores 0-1) to dedicate prime threads to your games.
+* **CPPC P-State Unhider:** Unlocks advanced AMD/Intel power states (EPP, Idle Demote/Promote) directly in the active Power Plan.
+* **MSI Interrupt Enforcer:** Forces Message Signaled Interrupts (MSI) across the PCI bus to bypass IRQ sharing and drastically reduce DPC latency. Includes an automated registry backup mechanism.
+* **WHEA Error Logger:** Parses system logs for hardware instability and decodes APIC IDs to pinpoint exactly which CPU core or RAM timing is failing (crucial for PBO/Curve Optimizer tuning).
+* **Timer & NVMe Lock:** Directly injects `GlobalTimerResolutionRequests` to fix the Win11 0.5ms TSC API bug and disables PCIe ASPM/APST idle states to prevent NVMe micro-stuttering.
+* **Pre-Flight Generator:** Creates a standalone macro-script on your desktop to instantly engage Affinity/CPPC locks before launching a game.
 
-#### 3. Deep Bloatware Removal & Smart Garbage Collection
-* **Aggressive Appx Cleansing:** Interactively uninstalls and *deprovisions* consumer bloatware (TikTok, Xbox Game Bar, Copilot) across all user profiles.
-* **Intelligent Garbage Collector:** Scans application dependency trees and automatically targets orphaned UWP frameworks left behind by old apps.
-* **Storage Purge:** Safely weighs and cleans Windows Update caches, Temp folders, and third-party app caches without forcibly stopping background services.
+#### 2. Deep Bloatware & Junk Removal (Z1 & Z2)
+* **Appx Garbage Collector:** Intelligently scans application dependency trees to find and eradicate orphaned UWP frameworks.
+* **Copilot & CBS Amputation:** Uses aggressive `takeown` / `icacls` binary amputation for persistent bloatware and safely purges underlying CBS capability stubs.
+* **Asynchronous Cleanup:** Weighs and purges Windows Update caches, Event Logs (via `wevtutil`), and Third-Party app caches (Discord, Edge, NVIDIA DxCache) across all user profiles simultaneously.
 
-#### 4. Utilities & Fast Diagnostics
-* **Diagnostic Audits (`?`):** Generate instant, read-only reports in the console without modifying your system.
-* **Start Menu Reset:** Wipes the internal `start2.bin` database for a fresh, fully customizable layout.
-* **Fast DNS Switch:** Rapidly apply secure DNS providers (Cloudflare, Quad9, AdGuard) with a single click.
+#### 3. Registry & Privacy Lockdown (Z3)
+* **Software Restriction Policies (SRP):** Generates native OS-level execution locks (Safer API) to permanently block problematic executables (e.g., SearchHost, CrossDeviceResume) from ever running.
+* **Raw Mouse Input:** Hard-disables pointer acceleration at the registry level (`MouseThreshold1/2`) for true 1:1 sensor tracking.
+* **Extreme Gaming Profile:** Elevates gaming processes via Multimedia Class Scheduler (MMCSS) tweaks, disables VBS / Hypervisor Code Integrity, and disables Paging Executive to keep the kernel in RAM.
 
-![WinUltix Tabs Overview](assets/8.jpg)
+#### 4. Services & Integrity (Z4 & Z6)
+* **Heavy/Light Service Profiles:** Pre-configured automated profiles to safely strip background services depending on whether the machine is an Office PC or a dedicated Gaming rig.
+* **Ghost Service Sweeper:** Identifies and cleans registry entries for orphaned drivers and services pointing to non-existent binaries.
+* **Print & Network Subsystem Resets:** Instantly fixes "No Internet" errors by flushing the network stack (Winsock) and repairs deadlocked print spoolers (purging stuck RAW/SHD files).
+* **ResetBase (WinSxS):** Aggressively compresses the Component Store by destroying superseded Windows Update backups to reclaim massive amounts of C: drive space.
+
+![WinUltix Main tabs](assets/6.png)
+
+---
 
 ### 🚀 Getting Started
 
@@ -52,9 +59,9 @@ Most "debloaters" on the market are black boxes. They force you to click a magic
 This project is licensed under the **MIT License**.
 
 ### ⚠️ Disclaimer
-*Provided "AS IS". While WinUltix Pro uses safe MDM policies, cache clearing, and standard service configurations rather than destructive file-deletion hacks, registry manipulation always carries inherent risks. Creating a system restore point before deployment is highly recommended.*
+*Provided "AS IS". While WinUltix Pro strictly relies on documented OS policies, safe cache clearing, and built-in API hooks, low-level registry manipulation and hardware interrupt enforcement always carry inherent risks. Creating a system restore point before deployment is highly recommended.*
 
 ### ☕ Coffee
-This project is, and always will be, free of charge. However, if you like it, you can buy me a coffee.<br>
+This project is, and always will be, free of charge. However, if you appreciate it, you can buy me a coffee.<br>
 https://buymeacoffee.com/firever<br>
 Thank you!
