@@ -66,7 +66,6 @@ function Get-RegState_Taskbar {
         @{ UIDisplayName = "UI: Disable App Push Notifications (Policy)"; Path = "HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoToastApplicationNotification"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "Search: Disable Bing Web Results (Keeps local queries private)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "DisableWebSearch"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "Search: Disable Connected Cloud Search Services"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchUseWeb"; Expected = 0; Default = 1; Type = "DWord" }
-        @{ UIDisplayName = "Search: Disable Cortana Integration"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowCortana"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Search: Disable Location Tracking in Search"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowSearchToUseLocation"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Search: Force Local-Only UI (Disable Bing Search UI)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"; Name = "BingSearchEnabled"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Search: Disable Search Highlights (Dynamic Web Content)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "EnableDynamicContentInWSB"; Expected = 0; Default = 1; Type = "DWord" }
@@ -128,12 +127,6 @@ function Get-RegState_Privacy {
     $cdmKeys = @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "FeatureManagementEnabled", "PreInstalledAppsEverEnabled", "SoftLandingEnabled", "SubscribedContentEnabled", "SystemPaneSuggestionsEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled")
     foreach ($k in $cdmKeys) { $rules += @{ UIDisplayName = "Junk Blocker: Disable Content Delivery ($k)"; Path = $cdm; Name = $k; Expected = 0; Default = 1; Type = "DWord" } }
     
-    $rules += @{ UIDisplayName = "Privacy: Disable Cross-Device Experience (Resume)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CrossDevice"; Name = "EnableCrossDevice"; Expected = 0; Default = 1; Type = "DWord" }
-    $rules += @{ UIDisplayName = "Privacy: Disable Connected Devices Platform (CDP)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"; Name = "EnableCdp"; Expected = 0; Default = 1; Type = "DWord" }
-    $rules += @{ UIDisplayName = "Privacy: Disable Cross-Device Resume Feature"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CrossDeviceResume\Configuration"; Name = "Enabled"; Expected = 0; Default = 1; Type = "DWord" }
-    $rules += @{ UIDisplayName = "Privacy: Force Disable OS Feature Update for Resume"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\FeatureManagement\Overrides\4218804918"; Name = "EnabledStateOptions"; Expected = 0; Default = 1; Type = "DWord" }
-    $rules += @{ UIDisplayName = "Privacy: Block CrossDeviceResume Execution (IFEO Nullification)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\crossdeviceresume.exe"; Name = "Debugger"; Expected = "systray.exe"; Default = "DELETE_VALUE"; Type = "String" }
-
     return Invoke-RegistryAudit -Rules $rules
 }
 
@@ -183,9 +176,11 @@ function Get-RegState_Gaming {
 # ------------------------------------------
 function Get-RegState_SRP {
     $targets = @(
-        @{ UIDisplayName = "SRP Lock: Cross-Device Experience (crossdeviceresume.exe)"; TargetPath = "$env:windir\SystemApps\crossdeviceresume.exe" }
         @{ UIDisplayName = "SRP Lock: Windows Widgets (Widgets.exe)"; TargetPath = "$env:ProgramFiles\WindowsApps\MicrosoftWindows.Client.WebExperience_cw5n1h2txyewy\Widgets.exe" }
-        @{ UIDisplayName = "SRP Lock: Search Host (SearchHost.exe - Kills Start Menu Search)"; TargetPath = "$env:windir\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\SearchHost.exe" }
+        @{ UIDisplayName = "SRP Lock: Compatibility Telemetry (CompatTelRunner.exe)"; TargetPath = "$env:windir\System32\CompatTelRunner.exe" }
+        @{ UIDisplayName = "SRP Lock: Hardware Telemetry (DeviceCensus.exe)"; TargetPath = "$env:windir\System32\DeviceCensus.exe" }
+        @{ UIDisplayName = "SRP Lock: GameBar Telemetry (GameBarPresenceWriter.exe)"; TargetPath = "$env:windir\System32\GameBarPresenceWriter.exe" }
+        @{ UIDisplayName = "SRP Lock: Edge Background Updater (MicrosoftEdgeUpdate.exe)"; TargetPath = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe" }
     )
     
     # Region: Dynamic Custom SRP Loader
@@ -229,6 +224,9 @@ function Get-RegState_SRP {
     return $results
 }
 
+# ------------------------------------------
+# Z3: SRP (SOFTWARE RESTRICTION POLICIES) ENGINE
+# ------------------------------------------
 function Invoke-ApplySRP {
     param(
         [Parameter(Mandatory=$true)][array]$SelectedItems,
@@ -244,9 +242,24 @@ function Invoke-ApplySRP {
     
     if ($Operation -eq 'Apply') {
         if (-not (Test-Path $srpRoot)) { New-Item -Path $srpRoot -Force | Out-Null }
-        Set-ItemProperty -Path $srpRoot -Name "AuthenticodeEnabled" -Value 0 -Type DWord
-        Set-ItemProperty -Path $srpRoot -Name "DefaultLevel" -Value 262144 -Type DWord
-        Set-ItemProperty -Path $srpRoot -Name "TransparentEnabled" -Value 1 -Type DWord
+        
+        # [FIX] Zapewnienie wymaganych metadanych struktury Safer API
+        $srpSettings = @{
+            "AuthenticodeEnabled" = 0
+            "DefaultLevel"        = 262144
+            "TransparentEnabled"  = 1
+            "PolicyScope"         = 0
+        }
+        foreach ($kvp in $srpSettings.GetEnumerator()) {
+            Set-ItemProperty -Path $srpRoot -Name $kvp.Key -Value $kvp.Value -Type DWord -Force
+        }
+        
+        $exeTypes = [string[]]@("BAT","CMD","COM","EXE","HTA","LNK","MSI","OCX","PIF","REG","SCR","VBS","WSF")
+        Set-ItemProperty -Path $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Force
+        
+        # [FIX] Silnik ignoruje reguły, jeśli brakuje węzła 262144 (Unrestricted)
+        if (-not (Test-Path "$srpRoot\0")) { New-Item -Path "$srpRoot\0" -Force | Out-Null }
+        if (-not (Test-Path "$srpRoot\262144")) { New-Item -Path "$srpRoot\262144" -Force | Out-Null }
         if (-not (Test-Path $srpPaths)) { New-Item -Path $srpPaths -Force | Out-Null }
     }
 
@@ -292,11 +305,29 @@ function Invoke-ApplySRP {
         } catch { Write-GUI "    [!] Failed to modify SRP rule: $($_.Exception.Message)" }
     }
     
-    if ($Operation -eq 'Revert' -and $revertOccurred) {
-        Write-GUI " -> Flushing shell token cache..."
-        [System.Windows.Forms.Application]::DoEvents() 
+    # [FIX] Wymuszona aktualizacja GPO i przeładowanie Explorer.exe
+    if ($revertOccurred -or $Operation -eq 'Apply') {
+        Write-GUI " -> Refreshing Safer API policy tokens (gpupdate)..."
+        
+        # Uruchomienie asynchroniczne z PassThru zamiast -Wait
+        $gpProc = Start-Process -FilePath "gpupdate.exe" -ArgumentList "/force" -WindowStyle Hidden -PassThru
+        
+        # Sztuczna animacja paska postępu odblokowująca wątek UI
+        $fakeProgress = 0
+        while (-not $gpProc.HasExited) {
+            $fakeProgress += 5
+            if ($fakeProgress -gt 100) { $fakeProgress = 0 }
+            
+            if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress $fakeProgress }
+            [System.Windows.Forms.Application]::DoEvents() 
+            Start-Sleep -Milliseconds 100
+        }
+        
+        # Wyrównanie paska na 100% po zakończeniu
+        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 100 }
+        
         Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
-        Write-GUI "    [OK] Explorer restarted. Safer API tokens flushed."
+        Write-GUI "    [OK] Explorer restarted. AuthZ kernel tokens flushed."
     }
 
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }

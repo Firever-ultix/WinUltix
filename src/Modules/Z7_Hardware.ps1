@@ -1043,10 +1043,26 @@ function Show-NVMeModal {
 
 function New-PreFlightShortcut {
     $appDataFolder = "$env:LOCALAPPDATA\WinUltix"
-    if (-not (Test-Path $appDataFolder)) { New-Item -Path $appDataFolder -ItemType Directory -Force | Out-Null }
-    $ps1Path = "$appDataFolder\PreFlight.ps1"
+    if (-not (Test-Path $appDataFolder)) { 
+        try { New-Item -Path $appDataFolder -ItemType Directory -Force -ErrorAction Stop | Out-Null } 
+        catch { [System.Windows.Forms.MessageBox]::Show("Failed to create WinUltix AppData directory.", "Error"); return }
+    }
     
+    $ps1Path = "$appDataFolder\PreFlight.ps1"
+    $isAmd8Core = Test-CPUTopology
+
+    # Dynamic GUI bindings based on hardware
+    $affState  = if ($isAmd8Core) { "`$true" } else { "`$false" }
+    $affString = if ($isAmd8Core) { "Affinity Lasso (Lock apps to Cores 0-1)" } else { "Affinity Lasso (AMD 8C Only - Disabled)" }
+    $affColor  = if ($isAmd8Core) { "White" } else { "DarkGray" }
+
     $code = @"
+`$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not `$isAdmin) {
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`$PSCommandPath`"" -Verb RunAs
+    exit
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 `$frm = New-Object System.Windows.Forms.Form
 `$frm.Text = "Pre-Flight Game Mode"
@@ -1054,8 +1070,11 @@ Add-Type -AssemblyName System.Windows.Forms
 `$frm.StartPosition = "CenterScreen"; `$frm.FormBorderStyle = "FixedDialog"; `$frm.MaximizeBox = `$false
 `$frm.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); `$frm.ForeColor = [System.Drawing.Color]::White
 
-`$chkAff = New-Object System.Windows.Forms.CheckBox; `$chkAff.Text = "Affinity Lasso (Lock apps to Cores 0-1)"
-`$chkAff.Location = New-Object System.Drawing.Point(20, 15); `$chkAff.Size = New-Object System.Drawing.Size(300, 25); `$chkAff.Checked = `$true
+`$chkAff = New-Object System.Windows.Forms.CheckBox
+`$chkAff.Text = "$affString"
+`$chkAff.Location = New-Object System.Drawing.Point(20, 15); `$chkAff.Size = New-Object System.Drawing.Size(300, 25)
+`$chkAff.Checked = $affState; `$chkAff.Enabled = $affState; `$chkAff.ForeColor = [System.Drawing.Color]::$affColor
+
 `$chkCPPC = New-Object System.Windows.Forms.CheckBox; `$chkCPPC.Text = "Max CPPC (EPP 0%, Disable C-States)"
 `$chkCPPC.Location = New-Object System.Drawing.Point(20, 45); `$chkCPPC.Size = New-Object System.Drawing.Size(300, 25); `$chkCPPC.Checked = `$true
 
@@ -1066,43 +1085,77 @@ Add-Type -AssemblyName System.Windows.Forms
 `$frm.Controls.AddRange(@(`$chkAff, `$chkCPPC, `$btnEngage, `$btnRelease, `$btnCancel))
 `$res = `$frm.ShowDialog()
 
-`$c = 'HKCU:\Software\WinUltix\AffinityLasso'; `$p = 'HKCU:\Software\WinUltix\CPPC'
+`$c = 'HKCU:\Software\WinUltix\AffinityLasso'
+`$p = 'HKCU:\Software\WinUltix\CPPC'
 function Get-Pcfg (`$g) { `$o = (powercfg /qh SCHEME_CURRENT SUB_PROCESSOR `$g) -join ' '; if (`$o -match 'Current AC Power Setting Index: (0x[0-9a-fA-F]+)') { return [convert]::ToInt32(`$matches[1], 16) }; return `$null }
 
 if (`$res -eq "Yes") {
-    if (`$chkAff.Checked -and (Test-Path `$c)) { (Get-ItemProperty `$c).PSObject.Properties | Where-Object { `$_.Name -match '\.exe`$' } | ForEach-Object { `$n = `$_.Name.Replace('.exe',''); Get-Process -Name `$n -ErrorAction SilentlyContinue | ForEach-Object { try { `$_.ProcessorAffinity = [System.IntPtr]15 } catch {} } } }
+    if (`$chkAff.Checked -and (Test-Path `$c)) { 
+        (Get-ItemProperty `$c).PSObject.Properties | Where-Object { `$_.Name -match '\.exe`$' } | ForEach-Object { 
+            `$n = `$_.Name.Replace('.exe','')
+            Get-Process -Name `$n -ErrorAction SilentlyContinue | ForEach-Object { 
+                try { `$_.ProcessorAffinity = [System.IntPtr]15; `$_.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {} 
+            } 
+        } 
+    }
+    
     if (`$chkCPPC.Checked) {
-        if (!(Test-Path `$p)) { New-Item -Path `$p -Force | Out-Null }
-        `$e=Get-Pcfg '36687f9e-e3a5-4dbf-b1dc-15eb381c6863'; `$d=Get-Pcfg '4b92d758-5a24-4851-a470-815d78aee119'; `$pr=Get-Pcfg '7b224883-b3cc-4d79-819f-8374152cbe7c'
+        if (-not (Test-Path `$p)) { New-Item -Path `$p -Force | Out-Null }
+        `$e = Get-Pcfg '36687f9e-e3a5-4dbf-b1dc-15eb381c6863'
+        `$d = Get-Pcfg '4b92d758-5a24-4851-a470-815d78aee119'
+        `$pr = Get-Pcfg '7b224883-b3cc-4d79-819f-8374152cbe7c'
+        
         if (`$null -ne `$e) { Set-ItemProperty -Path `$p -Name 'EPP' -Value `$e -Type DWord }
         if (`$null -ne `$d) { Set-ItemProperty -Path `$p -Name 'Demote' -Value `$d -Type DWord }
         if (`$null -ne `$pr) { Set-ItemProperty -Path `$p -Name 'Promote' -Value `$pr -Type DWord }
-        if (`$chkAff.Checked -and (Test-Path `$c)) { (Get-ItemProperty `$c).PSObject.Properties | Where-Object { `$_.Name -match '\.exe`$' } | ForEach-Object { `$n = `$_.Name.Replace('.exe',''); Get-Process -Name `$n -ErrorAction SilentlyContinue | ForEach-Object { try { `$_.ProcessorAffinity = [System.IntPtr]15; `$_.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {} } } }
+        
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setactive SCHEME_CURRENT
     }
 } elseif (`$res -eq "No") {
-    if (`$chkAff.Checked) { `$sys = (Get-Process -Id `$PID).ProcessorAffinity; if (Test-Path `$c) { (Get-ItemProperty `$c).PSObject.Properties | Where-Object { `$_.Name -match '\.exe`$' } | ForEach-Object { `$n = `$_.Name.Replace('.exe',''); Get-Process -Name `$n -ErrorAction SilentlyContinue | ForEach-Object { try { `$_.ProcessorAffinity = `$sys; `$_.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal } catch {} } } } }
+    if (`$chkAff.Checked) { 
+        `$sys = (Get-Process -Id `$PID).ProcessorAffinity
+        if (Test-Path `$c) { 
+            (Get-ItemProperty `$c).PSObject.Properties | Where-Object { `$_.Name -match '\.exe`$' } | ForEach-Object { 
+                `$n = `$_.Name.Replace('.exe','')
+                Get-Process -Name `$n -ErrorAction SilentlyContinue | ForEach-Object { 
+                    try { `$_.ProcessorAffinity = `$sys; `$_.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal } catch {} 
+                } 
+            } 
+        } 
+    }
+    
     if (`$chkCPPC.Checked) {
-        `$e=50; `$d=40; `$pr=60; if (Test-Path `$p) { `$reg=Get-ItemProperty -Path `$p -ErrorAction SilentlyContinue; if (`$null -ne `$reg.EPP) { `$e=`$reg.EPP }; if (`$null -ne `$reg.Demote) { `$d=`$reg.Demote }; if (`$null -ne `$reg.Promote) { `$pr=`$reg.Promote } }
+        `$e = 50; `$d = 40; `$pr = 60
+        if (Test-Path `$p) { 
+            `$reg = Get-ItemProperty -Path `$p -ErrorAction SilentlyContinue
+            if (`$null -ne `$reg.EPP) { `$e = `$reg.EPP }
+            if (`$null -ne `$reg.Demote) { `$d = `$reg.Demote }
+            if (`$null -ne `$reg.Promote) { `$pr = `$reg.Promote } 
+        }
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$e; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$e
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$d; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$d
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$pr; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$pr; powercfg.exe /setactive SCHEME_CURRENT
     }
 }
 "@
-    Set-Content -Path $ps1Path -Value $code -Encoding UTF8
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $WshShell = New-Object -ComObject WScript.Shell
-    $Shortcut = $WshShell.CreateShortcut("$desktop\WinUltix Pre-Flight Mode.lnk")
-    $Shortcut.TargetPath = "powershell.exe"
-    $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1Path`""
-    $Shortcut.WindowStyle = 7
-    $Shortcut.IconLocation = "shell32.dll, 137"
-    $Shortcut.Save()
-    
-    [System.Windows.Forms.MessageBox]::Show("Pre-Flight Shortcut generated on Desktop.", "Success")
+
+    try {
+        Set-Content -Path $ps1Path -Value $code -Encoding UTF8 -ErrorAction Stop
+        $desktop = [Environment]::GetFolderPath("Desktop")
+        $WshShell = New-Object -ComObject WScript.Shell -ErrorAction Stop
+        $Shortcut = $WshShell.CreateShortcut("$desktop\WinUltix Pre-Flight Mode.lnk")
+        $Shortcut.TargetPath = "powershell.exe"
+        $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1Path`""
+        $Shortcut.WindowStyle = 7
+        $Shortcut.IconLocation = "shell32.dll, 137"
+        $Shortcut.Save()
+        
+        [System.Windows.Forms.MessageBox]::Show("Pre-Flight Shortcut generated on Desktop.", "Success")
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Failed to construct COM object or write file.`n`nError: $($_.Exception.Message)", "Shortcut Generation Failed")
+    }
 }
 
 function Initialize-Z7UI {
@@ -1113,15 +1166,26 @@ function Initialize-Z7UI {
     $tab.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
 
     $btnAffinity = New-Object System.Windows.Forms.Button
-    $btnAffinity.Text = "Affinity Lasso (CPU Core Lock)"
     $btnAffinity.Location = New-Object System.Drawing.Point(15, 20)
     $btnAffinity.Size = New-Object System.Drawing.Size(240, 40)
-    $btnAffinity.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
-    $btnAffinity.ForeColor = [System.Drawing.Color]::White
     $btnAffinity.FlatStyle = "Flat"
-    $btnAffinity.Add_MouseEnter({ Show-Description "Lock background apps to specific cores to free up gaming cores." })
-    $btnAffinity.Add_MouseLeave({ Restore-Log })
-    $btnAffinity.Add_Click({ Show-AffinityModal "Affinity Lasso" "Lock background processes to E-Cores or specific threads." })
+
+    $isAmd8Core = Test-CPUTopology
+
+    if ($isAmd8Core) {
+        $btnAffinity.Text = "Affinity Lasso (CPU Core Lock)"
+        $btnAffinity.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
+        $btnAffinity.ForeColor = [System.Drawing.Color]::White
+        $btnAffinity.Add_MouseEnter({ Show-Description "Lock background apps to specific cores to free up gaming cores." })
+        $btnAffinity.Add_MouseLeave({ Restore-Log })
+        $btnAffinity.Add_Click({ Show-AffinityModal "Affinity Lasso" "Lock background processes to E-Cores or specific threads." })
+    } else {
+        $btnAffinity.Text = "Affinity Lasso (AMD 8C Only)"
+        $btnAffinity.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+        $btnAffinity.ForeColor = [System.Drawing.Color]::DarkGray
+        $btnAffinity.Enabled = $false
+        # Note: Disabled controls in WinForms do not trigger MouseEnter/MouseLeave events natively.
+    }
 
     $btnCPPC = New-Object System.Windows.Forms.Button
     $btnCPPC.Text = "CPPC P-State Unhider"
