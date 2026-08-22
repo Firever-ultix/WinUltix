@@ -251,7 +251,7 @@ function Initialize-Z5UI {
     $btnUtilSvc.Add_Click({ Show-ServicesGrid; Write-GUI "" })
 
     $btnUtilStartup = New-Object System.Windows.Forms.Button
-    $btnUtilStartup.Text = "Startup Management (Registry & Folders)"
+    $btnUtilStartup.Text = "Startup Management (Registry and Folders)"
     $btnUtilStartup.Location = New-Object System.Drawing.Point(15, 190)
     $btnUtilStartup.Size = New-Object System.Drawing.Size(370, 40)
     $btnUtilStartup.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 100, 150)

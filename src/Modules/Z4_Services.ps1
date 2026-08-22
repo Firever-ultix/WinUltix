@@ -107,8 +107,6 @@ function Get-ServicesState_Light {
         @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
         @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3 }
     )
     return Invoke-ServicesAudit -Rules $rules
 }
@@ -147,7 +145,8 @@ function Get-ServicesState_Heavy {
         @{ UIDisplayName = "Telemetry: WAP Push Message Routing (dmwappushservice)"; Name = "dmwappushservice"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Telemetry: Windows Error Reporting (wermgr)"; Name = "wermgr"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Logitech: Lamp Array Service RGB (logi_lamparray_service)"; Name = "logi_lamparray_service"; ExpectedStart = 4; DefaultStart = 3 }
-        
+        @{ UIDisplayName = "Updates: Delivery Optimization (DoSvc)"; Name = "DoSvc"; ExpectedStart = 4; DefaultStart = 2 }
+		
         @{ UIDisplayName = "Xbox: Xbox Live Auth Manager [Manual] (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 3; DefaultStart = 3 }
         @{ UIDisplayName = "Xbox: Xbox Live Game Save [Manual] (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 3; DefaultStart = 3 }
         @{ UIDisplayName = "Xbox: Xbox Live Networking Service [Manual] (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 3; DefaultStart = 3 }
@@ -403,7 +402,7 @@ function Initialize-Z4UI {
 
     # Power
     $btnPower = New-Object System.Windows.Forms.Button
-    $btnPower.Text = "Optimize Power & Display"
+    $btnPower.Text = "Optimize Power and Display"
     $btnPower.Location = New-Object System.Drawing.Point(15, 120)
     $btnPower.Size = New-Object System.Drawing.Size(320, 40)
     $btnPower.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)

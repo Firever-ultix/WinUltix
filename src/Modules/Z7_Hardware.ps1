@@ -49,7 +49,9 @@ function Get-HardwareState_Affinity {
                     if ($wmicOut -match "ExecutablePath=(.+)") { $procPath = $matches[1].Trim() }
                 } catch {}
             }
-            if (-not $procPath) { $procPath = "[Protected by OS / Virtualized Process]" }
+            if (-not $procPath) { 
+                continue 
+            }
         }
 
         $priority = "---"
@@ -358,6 +360,11 @@ function Get-HardwareState_NVMe {
     $isNvmeIdleOpt = ($null -ne $nvmeIdle -and $nvmeIdle -eq 0)
     $results += [PSCustomObject]@{ UIDisplayName = "StorNVMe APST Driver Lock (IdlePowerMode)"; IsOptimized = $isNvmeIdleOpt; ActionData = @{ Type="Reg"; Path=$nvmePath; Name="IdlePowerMode"; Val=0 } }
 
+    # 3. System Memory Compression (MMAgent)
+    $mmAgent = Get-MMAgent
+    $isMemOpt = ($mmAgent.MemoryCompression -eq $false)
+    $results += [PSCustomObject]@{ UIDisplayName = "System Memory Compression (MMAgent)"; IsOptimized = $isMemOpt; ActionData = @{ Type="MMAgent" } }
+
     return $results
 }
 
@@ -506,16 +513,18 @@ function Invoke-ApplyTimerTweaks {
 
 function Invoke-ApplyNVMeTweaks {
     param([array]$SelectedItems)
-    if ($SelectedItems.Count -eq 0) { Write-GUI " -> No NVMe modifications selected."; return }
+    if ($SelectedItems.Count -eq 0) { Write-GUI " -> No I/O or Memory modifications selected."; return }
 
     foreach ($item in $SelectedItems) {
         $data = $item.ActionData
-        Write-GUI " -> Configuring NVMe/PCIe Subsystem: $($item.UIDisplayName)"
+        Write-GUI " -> Configuring Subsystem: $($item.UIDisplayName)"
         
         try {
             if ($data.Type -eq "Reg") {
                 if (-not (Test-Path $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
                 Set-ItemProperty -Path $data.Path -Name $data.Name -Value $data.Val -Type DWord -Force -ErrorAction Stop
+            } elseif ($data.Type -eq "MMAgent") {
+                Disable-MMAgent -MemoryCompression -ErrorAction Stop
             }
         } catch { 
             Write-GUI "    [!] Failed to apply: $($item.UIDisplayName)"
@@ -580,6 +589,20 @@ function Show-AffinityModal {
         } else { [System.Windows.Forms.MessageBox]::Show("Process must end with .exe", "Invalid Input") }
     }.GetNewClosure())
 
+    $btnDelExe = New-Object System.Windows.Forms.Button; $btnDelExe.Text = "- Remove Selected"; $btnDelExe.Location = New-Object System.Drawing.Point(425, 554); $btnDelExe.Size = New-Object System.Drawing.Size(140, 27); $btnDelExe.BackColor = [System.Drawing.Color]::FromArgb(255, 100, 60, 60); $btnDelExe.FlatStyle = "Flat"; $btnDelExe.Anchor = 'Bottom, Left'
+    $btnDelExe.Add_Click({
+        $configPath = "HKCU:\Software\WinUltix\AffinityLasso"
+        $removed = 0
+        foreach ($item in $listView.SelectedItems) {
+            $exe = $localData[$item.Index].ActionData.ExeName
+            if (Test-Path $configPath) {
+                Remove-ItemProperty -Path $configPath -Name $exe -ErrorAction SilentlyContinue | Out-Null
+                $removed++
+            }
+        }
+        if ($removed -gt 0) { &$refreshData }
+    }.GetNewClosure())
+
     $getDelta = {
         $apply = @(); $remove = @()
         for ($i = 0; $i -lt $listView.Items.Count; $i++) {
@@ -620,7 +643,18 @@ function Show-AffinityModal {
     $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = "Close"; $btnClose.Location = New-Object System.Drawing.Point(495, 595); $btnClose.Size = New-Object System.Drawing.Size(120, 35); $btnClose.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60); $btnClose.FlatStyle = "Flat"; $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
-    $modal.Controls.AddRange(@($lblDesc, $btnRefresh, $listView, $txtCustom, $btnAddExe, $btnSave, $btnEngage, $btnRelease, $btnClose))
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = "Close"; $btnClose.Location = New-Object System.Drawing.Point(495, 595); $btnClose.Size = New-Object System.Drawing.Size(120, 35); $btnClose.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60); $btnClose.FlatStyle = "Flat"; $btnClose.Anchor = 'Bottom, Left'
+    $btnClose.DialogResult = "Cancel"
+
+    $lblTip = New-Object System.Windows.Forms.Label
+    $lblTip.Text = "INFO: 'Save Roster' stores your preset in the registry. You can instantly apply it later before gaming using the 'Pre-Flight' desktop shortcut."
+    $lblTip.Location = New-Object System.Drawing.Point(15, 640)
+    $lblTip.Size = New-Object System.Drawing.Size(800, 25)
+    $lblTip.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Italic)
+    $lblTip.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblTip.Anchor = 'Bottom, Left'
+
+    $modal.Controls.AddRange(@($lblDesc, $btnRefresh, $listView, $txtCustom, $btnAddExe, $btnDelExe, $btnSave, $btnEngage, $btnRelease, $btnClose, $lblTip))
     [void]$modal.ShowDialog()
 }
 
@@ -677,6 +711,20 @@ function Show-CPPCModal {
 
     $btnEngage = New-Object System.Windows.Forms.Button; $btnEngage.Text = "ENGAGE Max CPPC"; $btnEngage.Location = New-Object System.Drawing.Point(145, 355); $btnEngage.Size = New-Object System.Drawing.Size(150, 35); $btnEngage.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60); $btnEngage.FlatStyle = "Flat"; $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
+        # 1. Global Backup (HKLM zamiast HKCU)
+        $p = 'HKLM:\SOFTWARE\WinUltix\CPPC'
+        if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+        $e=powercfg /qh SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 | Select-String -Pattern "Current AC Power Setting Index: (0x[0-9a-fA-F]+)"; if($e) { $e=[convert]::ToInt32($e.Matches.Groups[1].Value, 16); Set-ItemProperty $p -Name 'EPP' -Value $e -Type DWord }
+        $d=powercfg /qh SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 | Select-String -Pattern "Current AC Power Setting Index: (0x[0-9a-fA-F]+)"; if($d) { $d=[convert]::ToInt32($d.Matches.Groups[1].Value, 16); Set-ItemProperty $p -Name 'Demote' -Value $d -Type DWord }
+        $pr=powercfg /qh SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c | Select-String -Pattern "Current AC Power Setting Index: (0x[0-9a-fA-F]+)"; if($pr) { $pr=[convert]::ToInt32($pr.Matches.Groups[1].Value, 16); Set-ItemProperty $p -Name 'Promote' -Value $pr -Type DWord }
+
+        # 2. Rejestracja ukrytego Dead Man's Switch w Task Scheduler
+        $tsAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -Command `"`$p='HKLM:\SOFTWARE\WinUltix\CPPC'; if(Test-Path `$p){ `$r=Get-ItemProperty `$p; if(`$null -ne `$r.EPP){powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP; powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP}; if(`$null -ne `$r.Demote){powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote; powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote}; if(`$null -ne `$r.Promote){powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote; powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote}; powercfg /setactive SCHEME_CURRENT }; Unregister-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe' -Confirm:`$false -ErrorAction SilentlyContinue`""
+        $tsTrigger = New-ScheduledTaskTrigger -AtLogon
+        $tsPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Action $tsAction -Trigger $tsTrigger -Principal $tsPrincipal -Force | Out-Null
+
+        # 3. Aplikacja parametrów max performance
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setactive SCHEME_CURRENT
@@ -685,11 +733,14 @@ function Show-CPPCModal {
 
     $btnRelease = New-Object System.Windows.Forms.Button; $btnRelease.Text = "RELEASE CPPC"; $btnRelease.Location = New-Object System.Drawing.Point(305, 355); $btnRelease.Size = New-Object System.Drawing.Size(130, 35); $btnRelease.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 100, 60); $btnRelease.FlatStyle = "Flat"; $btnRelease.Anchor = 'Bottom, Left'
     $btnRelease.Add_Click({
-        $p = 'HKCU:\Software\WinUltix\CPPC'; $e=50; $d=40; $pr=60
+        $p = 'HKLM:\SOFTWARE\WinUltix\CPPC'; $e=50; $d=40; $pr=60
         if (Test-Path $p) { $reg=Get-ItemProperty -Path $p -ErrorAction SilentlyContinue; if ($null -ne $reg.EPP) { $e=$reg.EPP }; if ($null -ne $reg.Demote) { $d=$reg.Demote }; if ($null -ne $reg.Promote) { $pr=$reg.Promote } }
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 $e; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 $e
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 $d; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 $d
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c $pr; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c $pr; powercfg.exe /setactive SCHEME_CURRENT
+        
+        # Oczyszczenie Scheduled Task po ręcznym wyłączeniu
+        Unregister-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
         &$refreshData
     }.GetNewClosure())
 
@@ -1027,7 +1078,9 @@ function Show-NVMeModal {
         Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters" -Name "DisableASPM" -ErrorAction SilentlyContinue | Out-Null
         Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device" -Name "IdlePowerMode" -ErrorAction SilentlyContinue | Out-Null
         
-        [System.Windows.Forms.MessageBox]::Show("Standard PCI/NVMe driver power management restored. Reboot is required to apply bus changes.", "Revert Completed")
+        Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+        
+        [System.Windows.Forms.MessageBox]::Show("Standard PCI/NVMe drivers and Memory Compression restored. Reboot is required to apply bus changes.", "Revert Completed")
         &$refreshData
     }.GetNewClosure())
 
@@ -1059,7 +1112,8 @@ function New-PreFlightShortcut {
     $code = @"
 `$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not `$isAdmin) {
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`$PSCommandPath`"" -Verb RunAs
+    `$argList = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + `$PSCommandPath + '"'
+    Start-Process powershell.exe -ArgumentList `$argList -Verb RunAs
     exit
 }
 
@@ -1067,26 +1121,60 @@ Add-Type -AssemblyName System.Windows.Forms
 `$frm = New-Object System.Windows.Forms.Form
 `$frm.Text = "Pre-Flight Game Mode"
 `$frm.Size = New-Object System.Drawing.Size(350, 180)
-`$frm.StartPosition = "CenterScreen"; `$frm.FormBorderStyle = "FixedDialog"; `$frm.MaximizeBox = `$false
-`$frm.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); `$frm.ForeColor = [System.Drawing.Color]::White
+`$frm.StartPosition = "CenterScreen"
+`$frm.FormBorderStyle = "FixedDialog"
+`$frm.MaximizeBox = `$false
+`$frm.TopMost = `$true
+`$frm.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+`$frm.ForeColor = [System.Drawing.Color]::White
 
 `$chkAff = New-Object System.Windows.Forms.CheckBox
 `$chkAff.Text = "$affString"
-`$chkAff.Location = New-Object System.Drawing.Point(20, 15); `$chkAff.Size = New-Object System.Drawing.Size(300, 25)
-`$chkAff.Checked = $affState; `$chkAff.Enabled = $affState; `$chkAff.ForeColor = [System.Drawing.Color]::$affColor
+`$chkAff.Location = New-Object System.Drawing.Point(20, 15)
+`$chkAff.Size = New-Object System.Drawing.Size(300, 25)
+`$chkAff.Checked = $affState
+`$chkAff.Enabled = $affState
+`$chkAff.ForeColor = [System.Drawing.Color]::$affColor
 
-`$chkCPPC = New-Object System.Windows.Forms.CheckBox; `$chkCPPC.Text = "Max CPPC (EPP 0%, Disable C-States)"
-`$chkCPPC.Location = New-Object System.Drawing.Point(20, 45); `$chkCPPC.Size = New-Object System.Drawing.Size(300, 25); `$chkCPPC.Checked = `$true
+`$chkCPPC = New-Object System.Windows.Forms.CheckBox
+`$chkCPPC.Text = "Max CPPC (EPP 0%, Disable C-States)"
+`$chkCPPC.Location = New-Object System.Drawing.Point(20, 45)
+`$chkCPPC.Size = New-Object System.Drawing.Size(300, 25)
+`$chkCPPC.Checked = `$true
 
-`$btnEngage = New-Object System.Windows.Forms.Button; `$btnEngage.Text = "ENGAGE"; `$btnEngage.Location = New-Object System.Drawing.Point(15, 90); `$btnEngage.Size = New-Object System.Drawing.Size(95, 30); `$btnEngage.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60); `$btnEngage.FlatStyle = "Flat"; `$btnEngage.DialogResult = "Yes"
-`$btnRelease = New-Object System.Windows.Forms.Button; `$btnRelease.Text = "RELEASE"; `$btnRelease.Location = New-Object System.Drawing.Point(120, 90); `$btnRelease.Size = New-Object System.Drawing.Size(95, 30); `$btnRelease.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 100, 60); `$btnRelease.FlatStyle = "Flat"; `$btnRelease.DialogResult = "No"
-`$btnCancel = New-Object System.Windows.Forms.Button; `$btnCancel.Text = "Cancel"; `$btnCancel.Location = New-Object System.Drawing.Point(225, 90); `$btnCancel.Size = New-Object System.Drawing.Size(95, 30); `$btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60); `$btnCancel.FlatStyle = "Flat"; `$btnCancel.DialogResult = "Cancel"
+`$btnEngage = New-Object System.Windows.Forms.Button
+`$btnEngage.Text = "ENGAGE"
+`$btnEngage.Location = New-Object System.Drawing.Point(15, 90)
+`$btnEngage.Size = New-Object System.Drawing.Size(95, 30)
+`$btnEngage.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
+`$btnEngage.FlatStyle = "Flat"
+`$btnEngage.DialogResult = "Yes"
+
+`$btnRelease = New-Object System.Windows.Forms.Button
+`$btnRelease.Text = "RELEASE"
+`$btnRelease.Location = New-Object System.Drawing.Point(120, 90)
+`$btnRelease.Size = New-Object System.Drawing.Size(95, 30)
+`$btnRelease.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 100, 60)
+`$btnRelease.FlatStyle = "Flat"
+`$btnRelease.DialogResult = "No"
+
+`$btnCancel = New-Object System.Windows.Forms.Button
+`$btnCancel.Text = "Cancel"
+`$btnCancel.Location = New-Object System.Drawing.Point(225, 90)
+`$btnCancel.Size = New-Object System.Drawing.Size(95, 30)
+`$btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+`$btnCancel.FlatStyle = "Flat"
+`$btnCancel.DialogResult = "Cancel"
 
 `$frm.Controls.AddRange(@(`$chkAff, `$chkCPPC, `$btnEngage, `$btnRelease, `$btnCancel))
 `$res = `$frm.ShowDialog()
 
 `$c = 'HKCU:\Software\WinUltix\AffinityLasso'
 `$p = 'HKCU:\Software\WinUltix\CPPC'
+function Get-Pcfg (`$g) { `$o = (powercfg /qh SCHEME_CURRENT SUB_PROCESSOR `$g) -join ' '; if (`$o -match 'Current AC Power Setting Index: (0x[0-9a-fA-F]+)') { return [convert]::ToInt32(`$matches[1], 16) }; return `$null }
+
+`$c = 'HKCU:\Software\WinUltix\AffinityLasso'
+`$p = 'HKLM:\SOFTWARE\WinUltix\CPPC'
 function Get-Pcfg (`$g) { `$o = (powercfg /qh SCHEME_CURRENT SUB_PROCESSOR `$g) -join ' '; if (`$o -match 'Current AC Power Setting Index: (0x[0-9a-fA-F]+)') { return [convert]::ToInt32(`$matches[1], 16) }; return `$null }
 
 if (`$res -eq "Yes") {
@@ -1109,6 +1197,11 @@ if (`$res -eq "Yes") {
         if (`$null -ne `$d) { Set-ItemProperty -Path `$p -Name 'Demote' -Value `$d -Type DWord }
         if (`$null -ne `$pr) { Set-ItemProperty -Path `$p -Name 'Promote' -Value `$pr -Type DWord }
         
+        `$tsAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -Command `"`$bp='HKLM:\SOFTWARE\WinUltix\CPPC'; if(Test-Path `$bp){ `$r=Get-ItemProperty `$bp; if(`$null -ne `$r.EPP){powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP; powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP}; if(`$null -ne `$r.Demote){powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote; powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote}; if(`$null -ne `$r.Promote){powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote; powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote}; powercfg /setactive SCHEME_CURRENT }; Unregister-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe' -Confirm:`$false -ErrorAction SilentlyContinue`""
+        `$tsTrigger = New-ScheduledTaskTrigger -AtLogon
+        `$tsPrincipal = New-ScheduledTaskPrincipal -UserId "`$env:USERDOMAIN\`$env:USERNAME" -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Action `$tsAction -Trigger `$tsTrigger -Principal `$tsPrincipal -Force | Out-Null
+
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setactive SCHEME_CURRENT
@@ -1137,6 +1230,8 @@ if (`$res -eq "Yes") {
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$e; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$e
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$d; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$d
         powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$pr; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$pr; powercfg.exe /setactive SCHEME_CURRENT
+        
+        Unregister-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Confirm:`$false -ErrorAction SilentlyContinue | Out-Null
     }
 }
 "@
@@ -1254,16 +1349,16 @@ function Initialize-Z7UI {
     $btnTimer.Add_Click({ Show-TimerModal "Timer Resolution Subsystem" "Enable legacy 0.5ms requests globally and stabilize DPC latency." })
 
     $btnNVMe = New-Object System.Windows.Forms.Button
-    $btnNVMe.Text = "NVMe APST & PCIe ASPM"
+    $btnNVMe.Text = "I/O & Memory Latency Optimizer"
     $btnNVMe.Location = New-Object System.Drawing.Point(15, 320)
     $btnNVMe.Size = New-Object System.Drawing.Size(370, 40)
     $btnNVMe.BackColor = [System.Drawing.Color]::FromArgb(255, 100, 60, 150)
     $btnNVMe.ForeColor = [System.Drawing.Color]::White
     $btnNVMe.FlatStyle = "Flat"
-    $btnNVMe.Add_MouseEnter({ Show-Description "Disable NVMe Idle timeouts and PCIe Link State Power Management to prevent micro-stuttering." })
+    $btnNVMe.Add_MouseEnter({ Show-Description "Disable NVMe APST, PCIe ASPM, and System Memory Compression to reduce CPU overhead and micro-stuttering." })
     $btnNVMe.Add_MouseLeave({ Restore-Log })
-    $btnNVMe.Add_Click({ Show-NVMeModal "NVMe Latency Optimizer" "Prevent NVMe controllers from sleeping (D3hot/L1.2) to ensure maximum IOPS consistency." })
-
+    $btnNVMe.Add_Click({ Show-NVMeModal "I/O & Memory Optimizer" "Prevent NVMe and PCIe bus from entering low-power states (D3hot/L1.2) and disable RAM compression." })
+    
     $tab.Controls.AddRange(@($btnAffinity, $btnCPPC, $btnMSI, $btnWHEA, $btnPreFlight, $btnNetwork, $btnTimer, $btnNVMe))
 
     $TabControl.Controls.Add($tab)

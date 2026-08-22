@@ -295,7 +295,7 @@ function Initialize-Z1UI {
     # 2. TEMP & PREFETCH BUFFERS
     # ------------------------------------------
     $btnTemp = New-Object System.Windows.Forms.Button
-    $btnTemp.Text = "Clean Temp & Prefetch Buffers"
+    $btnTemp.Text = "Clean Temp and Prefetch Buffers"
     $btnTemp.Location = New-Object System.Drawing.Point(15, 70)
     $btnTemp.Size = New-Object System.Drawing.Size(320, 40)
     $btnTemp.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)

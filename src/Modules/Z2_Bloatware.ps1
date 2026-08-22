@@ -19,7 +19,7 @@ function Get-OneDriveState {
     $isCoreDetected = ((Test-Path $coreSetupX64) -or (Test-Path $coreSetupX86) -or ($null -ne $runKey))
     
     $results += [PSCustomObject]@{
-        UIDisplayName = "Core: OneDrive Setup & Startup Routine"
+        UIDisplayName = "Core: OneDrive Setup and Startup Routine"
         IsDetected    = $isCoreDetected
         ActionData    = @{ Type = "Core" }
     }
@@ -233,21 +233,11 @@ function Invoke-RemoveOneDrive {
                 
                 Start-Sleep -Seconds 2
 
-                # 2. Bruteforce binary amputation (Bypass TrustedInstaller)
-                foreach ($bin in @($setupX64, $setupX86)) {
-                    if (Test-Path -Path $bin) {
-                        try {
-                            & takeown.exe /F $bin /A | Out-Null
-                            & icacls.exe $bin /grant "Administrators:F" /c /q | Out-Null
-                            Remove-Item -Path $bin -Force -ErrorAction Stop
-                        } catch {
-                            Write-GUI "    [!] Failed to amputate $($bin): $($_.Exception.Message)"
-                        }
-                    }
-                }
-
-                # 3. Kill Run key
+                # 2. Neutralize execution vectors without breaking CBS/WinSxS integrity
+                # We leave the dormant stub in SystemRoot to satisfy SFC/DISM.
                 reg.exe delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>$null
+                
+                Write-GUI "    [+] Core installation payloads purged. SystemRoot stubs neutralized."
             }
             elseif ($data.Type -eq "Registry") {
                 if (Test-Path -Path $data.Path) { Remove-Item -Path $data.Path -Recurse -Force -ErrorAction Stop }
@@ -346,28 +336,7 @@ function Invoke-RemoveBloatware {
                 # Scoped Fallback solely for Copilot
                 if ($pkg.Name -match "(?i)Copilot") {
                     Write-GUI "    [!] API uninstallation blocked for $($pkg.Name)."
-                    Write-GUI "    [*] Forcing physical directory amputation..."
-                    
-                    $appDir = $pkg.InstallLocation
-                    if (-not [string]::IsNullOrWhiteSpace($appDir) -and (Test-Path $appDir)) {
-                        try {
-                            & takeown.exe /F $appDir /A /R /D Y | Out-Null
-                            & icacls.exe $appDir /grant "Administrators:F" /T /C /Q | Out-Null
-                            Remove-Item -Path $appDir -Recurse -Force -ErrorAction Stop
-                            
-                            # Apply blacklist post-amputation
-                            if (-not [string]::IsNullOrWhiteSpace($pfn)) {
-                                $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$pfn"
-                                if (-not (Test-Path $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
-                            }
-                            
-                            Write-GUI "    [+] Physical amputation applied. Package is dead."
-                        } catch {
-                            Write-GUI "    [-] Amputation failed: $($_.Exception.Message)"
-                        }
-                    } else {
-                        Write-GUI "    [-] Install location null or not found. Cannot amputate."
-                    }
+                    Write-GUI "    [*] Skipping physical deletion to maintain State Repository integrity. Relying on applied GPO restrictions."
                 } else {
                     Write-GUI "    [-] Error removing $($pkg.Name): $($_.Exception.Message)"
                 }
@@ -418,7 +387,7 @@ function Initialize-Z2UI {
 
     # OneDrive
     $btnOneDrive = New-Object System.Windows.Forms.Button
-    $btnOneDrive.Text = "Uninstall & Deprovision OneDrive"
+    $btnOneDrive.Text = "Uninstall and Deprovision OneDrive"
     $btnOneDrive.Location = New-Object System.Drawing.Point(15, 20)
     $btnOneDrive.Size = New-Object System.Drawing.Size(320, 40)
     $btnOneDrive.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 100)
