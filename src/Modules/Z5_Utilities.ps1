@@ -1,6 +1,6 @@
 ﻿# ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
-# https://github.com/Firever-ultix/WinUltixs
+# https://github.com/Firever-ultix/WinUltix
 # Z5_UTILITIES.PS1 - UTILITIES & APPLETS
 # Z5_Utilities: Interactive tools and applets. Uses Out-GridView for selective removal of Appx, Provisioned packages, optional features, and services. Includes a DNS Enforcer (Cloudflare, Quad9, etc.) and classic Windows applet launchers.
 # ==========================================
@@ -9,141 +9,214 @@
 # Z5: INTERACTIVE GRIDS
 # ------------------------------------------
 function Show-AppxGrid { 
-    Write-GUI "Generating Appx table..."
-    $selected = Get-AppxPackage -AllUsers | Select-Object Name, PackageFullName, IsFramework, Status | Out-GridView -Title "Select packages to REMOVE (Ctrl+Click to select, then click OK)" -PassThru
+    Write-GUI " -> Generating installed Appx package table..."
+    $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop"
     
-    if ($selected) { 
+    $selected = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | 
+        Where-Object { $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedPattern } | 
+        Select-Object Name, PackageFullName, IsFramework, Status | 
+        Out-GridView -Title "Select packages to REMOVE (Protected system/gaming packages are hidden)" -PassThru)
+    
+    $total = $selected.Count
+    if ($total -gt 0) { 
+        $current = 0
         foreach ($app in $selected) { 
-            Write-GUI "Removing: $($app.Name)"
+            $current++
+            Update-Progress ([int](($current / $total) * 100))
+            Write-GUI " -> Removing Appx: $($app.Name)"
             try {
                 Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
-                Write-GUI "Success: $($app.Name) removed."
+                Write-GUI "    [OK] $($app.Name) removed."
             } catch {
-                Write-GUI "Error: $($app.Name) - $($_.Exception.Message)"
+                Write-GUI "    [!] Error removing $($app.Name): $($_.Exception.Message)"
             }
-        } 
-    } 
+        }
+        Update-Progress 0
+    } else {
+        Write-GUI " -> Appx removal cancelled."
+    }
 }
 
 function Show-AppxProvGrid { 
-    Write-GUI "Generating Provisioned Appx table..."
-    $selected = Get-AppxProvisionedPackage -Online | Select-Object DisplayName, PackageName, Version | Out-GridView -Title "Select packages to DEPROVISION (Ctrl+Click to select, then click OK)" -PassThru
+    Write-GUI " -> Generating Provisioned Appx table..."
+    $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop"
+
+    $selected = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | 
+        Where-Object { $_.DisplayName -notmatch $protectedPattern } | 
+        Select-Object DisplayName, PackageName, Version | 
+        Out-GridView -Title "Select packages to DEPROVISION (Ctrl+Click to select, then click OK)" -PassThru)
     
-    if ($selected) { 
+    $total = $selected.Count
+    if ($total -gt 0) { 
+        $current = 0
         foreach ($app in $selected) { 
-            Write-GUI "Deprovisioning: $($app.DisplayName)"
+            $current++
+            Update-Progress ([int](($current / $total) * 100))
+            Write-GUI " -> Deprovisioning: $($app.DisplayName)"
             try {
-                Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop
-                Write-GUI "Success: $($app.DisplayName) deprovisioned."
+                Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
+                Write-GUI "    [OK] $($app.DisplayName) deprovisioned."
             } catch {
-                Write-GUI "Error: $($app.DisplayName) - $($_.Exception.Message)"
+                Write-GUI "    [!] Error deprovisioning $($app.DisplayName): $($_.Exception.Message)"
             }
-        } 
-    } 
+        }
+        Update-Progress 0
+    } else {
+        Write-GUI " -> Deprovisioning cancelled."
+    }
 }
 
 function Show-CapsGrid { 
-    Write-GUI "Generating Capabilities table..."
-    $selected = Get-WindowsCapability -Online | Where-Object State -eq 'Installed' | Select-Object Name | Out-GridView -Title "Select features to REMOVE (Ctrl+Click to select, then click OK)" -PassThru
+    Write-GUI " -> Generating Capabilities (FOD) table..."
+    $selected = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue | 
+        Where-Object { $_.State -eq 'Installed' } | 
+        Select-Object Name | 
+        Out-GridView -Title "Select features to REMOVE (Ctrl+Click to select, then click OK)" -PassThru)
     
-    if ($selected) { 
+    $total = $selected.Count
+    if ($total -gt 0) { 
+        $current = 0
         foreach ($cap in $selected) { 
-            Write-GUI "Removing: $($cap.Name)"
+            $current++
+            Update-Progress ([int](($current / $total) * 100))
+            Write-GUI " -> Removing capability: $($cap.Name)"
             try {
-                Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop
-                Write-GUI "Success: $($cap.Name) removed."
+                Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+                Write-GUI "    [OK] $($cap.Name) removed."
             } catch {
-                Write-GUI "Failed to remove: $($cap.Name)"
+                Write-GUI "    [!] Failed to remove: $($cap.Name)"
             }
-        } 
-    } 
+        }
+        Update-Progress 0
+    } else {
+        Write-GUI " -> Capability removal cancelled."
+    }
 }
 
 function Show-OptFeaturesGrid { 
-    Write-GUI "Generating Optional Features table..."
-    $selected = Get-WindowsOptionalFeature -Online | Where-Object State -eq 'Enabled' | Select-Object FeatureName | Out-GridView -Title "Select features to DISABLE (Ctrl+Click to select, then click OK)" -PassThru
+    Write-GUI " -> Generating Optional Features table..."
+    $selected = @(Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue | 
+        Where-Object { $_.State -eq 'Enabled' } | 
+        Select-Object FeatureName | 
+        Out-GridView -Title "Select features to DISABLE (Ctrl+Click to select, then click OK)" -PassThru)
     
-    if ($selected) { 
+    $total = $selected.Count
+    if ($total -gt 0) { 
+        $current = 0
         foreach ($feat in $selected) { 
-            Write-GUI "Disabling: $($feat.FeatureName)"
+            $current++
+            Update-Progress ([int](($current / $total) * 100))
+            Write-GUI " -> Disabling feature: $($feat.FeatureName)"
             try {
-                Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop
-                Write-GUI "Success: $($feat.FeatureName) disabled."
+                Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+                Write-GUI "    [OK] $($feat.FeatureName) disabled."
             } catch {
-                Write-GUI "Failed to disable: $($feat.FeatureName)"
+                Write-GUI "    [!] Failed to disable: $($feat.FeatureName)"
             }
-        } 
-    } 
+        }
+        Update-Progress 0
+    } else {
+        Write-GUI " -> Optional feature configuration cancelled."
+    }
 }
 
 function Show-ServicesGrid { 
-    Write-GUI "Generating services table..."
-    $selected = Get-Service | Select-Object Status, Name, DisplayName, StartType | Out-GridView -Title "Select services to HARD DISABLE (Ctrl+Click to select, then click OK)" -PassThru
+    Write-GUI " -> Generating system services table..."
+    $selected = @(Get-Service | 
+        Select-Object Status, Name, DisplayName, StartType | 
+        Out-GridView -Title "Select services to HARD DISABLE (Ctrl+Click to select, then click OK)" -PassThru)
     
-    if ($selected) { 
+    $total = $selected.Count
+    if ($total -gt 0) { 
+        $current = 0
         foreach ($svc in $selected) { 
-            Write-GUI "Deactivating: $($svc.Name)"
+            $current++
+            Update-Progress ([int](($current / $total) * 100))
+            Write-GUI " -> Deactivating service: $($svc.Name)"
             try {
-                Stop-Service -Name $svc.Name -Force -ErrorAction Stop
+                Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
                 Set-Service -Name $svc.Name -StartupType Disabled -ErrorAction Stop
-                Write-GUI "Success: $($svc.Name) stopped and disabled."
+                Write-GUI "    [OK] $($svc.Name) stopped and disabled."
             } catch {
-                Write-GUI "Failed to disable: $($svc.Name)"
+                Write-GUI "    [!] Failed to disable: $($svc.Name)"
             }
-        } 
-    } 
+        }
+        Update-Progress 0
+    } else {
+        Write-GUI " -> Service modification cancelled."
+    }
 }
 
 function Show-StartupGrid { 
-    Write-GUI "Generating interactive Startup table..."
-    $startupItems = @()
+    Write-GUI " -> Generating interactive Startup table..."
+    $startupItems = [System.Collections.Generic.List[PSCustomObject]]::new()
     
-    $hklm = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-    if (Test-Path $hklm) { 
-        $hklmProperties = Get-ItemProperty -Path $hklm
-        $hklmProperties.PSObject.Properties | Where-Object { $_.Name -notmatch "PSPath|PSChildName|PSProvider|PSData" } | ForEach-Object { 
-            $startupItems += [PSCustomObject]@{Name=$_.Name; Location="Registry (All Users)"; Path=$hklmProperties.$($_.Name)} 
-        } 
+    $regTargets = @(
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";             Label = "Registry (HKLM x64)" }
+        @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"; Label = "Registry (HKLM x86)" }
+        @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run";             Label = "Registry (HKCU)" }
+    )
+
+    foreach ($reg in $regTargets) {
+        if (Test-Path $reg.Path) {
+            $keyObj = Get-Item -Path $reg.Path -ErrorAction SilentlyContinue
+            if ($null -ne $keyObj) {
+                foreach ($valName in $keyObj.Property) {
+                    $valData = $keyObj.GetValue($valName)
+                    $startupItems.Add([PSCustomObject]@{
+                        Name     = $valName
+                        Location = $reg.Label
+                        Command  = [string]$valData
+                        RegPath  = $reg.Path
+                        Type     = "Registry"
+                    })
+                }
+            }
+        }
     }
     
-    $hkcu = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    if (Test-Path $hkcu) { 
-        $hkcuProperties = Get-ItemProperty -Path $hkcu
-        $hkcuProperties.PSObject.Properties | Where-Object { $_.Name -notmatch "PSPath|PSChildName|PSProvider|PSData" } | ForEach-Object { 
-            $startupItems += [PSCustomObject]@{Name=$_.Name; Location="Registry (Current User)"; Path=$hkcuProperties.$($_.Name)} 
-        } 
+    $folderTargets = @(
+        @{ Path = "$env:ALLUSERSPROFILE\Microsoft\Windows\Start Menu\Programs\Startup"; Label = "Folder (All Users)" }
+        @{ Path = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup";         Label = "Folder (Current User)" }
+    )
+
+    foreach ($fld in $folderTargets) {
+        if (Test-Path $fld.Path) {
+            Get-ChildItem -Path $fld.Path -File -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Name -ne "desktop.ini") {
+                    $startupItems.Add([PSCustomObject]@{
+                        Name     = $_.Name
+                        Location = $fld.Label
+                        Command  = $_.FullName
+                        RegPath  = $null
+                        Type     = "File"
+                    })
+                }
+            }
+        }
     }
     
-    $commonStartup = "$env:ALLUSERSPROFILE\Microsoft\Windows\Start Menu\Programs\Startup"
-    if (Test-Path $commonStartup) { 
-        Get-ChildItem $commonStartup -File | ForEach-Object { 
-            $startupItems += [PSCustomObject]@{Name=$_.Name; Location="Folder (All Users)"; Path=$_.FullName} 
-        } 
-    }
+    $selected = @($startupItems | 
+        Select-Object Name, Location, Command, RegPath, Type | 
+        Out-GridView -Title "Select Startup entries to REMOVE (Ctrl+Click to select, then click OK)" -PassThru)
     
-    $userStartup = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
-    if (Test-Path $userStartup) { 
-        Get-ChildItem $userStartup -File | ForEach-Object { 
-            $startupItems += [PSCustomObject]@{Name=$_.Name; Location="Folder (Current User)"; Path=$_.FullName} 
-        } 
-    }
-    
-    $selected = $startupItems | Out-GridView -Title "Select Startup entries to REMOVE (Ctrl+Click to select, then click OK)" -PassThru
-    
-    if ($selected) { 
+    $total = $selected.Count
+    if ($total -gt 0) { 
+        $current = 0
         foreach ($item in $selected) { 
-            Write-GUI " -> Removing startup entry: $($item.Name)"
-            if ($item.Location -match "Registry \(All Users\)") { 
-                Remove-ItemProperty -Path $hklm -Name $item.Name -ErrorAction SilentlyContinue 
-            } elseif ($item.Location -match "Registry \(Current User\)") { 
-                Remove-ItemProperty -Path $hkcu -Name $item.Name -ErrorAction SilentlyContinue 
+            $current++
+            Update-Progress ([int](($current / $total) * 100))
+            Write-GUI " -> Removing startup entry: $($item.Name) [$($item.Location)]"
+            if ($item.Type -eq "Registry") { 
+                Remove-ItemProperty -Path $item.RegPath -Name $item.Name -Force -ErrorAction SilentlyContinue 
             } else { 
-                Remove-Item -Path $item.Path -Force -ErrorAction SilentlyContinue 
+                Remove-Item -Path $item.Command -Force -ErrorAction SilentlyContinue 
             } 
         }
-        Write-GUI "Selected entries have been permanently removed from startup." 
+        Update-Progress 0
+        Write-GUI " -> Selected startup entries permanently removed." 
     } else { 
-        Write-GUI "Startup cleaning cancelled." 
+        Write-GUI " -> Startup cleaning cancelled." 
     } 
 }
 
@@ -151,38 +224,53 @@ function Show-StartupGrid {
 # Z5: DNS ENFORCER
 # ------------------------------------------
 function Set-CustomDNS { 
-    param($Provider)
+    param([string]$Provider)
     
-    $adapters = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
-    if (-not $adapters) { Write-GUI "[!] No active network adapters found."; return }
+    $adapters = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter "IPEnabled = True" -ErrorAction SilentlyContinue |
+        Where-Object { $null -ne $_.DefaultIPGateway }
+
+    if (-not $adapters) { 
+        Write-GUI " [!] No active network adapters with a default gateway found."
+        return 
+    }
     
     foreach ($adapter in $adapters) { 
         if ($Provider -eq "Default (DHCP)") { 
-            $adapter | Invoke-CimMethod -MethodName SetDNSServerSearchOrder | Out-Null
-            Write-GUI " -> $($adapter.Description): DHCP DNS applied." 
-        } else { 
-            $dns1 = ""; $dns2 = ""
-            switch ($Provider) { 
-                "Quad9 (9.9.9.9)" { $dns1 = "9.9.9.9"; $dns2 = "149.112.112.112" } 
-                "Cloudflare (1.1.1.1)" { $dns1 = "1.1.1.1"; $dns2 = "1.0.0.1" } 
-                "AdGuard (94.140.14.14)" { $dns1 = "94.140.14.14"; $dns2 = "94.140.15.15" } 
-                "Google (8.8.8.8)" { $dns1 = "8.8.8.8"; $dns2 = "8.8.4.4" } 
-                "OpenDNS (208.67.222.222)" { $dns1 = "208.67.222.222"; $dns2 = "208.67.220.220" } 
+            $res = Invoke-CimMethod -InputObject $adapter -MethodName SetDNSServerSearchOrder -Arguments @{ DNSServerSearchOrder = $null } -ErrorAction SilentlyContinue
+            if ($null -ne $res -and $res.ReturnValue -eq 0) {
+                Write-GUI " -> $($adapter.Description): Reverted to DHCP DNS." 
+            } else {
+                Write-GUI " [!] $($adapter.Description): Failed to reset DNS (ReturnCode: $($res.ReturnValue))."
             }
-            $adapter | Invoke-CimMethod -MethodName SetDNSServerSearchOrder -New_Arguments @{SetDNSServerSearchOrder = @($dns1, $dns2)} | Out-Null
-            Write-GUI " -> $($adapter.Description): DNS set to $Provider" 
+        } else { 
+            $dnsServers = switch ($Provider) { 
+                "Quad9 (9.9.9.9)"          { [string[]]@("9.9.9.9", "149.112.112.112") } 
+                "Cloudflare (1.1.1.1)"     { [string[]]@("1.1.1.1", "1.0.0.1") } 
+                "AdGuard (94.140.14.14)"   { [string[]]@("94.140.14.14", "94.140.15.15") } 
+                "Google (8.8.8.8)"         { [string[]]@("8.8.8.8", "8.8.4.4") } 
+                "OpenDNS (208.67.222.222)" { [string[]]@("208.67.222.222", "208.67.220.220") } 
+            }
+            if ($null -ne $dnsServers) {
+                $res = Invoke-CimMethod -InputObject $adapter -MethodName SetDNSServerSearchOrder -Arguments @{ DNSServerSearchOrder = $dnsServers } -ErrorAction SilentlyContinue
+                if ($null -ne $res -and $res.ReturnValue -eq 0) {
+                    Write-GUI " -> $($adapter.Description): DNS enforced to $Provider" 
+                } else {
+                    Write-GUI " [!] $($adapter.Description): Failed to set DNS (ReturnCode: $($res.ReturnValue))."
+                }
+            }
         } 
     }
     Clear-DnsClientCache -ErrorAction SilentlyContinue 
+    Update-DNSLabel
 }
 
 # ------------------------------------------
 # Z5: CLASSIC APPLETS
 # ------------------------------------------
-function Start-ClassicNet { Start-Process "ncpa.cpl" }
-function Start-ClassicApps { Start-Process "appwiz.cpl" }
-function Start-ClassicSound { Start-Process "mmsys.cpl" }
-function Start-ClassicPrinters { Start-Process "explorer.exe" -ArgumentList "shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{A8A91A66-3A7D-4424-8D24-04E180695C7A}" }
+function Start-ClassicNet      { Start-Process "ncpa.cpl" }
+function Start-ClassicApps     { Start-Process "appwiz.cpl" }
+function Start-ClassicSound    { Start-Process "mmsys.cpl" }
+function Start-ClassicPrinters { Start-Process "explorer.exe" -ArgumentList "shell:::{A8A91A66-3A7D-4424-8D24-04E180695C7A}" }
 
 function Initialize-Z5UI {
     param([System.Windows.Forms.TabControl]$TabControl)
@@ -332,7 +420,10 @@ function Initialize-Z5UI {
     $btnApplyDNS.ForeColor = [System.Drawing.Color]::White
     $btnApplyDNS.FlatStyle = "Flat"
     $btnApplyDNS.Add_MouseEnter({ Show-Description "Applies the selected secure DNS server for all active network adapters and flushes the DNS resolver cache." })
-    $btnApplyDNS.Add_Click({ Set-CustomDNS $comboDNS.SelectedItem; if ($comboDNS.SelectedItem -eq "Default (DHCP)") { $global:lblCurrentDNS.Text = "Current DNS: Default provider (DHCP)" } else { $global:lblCurrentDNS.Text = "Current DNS: $($comboDNS.SelectedItem)" }; Write-GUI "Completed."; Write-GUI "" })
+    $btnApplyDNS.Add_Click({ 
+        Set-CustomDNS -Provider $comboDNS.SelectedItem
+        Write-GUI " -> DNS configuration completed.`r`n" 
+    })
 
     $global:lblCurrentDNS = New-Object System.Windows.Forms.Label
     $global:lblCurrentDNS.Text = "Current DNS: Reading from the main adapter..."

@@ -14,20 +14,32 @@ function Invoke-RegistryAudit {
     $results = @()
     foreach ($rule in $Rules) {
         $isDetected = $true
-        
-        if ($rule.Name -eq "" -or $rule.Name -eq "(Default)") {
-            $regKey = Get-Item -Path $rule.Path -ErrorAction SilentlyContinue
-            if ($null -ne $regKey) { $currentValue = $regKey.GetValue("") } else { $currentValue = $null }
-        } else {
-            $currentValue = (Get-ItemProperty -Path $rule.Path -Name $rule.Name -ErrorAction SilentlyContinue).$($rule.Name)
+        $keyExists  = Test-Path -Path $rule.Path
+        $currentValue = $null
+        $valueExists  = $false
+
+        if ($keyExists) {
+            if ($rule.Name -eq "" -or $rule.Name -eq "(Default)") {
+                $regKey = Get-Item -Path $rule.Path -ErrorAction SilentlyContinue
+                if ($null -ne $regKey -and $null -ne $regKey.GetValue($null, $null)) {
+                    $currentValue = $regKey.GetValue("")
+                    $valueExists  = $true
+                }
+            } else {
+                $prop = Get-ItemProperty -Path $rule.Path -Name $rule.Name -ErrorAction SilentlyContinue
+                if ($null -ne $prop -and $prop.PSObject.Properties.Match($rule.Name).Count -gt 0) {
+                    $currentValue = $prop.$($rule.Name)
+                    $valueExists  = $true
+                }
+            }
         }
         
         if ($rule.ContainsKey("ValidValues")) {
-            if ($rule.ValidValues -contains $currentValue) { 
+            if ($valueExists -and ($rule.ValidValues -contains $currentValue)) { 
                 $isDetected = $false 
             }
         } else {
-            if ($null -ne $currentValue -and [string]$currentValue -eq [string]$rule.Expected) { 
+            if ($valueExists -and ([string]$currentValue -eq [string]$rule.Expected)) { 
                 $isDetected = $false 
             }
         }
@@ -82,8 +94,8 @@ function Get-RegState_Explorer {
         @{ UIDisplayName = "Explorer: Expand navigation pane to current folder"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "NavPaneExpandToCurrentFolder"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "Explorer: Hide Cloud Files in Quick Access"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"; Name = "ShowCloudFilesInQuickAccess"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Context Menu: Restore Classic Win10 Style"; Path = "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"; Name = ""; Expected = ""; Default = "DELETE_KEY"; Type = "String" }
-        @{ UIDisplayName = "Desktop: Hide 'Control Panel' Icon"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"; Name = "{20D04FE0-3AEA-1069-A2D8-08002B30309D}"; Expected = 0; Default = 1; Type = "DWord" }
-        @{ UIDisplayName = "Desktop: Hide 'Control Panel' Icon (Classic)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu"; Name = "{20D04FE0-3AEA-1069-A2D8-08002B30309D}"; Expected = 0; Default = 1; Type = "DWord" }
+        @{ UIDisplayName = "Desktop: Show 'This PC' Icon on Desktop"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"; Name = "{20D04FE0-3AEA-1069-A2D8-08002B30309D}"; Expected = 0; Default = 1; Type = "DWord" }
+        @{ UIDisplayName = "Desktop: Show 'This PC' Icon (Classic Start)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu"; Name = "{20D04FE0-3AEA-1069-A2D8-08002B30309D}"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Nav Pane: Unpin OneDrive (64-bit shell)"; Path = "Registry::HKEY_CLASSES_ROOT\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}"; Name = "System.IsPinnedToNameSpaceTree"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Nav Pane: Unpin OneDrive (32-bit shell)"; Path = "Registry::HKEY_CLASSES_ROOT\Wow6432Node\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}"; Name = "System.IsPinnedToNameSpaceTree"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "UI: Reduce Menu Show Delay from 400ms to 50ms"; Path = "HKCU:\Control Panel\Desktop"; Name = "MenuShowDelay"; Expected = "50"; Default = "400"; Type = "String" }
@@ -115,10 +127,10 @@ function Get-RegState_Privacy {
     $rules += @{ UIDisplayName = "Background Apps: Block UWP apps from running globally"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; Name = "GlobalUserDisabled"; Expected = 1; Default = 0; Type = "DWord" }
     
     $uwpBlocks = @("LetAppsRunInBackground", "LetAppsAccessSync", "LetAppsAccessIdentity", "LetAppsAccessBluetooth", "LetAppsActivateWithVoice", "LetAppsAccessNotifications", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessRadios", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar", "LetAppsAccessAccountInfo")
-    foreach ($app in $uwpBlocks) { $rules += @{ UIDisplayName = "UWP Permissions: Block $app"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $app; Expected = 2; Default = 0; Type = "DWord" } }
+    foreach ($app in $uwpBlocks) { $rules += @{ UIDisplayName = "UWP Permissions: Block $app"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $app; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" } }
     
-    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessCamera"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessCamera"; Expected = 0; Default = 0; Type = "DWord" }
-    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessMicrophone"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessMicrophone"; Expected = 0; Default = 0; Type = "DWord" }
+    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessCamera"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessCamera"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" }
+    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessMicrophone"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessMicrophone"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" }
     
     $rules += @{ UIDisplayName = "Edge: Disable Startup Boost (Background Process)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "StartupBoostEnabled"; Expected = 0; Default = 1; Type = "DWord" }
     $rules += @{ UIDisplayName = "Edge: Disable Background Mode"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "BackgroundModeEnabled"; Expected = 0; Default = 1; Type = "DWord" }
@@ -137,7 +149,7 @@ function Get-RegState_SystemBoot {
         @{ UIDisplayName = "Security: Block BIOS/UEFI Software Injections (WPBT)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"; Name = "DisableWpbtExecution"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "System: Block OneDrive File Sync Integration"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; Name = "DisableFileSyncNGSC"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "System: Block OneDrive Network Traffic Pre-Sign-In"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; Name = "PreventNetworkTrafficPreUserSignIn"; Expected = 1; Default = 0; Type = "DWord" }
-        @{ UIDisplayName = "Security: Disable Remote Desktop (RDP) access"; Path = "HKLM:\System\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections"; Expected = 1; Default = 1; Type = "DWord" }
+        @{ UIDisplayName = "Security: Disable Remote Desktop (RDP) access"; Path = "HKLM:\System\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "System: Disable Insider Preview Builds"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PreviewBuilds"; Name = "AllowBuildPreview"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Boot: Enable Verbose Status Messages"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"; Name = "verbosestatus"; Expected = 1; Default = 0; Type = "DWord" }
     )
@@ -159,34 +171,41 @@ function Get-RegState_Gaming {
         @{ UIDisplayName = "Gaming: Disable GameDVR Store Config"; Path = "HKCU:\System\GameConfigStore"; Name = "GameDVR_Enabled"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Gaming: Disable GameDVR Frame Rate Cap (VSync bypass)"; Path = "HKCU:\System\GameConfigStore"; Name = "GameDVR_CapFrameRate"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Gaming: Optimize FullScreen Exclusive Behavior"; Path = "HKCU:\System\GameConfigStore"; Name = "GameDVR_FSEBehavior"; Expected = 2; Default = 0; Type = "DWord" }
-        @{ UIDisplayName = "Gaming: Enable Hardware Accelerated GPU Scheduling (HAGS)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"; Name = "HwSchMode"; Expected = 2; Default = 1; ValidValues = @(2, $null); Type = "DWord" }
+        @{ UIDisplayName = "Gaming: Enable Hardware Accelerated GPU Scheduling (HAGS)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"; Name = "HwSchMode"; Expected = 2; Default = 1; ValidValues = @(2); Type = "DWord" }
         @{ UIDisplayName = "Kernel: Disable Paging Executive (Keeps core system in RAM)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Expected = 1; Default = 0; Type = "DWord" }
-        @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; Type = "DWord" }
         @{ UIDisplayName = "MMCSS: System Responsiveness (Allocate 100% CPU to Games)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Expected = 0; Default = 20; Type = "DWord" }
+        @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; Type = "DWord" }
         @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "Power: Disable Windows Power Throttling globally"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; Name = "PowerThrottlingOff"; Expected = 1; Default = 0; Type = "DWord" }
-        @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 8; Type = "DWord" }
+        @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Scheduling Category (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Scheduling Category"; Expected = "High"; Default = "Medium"; Type = "String" }
         @{ UIDisplayName = "Security: Disable Virtualization Based Security (VBS)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"; Name = "EnableVirtualizationBasedSecurity"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Security: Disable Hypervisor-protected Code Integrity (HVCI)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"; Name = "Enabled"; Expected = 0; Default = 1; Type = "DWord" }
-	)
+    )
     return Invoke-RegistryAudit -Rules $rules
 }
 
 # ------------------------------------------
 # Z3: SRP (SOFTWARE RESTRICTION POLICIES) ENGINE
 # ------------------------------------------
+function Get-DeterministicSrpGuid {
+    param([Parameter(Mandatory=$true)][string]$InputString)
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $hashBytes = $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($InputString.ToLowerInvariant()))
+    $md5.Dispose()
+    return "{" + ([guid]::new($hashBytes)).ToString().ToUpper() + "}"
+}
+
 function Get-RegState_SRP {
     $targets = @(
-        @{ UIDisplayName = "SRP Lock: Windows Widgets (Widgets.exe)"; TargetPath = "$env:ProgramFiles\WindowsApps\MicrosoftWindows.Client.WebExperience_cw5n1h2txyewy\Widgets.exe" }
-        @{ UIDisplayName = "SRP Lock: Compatibility Telemetry (CompatTelRunner.exe)"; TargetPath = "$env:windir\System32\CompatTelRunner.exe" }
-        @{ UIDisplayName = "SRP Lock: Hardware Telemetry (DeviceCensus.exe)"; TargetPath = "$env:windir\System32\DeviceCensus.exe" }
-        @{ UIDisplayName = "SRP Lock: GameBar Telemetry (GameBarPresenceWriter.exe)"; TargetPath = "$env:windir\System32\GameBarPresenceWriter.exe" }
-        @{ UIDisplayName = "SRP Lock: Edge Background Updater (MicrosoftEdgeUpdate.exe)"; TargetPath = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe" }
+        @{ UIDisplayName = "SRP+IFEO Lock: Windows Widgets (Widgets.exe)"; TargetPath = "$env:ProgramFiles\WindowsApps\MicrosoftWindows.Client.WebExperience*\Dashboard\Widgets.exe"; ExeName = "Widgets.exe" }
+        @{ UIDisplayName = "SRP+IFEO Lock: Compatibility Telemetry (CompatTelRunner.exe)"; TargetPath = "$env:windir\System32\CompatTelRunner.exe"; ExeName = "CompatTelRunner.exe" }
+        @{ UIDisplayName = "SRP+IFEO Lock: Hardware Telemetry (DeviceCensus.exe)"; TargetPath = "$env:windir\System32\DeviceCensus.exe"; ExeName = "DeviceCensus.exe" }
+        @{ UIDisplayName = "SRP+IFEO Lock: GameBar Telemetry (GameBarPresenceWriter.exe)"; TargetPath = "$env:windir\System32\GameBarPresenceWriter.exe"; ExeName = "GameBarPresenceWriter.exe" }
+        @{ UIDisplayName = "SRP+IFEO Lock: Edge Background Updater (MicrosoftEdgeUpdate.exe)"; TargetPath = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"; ExeName = "MicrosoftEdgeUpdate.exe" }
     )
     
-    # Region: Dynamic Custom SRP Loader
     $customKey = "HKLM:\SOFTWARE\WinUltix\SRP"
     if (Test-Path $customKey) {
         $customEntries = Get-Item -Path $customKey -ErrorAction SilentlyContinue
@@ -194,29 +213,27 @@ function Get-RegState_SRP {
             foreach ($prop in $customEntries.Property) {
                 $customPath = (Get-ItemProperty -Path $customKey -Name $prop -ErrorAction SilentlyContinue).$prop
                 if (-not [string]::IsNullOrWhiteSpace($customPath)) {
-                    $targets += @{ UIDisplayName = "SRP Lock (Custom): $prop"; TargetPath = $customPath }
+                    $exeLeaf = [System.IO.Path]::GetFileName($customPath)
+                    $targets += @{ UIDisplayName = "SRP+IFEO Lock (Custom): $prop"; TargetPath = $customPath; ExeName = $exeLeaf }
                 }
             }
         }
     }
-    # EndRegion
 
     $results = @()
     $srpBase = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers\0\Paths"
+    $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
     
     foreach ($target in $targets) {
-        $isDetected = $true # Domyślnie brak blokady
+        $guid = Get-DeterministicSrpGuid -InputString $target.TargetPath
+        $srpRuleExists = Test-Path -Path "$srpBase\$guid"
         
-        if (Test-Path $srpBase) {
-            $rules = Get-ChildItem -Path $srpBase -ErrorAction SilentlyContinue
-            foreach ($rule in $rules) {
-                $itemData = (Get-ItemProperty -Path $rule.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
-                if ($null -ne $itemData -and $itemData -eq $target.TargetPath) {
-                    $isDetected = $false # Znaleziono blokadę
-                    break
-                }
-            }
-        }
+        $ifeoKey = "$ifeoBase\$($target.ExeName)"
+        $ifeoDebugger = (Get-ItemProperty -Path $ifeoKey -Name "Debugger" -ErrorAction SilentlyContinue).Debugger
+        $ifeoLocked = ($null -ne $ifeoDebugger -and $ifeoDebugger -match "systray\.exe")
+
+        # Marked as detected (needs optimization) if either SRP or IFEO lock is missing
+        $isDetected = -not ($srpRuleExists -and $ifeoLocked)
         
         $results += [PSCustomObject]@{
             UIDisplayName = $target.UIDisplayName
@@ -233,20 +250,22 @@ function Get-RegState_SRP {
 function Invoke-ApplySRP {
     param(
         [Parameter(Mandatory=$true)][array]$SelectedItems,
-        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply'
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
     )
     
     $total = $SelectedItems.Count
-    if ($total -eq 0) { Write-GUI " -> No SRP locks selected."; return }
+    if ($total -eq 0) { Write-GUI " -> No execution locks selected."; return }
     $current = 0
 
-    $srpRoot = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers"
+    $srpRoot  = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers"
     $srpPaths = "$srpRoot\0\Paths"
+    $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+    $nullStub = "$env:SystemRoot\System32\systray.exe"
     
     if ($Operation -eq 'Apply') {
         if (-not (Test-Path $srpRoot)) { New-Item -Path $srpRoot -Force | Out-Null }
         
-        # [FIX] Zapewnienie wymaganych metadanych struktury Safer API
         $srpSettings = @{
             "AuthenticodeEnabled" = 0
             "DefaultLevel"        = 262144
@@ -260,81 +279,97 @@ function Invoke-ApplySRP {
         $exeTypes = [string[]]@("BAT","CMD","COM","EXE","HTA","LNK","MSI","OCX","PIF","REG","SCR","VBS","WSF")
         Set-ItemProperty -Path $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Force
         
-        # [FIX] Silnik ignoruje reguły, jeśli brakuje węzła 262144 (Unrestricted)
         if (-not (Test-Path "$srpRoot\0")) { New-Item -Path "$srpRoot\0" -Force | Out-Null }
         if (-not (Test-Path "$srpRoot\262144")) { New-Item -Path "$srpRoot\262144" -Force | Out-Null }
         if (-not (Test-Path $srpPaths)) { New-Item -Path $srpPaths -Force | Out-Null }
     }
 
     $actionVerb = if ($Operation -eq 'Apply') { "Enforcing" } else { "Removing" }
-    $revertOccurred = $false
+    $policyChanged = $false
 
     foreach ($item in $SelectedItems) {
         $current++
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        Write-GUI " -> $($actionVerb) SRP Lock: $($item.UIDisplayName)"
+        Write-GUI " -> $($actionVerb) Execution Lock: $($item.UIDisplayName)"
         
-        $target = $item.ActionData
+        $target   = $item.ActionData
+        $guid     = Get-DeterministicSrpGuid -InputString $target.TargetPath
+        $ruleKey  = "$srpPaths\$guid"
+        $ifeoKey  = "$ifeoBase\$($target.ExeName)"
         
         try {
             if ($Operation -eq 'Apply') {
-                $guid = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"
-                $ruleKey = "$srpPaths\$guid"
-                
-                New-Item -Path $ruleKey -Force | Out-Null
-                Set-ItemProperty -Path $ruleKey -Name "Description" -Value "WinUltix Pro SRP Lockdown" -Type String
-                Set-ItemProperty -Path $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String
-                Set-ItemProperty -Path $ruleKey -Name "SaferFlags" -Value 0 -Type DWord
-                
-                $procName = [System.IO.Path]::GetFileNameWithoutExtension($target.TargetPath)
-                $activeProc = Get-Process -Name $procName -ErrorAction SilentlyContinue
-                if ($activeProc) { 
-                    $activeProc | Stop-Process -Force 
-                    Write-GUI "    [OK] Flushed active process from memory."
-                }
-            } else {
                 if (Test-Path $srpPaths) {
-                    $rules = Get-ChildItem -Path $srpPaths -ErrorAction SilentlyContinue
-                    foreach ($rule in $rules) {
-                        $itemData = (Get-ItemProperty -Path $rule.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
-                        if ($null -ne $itemData -and $itemData -eq $target.TargetPath) {
-                            Remove-Item -Path $rule.PSPath -Force -Recurse -ErrorAction Stop
-                            Write-GUI "    [OK] Restriction rule purged from registry."
-                            $revertOccurred = $true
+                    foreach ($subKey in (Get-ChildItem -Path $srpPaths -ErrorAction SilentlyContinue)) {
+                        $existingData = (Get-ItemProperty -Path $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
+                        if ($existingData -eq $target.TargetPath -and $subKey.PSChildName -ne $guid) {
+                            Remove-Item -Path $subKey.PSPath -Recurse -Force -ErrorAction SilentlyContinue
                         }
                     }
                 }
+
+                New-Item -Path $ruleKey -Force | Out-Null
+                Set-ItemProperty -Path $ruleKey -Name "Description" -Value "WinUltix Pro SRP Lockdown" -Type String -Force
+                Set-ItemProperty -Path $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String -Force
+                Set-ItemProperty -Path $ruleKey -Name "SaferFlags" -Value 0 -Type DWord -Force
+
+                if (-not (Test-Path $ifeoKey)) { New-Item -Path $ifeoKey -Force | Out-Null }
+                Set-ItemProperty -Path $ifeoKey -Name "Debugger" -Value $nullStub -Type String -Force
+                Set-ItemProperty -Path $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+                
+                $procName = [System.IO.Path]::GetFileNameWithoutExtension($target.ExeName)
+                $activeProc = Get-Process -Name $procName -ErrorAction SilentlyContinue
+                if ($activeProc) { 
+                    $activeProc | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Write-GUI "    [OK] Flushed active process ($procName) from memory."
+                }
+                $policyChanged = $true
+            } else {
+                if (Test-Path $srpPaths) {
+                    foreach ($subKey in (Get-ChildItem -Path $srpPaths -ErrorAction SilentlyContinue)) {
+                        $itemData = (Get-ItemProperty -Path $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
+                        if ($subKey.PSChildName -eq $guid -or $itemData -eq $target.TargetPath) {
+                            Remove-Item -Path $subKey.PSPath -Force -Recurse -ErrorAction Stop
+                            $policyChanged = $true
+                        }
+                    }
+                }
+
+                if (Test-Path $ifeoKey) {
+                    $isManaged = (Get-ItemProperty -Path $ifeoKey -Name "WinUltixManaged" -ErrorAction SilentlyContinue).WinUltixManaged
+                    $dbgVal    = (Get-ItemProperty -Path $ifeoKey -Name "Debugger" -ErrorAction SilentlyContinue).Debugger
+                    if ($isManaged -eq 1 -or $dbgVal -match "systray\.exe") {
+                        Remove-ItemProperty -Path $ifeoKey -Name "Debugger" -Force -ErrorAction SilentlyContinue
+                        Remove-ItemProperty -Path $ifeoKey -Name "WinUltixManaged" -Force -ErrorAction SilentlyContinue
+                        $remainingProps = (Get-Item -Path $ifeoKey -ErrorAction SilentlyContinue).Property
+                        if (-not $remainingProps -or $remainingProps.Count -eq 0) {
+                            Remove-Item -Path $ifeoKey -Force -ErrorAction SilentlyContinue
+                        }
+                        $policyChanged = $true
+                    }
+                }
+                Write-GUI "    [OK] SRP & IFEO restriction rules purged from registry."
             }
-        } catch { Write-GUI "    [!] Failed to modify SRP rule: $($_.Exception.Message)" }
+        } catch { Write-GUI "    [!] Failed to modify execution lock: $($_.Exception.Message)" }
     }
     
-    # [FIX] Wymuszona aktualizacja GPO i przeładowanie Explorer.exe
-    if ($revertOccurred -or $Operation -eq 'Apply') {
-        Write-GUI " -> Refreshing Safer API policy tokens (gpupdate)..."
-        
-        # Uruchomienie asynchroniczne z PassThru zamiast -Wait
-        $gpProc = Start-Process -FilePath "gpupdate.exe" -ArgumentList "/force" -WindowStyle Hidden -PassThru
-        
-        # Sztuczna animacja paska postępu odblokowująca wątek UI
-        $fakeProgress = 0
-        while (-not $gpProc.HasExited) {
-            $fakeProgress += 5
-            if ($fakeProgress -gt 100) { $fakeProgress = 0 }
-            
-            if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress $fakeProgress }
-            [System.Windows.Forms.Application]::DoEvents() 
-            Start-Sleep -Milliseconds 100
-        }
-        
-        # Wyrównanie paska na 100% po zakończeniu
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 100 }
-        
-        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
-        Write-GUI "    [OK] Explorer restarted. AuthZ kernel tokens flushed."
-    }
+    if ($policyChanged) {
+        Write-GUI " -> Refreshing Safer API policy tokens (gpupdate in background)..."
+        Update-Progress 85
 
-    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-    Write-GUI " -> Software Restriction Policies operation completed ($Operation)."
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+            $gpProc = Start-Process -FilePath "gpupdate.exe" -ArgumentList "/force" -WindowStyle Hidden -PassThru
+            $gpProc.WaitForExit()
+            $gpProc.Dispose()
+        } -OnComplete {
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI "    [OK] Kernel IFEO and AuthZ policy tokens updated.`n"
+        }
+    } else {
+        Update-Progress 0
+        Write-GUI " -> Execution lock operation completed ($Operation).`n"
+    }
 }
 
 # ------------------------------------------
@@ -367,7 +402,13 @@ function Invoke-ApplyRegistry {
 
         try {
             if ($targetValue -eq 'DELETE_KEY') {
-                if (Test-Path $reg.Path) { Remove-Item -Path $reg.Path -Recurse -Force -ErrorAction Stop | Out-Null }
+                if (Test-Path $reg.Path) { 
+                    Remove-Item -Path $reg.Path -Recurse -Force -ErrorAction Stop | Out-Null 
+                    $parentKey = Split-Path -Path $reg.Path -Parent
+                    if ($parentKey -match "\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2\}$" -and (Test-Path $parentKey)) {
+                        Remove-Item -Path $parentKey -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+                    }
+                }
                 continue
             }
             if ($targetValue -eq 'DELETE_VALUE') {
@@ -611,15 +652,7 @@ function Initialize-Z3UI {
     $btnRegSRP.ForeColor = [System.Drawing.Color]::White
     $btnRegSRP.FlatStyle = "Flat"
     $btnRegSRP.Add_MouseEnter({ Show-Description "NATIVE KERNEL LOCK (Pro/Enterprise Only): Generates legacy Software Restriction Policies to block execution. May not work on Home editions or future OS builds." })
-    $btnRegSRP.Add_Click({ 
-        $auditData = Get-RegState_SRP
-        $modalOutput = Show-ActionModal -Title "WinUltix - SRP Lockdown" -Description "Select executables to permanently block via OS policies (Apply = Lock, Revert = Unlock)." -AuditResults $auditData -EnableRevert
-        
-        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) { 
-            Invoke-ApplySRP -SelectedItems $modalOutput.Items -Operation $modalOutput.Action
-            Write-GUI "" 
-        } 
-    })
+
 
     # SRP: Add Custom Target [+]
     $btnAddSRP = New-Object System.Windows.Forms.Button
@@ -685,6 +718,15 @@ function Initialize-Z3UI {
         }
         Write-GUI "" 
     })
+
+    $btnRegSRP.Add_Click({ 
+        $auditData = Get-RegState_SRP
+        $modalOutput = Show-ActionModal -Title "WinUltix - SRP & IFEO Lockdown" -Description "Select executables to permanently block via OS policies (Apply = Lock, Revert = Unlock)." -AuditResults $auditData -EnableRevert
+        
+        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) { 
+            Invoke-ApplySRP -SelectedItems $modalOutput.Items -Operation $modalOutput.Action -ControlsToDisable @($btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP)
+        } 
+    }.GetNewClosure())
     
     $tabReg.Controls.AddRange(@($btnRegTaskbar, $btnAudTaskbar, $btnRegExplorer, $btnAudExplorer, $btnRegAnnoyances, $btnAudAnnoyances, $btnRegPrivacy, $btnAudPrivacy, $btnRegSystemBoot, $btnAudSystemBoot, $btnRegMouse, $btnAudMouse, $btnRegGaming, $btnAudGaming, $btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP))
     $TabControl.Controls.Add($tabReg)

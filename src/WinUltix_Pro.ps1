@@ -3,7 +3,7 @@
 # https://github.com/Firever-ultix/WinUltix
 # MODULAR MAIN LAUNCHER
 # ==========================================
-$Global:AppVersion = "v2.5.0"
+$Global:AppVersion = "v2.7.0"
 
 # ------------------------------------------
 # 1. MODULE LOADING (ARCHITECTURE MANIFESTS)
@@ -37,6 +37,7 @@ $ModulesDir = Join-Path $ScriptDir "Modules"
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
 
 # ------------------------------------------
 # 2. GLOBAL UI COMPONENTS
@@ -170,7 +171,11 @@ $btnCredits.Add_Click({
     $btnAboutOK.Add_Click({ $aboutForm.Close() })
     
     $aboutForm.Controls.AddRange(@($lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
-    [void]$aboutForm.ShowDialog()
+    try {
+        [void]$aboutForm.ShowDialog($global:form)
+    } finally {
+        $aboutForm.Dispose()
+    }
 })
 
 $global:form.Controls.AddRange(@($btnClearLog, $btnExportLog, $global:progBar, $btnCredits, $global:descBox, $global:tabControl, $global:infoBox))
@@ -179,10 +184,16 @@ $global:form.Controls.AddRange(@($btnClearLog, $btnExportLog, $global:progBar, $
 # 5. INITIALIZE AND LAUNCH
 # ------------------------------------------
 foreach ($tab in $global:tabControl.TabPages) { 
-    foreach ($btn in $tab.Controls) { 
-        $btn.Add_MouseLeave({ Restore-Log }) 
+    foreach ($ctrl in $tab.Controls) { 
+        if ($ctrl -is [System.Windows.Forms.Button]) {
+            $ctrl.Add_MouseLeave({ Restore-Log }) 
+        }
     } 
 }
 
 Update-DNSLabel
-[void]$global:form.ShowDialog()
+try {
+    [void]$global:form.ShowDialog()
+} finally {
+    $global:form.Dispose()
+}

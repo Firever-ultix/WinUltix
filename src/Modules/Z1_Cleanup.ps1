@@ -6,7 +6,7 @@
 # ==========================================
 
 # ------------------------------------------
-# Z1: CLEANUP AUDITS
+# Z1: CLEANUP AUDITS (PURE RUNSPACE WORKER)
 # ------------------------------------------
 function Get-CleanupState {
     param([string]$Category)
@@ -27,7 +27,7 @@ function Get-CleanupState {
         if (Test-Path "$env:windir\MEMORY.DMP" -PathType Leaf) { $rules.Add(@{ UIDisplayName = "System Memory Dump"; Path = "$env:windir\MEMORY.DMP"; Type = "Files" }) }
         if (Test-Path "$env:windir\Minidump" -PathType Container) { $rules.Add(@{ UIDisplayName = "Minidump Files"; Path = "$env:windir\Minidump"; Type = "Files" }) }
 
-        $userProfiles = Get-CimInstance -ClassName Win32_UserProfile -Filter "Special = False"
+        $userProfiles = Get-CimInstance -ClassName Win32_UserProfile -Filter "Special = False" -ErrorAction SilentlyContinue
         foreach ($cimProfile in $userProfiles) {
             $userName = [System.IO.Path]::GetFileName($cimProfile.LocalPath)
             if ($userName -notmatch '^(Public|Default.*|All Users)$') {
@@ -64,7 +64,7 @@ function Get-CleanupState {
         )
 
         # Dynamic profile resolution instead of hardcoded 'C:\Users'
-        $userProfiles = Get-CimInstance -ClassName Win32_UserProfile -Filter "Special = False"
+        $userProfiles = Get-CimInstance -ClassName Win32_UserProfile -Filter "Special = False" -ErrorAction SilentlyContinue
         foreach ($cimProfile in $userProfiles) {
             $usr = [System.IO.Path]::GetFileName($cimProfile.LocalPath)
             if ($usr -match '^(Public|Default.*|All Users)$') { continue }
@@ -131,132 +131,105 @@ function Get-CleanupState {
 function Invoke-InteractiveCleanup {
     param([array]$SelectedItems)
     
-    if ($SelectedItems.Count -eq 0) { return }
+    $total = $SelectedItems.Count
+    if ($total -eq 0) { return }
+    $current = 0
 
     foreach ($item in $SelectedItems) {
+        $current++
+        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
+
         $rule = $item.ActionData
         Write-GUI " -> Purging: $($rule.UIDisplayName)..."
 
         try {
             if ($rule.Type -eq "EventLogs") {
-                # Native PowerShell pipeline instead of wrapping cmd.exe
-                wevtutil.exe el | ForEach-Object { wevtutil.exe cl $_ 2>$null }
+                $channels = @(wevtutil.exe el 2>$null)
+                $chIdx = 0
+                foreach ($ch in $channels) {
+                    $chIdx++
+                    if ($chIdx % 25 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
+                    & wevtutil.exe cl "$ch" 2>$null
+                }
             }
             elseif ($rule.Type -eq "RecycleBin") {
                 $path = $rule.Path
-                & takeown.exe /F "$path\*" /R /A /D Y 2>$null
-                & icacls.exe "$path\*" /grant Administrators:F /T /C /Q 2>$null
+                & takeown.exe /F "$path\*" /R /A /D Y 2>$null | Out-Null
+                # Use well-known Administrators SID (*S-1-5-32-544) for locale independence
+                & icacls.exe "$path\*" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
                 Remove-Item -Path "$path\*" -Recurse -Force -ErrorAction SilentlyContinue
             }
             elseif ($rule.Type -eq "Files") {
-                # Przejęcie własności dla restrykcyjnych folderów systemowych (np. Windows Update)
+                # Stop update services and take ownership of restricted Windows Update folders before deletion
                 if ($rule.UIDisplayName -match "Windows Update") {
+                    Stop-Service -Name "wuauserv", "bits" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                     $path = $rule.Path
-                    & takeown.exe /F "$path\*" /R /A /D Y 2>$null
-                    & icacls.exe "$path\*" /grant Administrators:F /T /C /Q 2>$null
+                    & takeown.exe /F "$path\*" /R /A /D Y 2>$null | Out-Null
+                    & icacls.exe "$path\*" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
                 }
-                
-                Remove-Item -Path "$($rule.Path)\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+                if (Test-Path -Path $rule.Path -PathType Leaf) {
+                    Remove-Item -Path $rule.Path -Force -ErrorAction SilentlyContinue
+                } else {
+                    Remove-Item -Path "$($rule.Path)\*" -Recurse -Force -ErrorAction SilentlyContinue
+                }
             }
         } catch { }
     }
+
+    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
 }
 
 # ------------------------------------------
-# Z1: ASYNC EXECUTION ENGINE
+# Z1: ASYNC EXECUTION ENGINE (VIA CORE_HELPERS)
 # ------------------------------------------
 function Invoke-AuditAsync {
     param(
-        [string]$Category,
-        [System.Windows.Forms.Button]$SenderButton,
+        [Parameter(Mandatory=$true)][string]$Category,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.Control[]]$ControlsToDisable,
         [switch]$AuditOnly
     )
 
-    # 1. Zablokowanie przycisku przed spamowaniem
-    $SenderButton.Enabled = $false
-    
     if ($AuditOnly) {
         Write-GUI "--- AUDIT: $Category (Background Thread) ---"
     } else {
-        Write-GUI "Analyzing $Category (Background Thread)..."
+        Write-GUI " -> Analyzing $Category footprint (Background Thread)..."
     }
+    Update-Progress 25
 
-    # 2. Inicjalizacja Runspace i wstrzyknięcie ScriptBlocku
-    $ps = [powershell]::Create()
-    $scriptBlock = (Get-Command -Name Get-CleanupState).ScriptBlock
-    [void]$ps.AddScript($scriptBlock).AddArgument($Category)
+    $sb = (Get-Command -Name Get-CleanupState).ScriptBlock
+    $isAuditOnly = $AuditOnly.IsPresent
 
-    # 3. Start skanowania w tle
-    $asyncResult = $ps.BeginInvoke()
+    Invoke-AsyncTask -ScriptBlock $sb -Arguments @($Category) -ControlsToDisable $ControlsToDisable -OnComplete {
+        param($output)
+        Update-Progress 0
+        [array]$auditData = @($output | Where-Object { $null -ne $_ })
+        $detectedItems = @($auditData | Where-Object { $_.IsDetected })
 
-    # 4. Utworzenie Timera WinForms działającego na wątku GUI
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 200
-
-    # PANCERNE ROZWIĄZANIE: Pakujemy zmienne lokalne do właściwości Tag.
-    $timer.Tag = @{
-        PS          = $ps
-        AsyncResult = $asyncResult
-        Button      = $SenderButton
-        Category    = $Category
-        AuditOnly   = $AuditOnly.IsPresent
-    }
-
-    $timer.Add_Tick({
-        # Odczytujemy zmienne z naszego "plecaka" wyciągając Tag z Timera ($this)
-        $state = $this.Tag
-
-        if ($state.AsyncResult.IsCompleted) {
-            $this.Stop()
-
-            try {
-                # Pobranie wyniku z Runspace
-                $auditData = $state.PS.EndInvoke($state.AsyncResult)
-            } catch {
-                # Obsługa błędów, by nigdy nie zablokować GUI
-                Write-GUI "  [ERROR] Background task failed: $_`n"
-                $auditData = $null
+        if ($isAuditOnly) {
+            if ($detectedItems.Count -eq 0) {
+                Write-GUI "  [OK] Clean.`n"
+            } else {
+                foreach ($det in $detectedItems) {
+                    Write-GUI "  [ DETECTED ] $($det.UIDisplayName)"
+                }
+                Write-GUI "  -> Ready for purge ($($detectedItems.Count) item(s)).`n"
             }
-            
-            # Sprzątanie pamięci
-            $state.PS.Dispose()
-            $this.Dispose()
-
-            # Odblokowanie przypisanego przycisku
-            $state.Button.Enabled = $true
-
-            # Kontynuacja logiki UI
-            if ($null -ne $auditData) {
-                if ($state.AuditOnly) {
-                    if ($auditData.Count -eq 0) {
-                        Write-GUI "  [OK] Clean.`n"
-                    } else {
-                        $auditData | ForEach-Object { Write-GUI "  [ DETECTED ] $($_.UIDisplayName)" }
-                        Write-GUI "  -> Ready for purge.`n"
-                    }
+        } else {
+            if ($auditData.Count -eq 0) {
+                Write-GUI "  [OK] Clean.`n"
+            } else {
+                $modalResult = Show-ActionModal -Title "WinUltix - $Category Purge" -Description "Select items to empty." -AuditResults $auditData
+                
+                if ($null -ne $modalResult -and $null -ne $modalResult.Items -and $modalResult.Items.Count -gt 0) {
+                    Invoke-InteractiveCleanup -SelectedItems $modalResult.Items
+                    Write-GUI " -> Operation completed.`n"
                 } else {
-                    if ($auditData.Count -eq 0) {
-                        Write-GUI "  [OK] Clean.`n"
-                    } else {
-                        # Nowy modal zwraca obiekt, a nie bezpośrednio tablicę
-                        $modalResult = Show-ActionModal -Title "WinUltix - $($state.Category) Purge" -Description "Select items to empty." -AuditResults $auditData
-                        
-                        # Sprawdzamy czy modal zwrócił cokolwiek i czy tablica Items ma elementy
-                        if ($null -ne $modalResult -and $modalResult.Items.Count -gt 0) { 
-                            # Przekazujemy do czyszczenia tylko właściwość .Items
-                            Invoke-InteractiveCleanup -SelectedItems $modalResult.Items
-                            Write-GUI " -> Operation completed.`n" 
-                        } else { 
-                            Write-GUI "Operation cancelled.`n" 
-                        }
-                    }
+                    Write-GUI "Operation cancelled.`n"
                 }
             }
         }
-    })
-
-    # Start nasłuchiwania w tle
-    $timer.Start()
+    }.GetNewClosure()
 }
 
 function Initialize-Z1UI {
@@ -278,7 +251,6 @@ function Initialize-Z1UI {
     $btnWU.FlatStyle = "Flat"
     $btnWU.Add_MouseEnter({ Show-Description "Analyzes and interactively purges downloaded Windows Update caches (SoftwareDistribution) safely." })
     $btnWU.Add_MouseLeave({ Restore-Log })
-    $btnWU.Add_Click({ Invoke-AuditAsync -Category "WU" -SenderButton $this })
 
     $btnAudWU = New-Object System.Windows.Forms.Button
     $btnAudWU.Text = "?"
@@ -289,7 +261,9 @@ function Initialize-Z1UI {
     $btnAudWU.FlatStyle = "Flat"
     $btnAudWU.Add_MouseEnter({ Show-Description "AUDIT: Calculates the exact megabyte footprint of leftover Windows Update files." })
     $btnAudWU.Add_MouseLeave({ Restore-Log })
-    $btnAudWU.Add_Click({ Invoke-AuditAsync -Category "WU" -SenderButton $this -AuditOnly })
+
+    $btnWU.Add_Click({ Invoke-AuditAsync -Category "WU" -ControlsToDisable @($btnWU, $btnAudWU) }.GetNewClosure())
+    $btnAudWU.Add_Click({ Invoke-AuditAsync -Category "WU" -ControlsToDisable @($btnWU, $btnAudWU) -AuditOnly }.GetNewClosure())
 
     # ------------------------------------------
     # 2. TEMP & PREFETCH BUFFERS
@@ -303,7 +277,6 @@ function Initialize-Z1UI {
     $btnTemp.FlatStyle = "Flat"
     $btnTemp.Add_MouseEnter({ Show-Description "Scans and weighs System Temp, Prefetch, and local Temp directories across all user profiles for interactive removal." })
     $btnTemp.Add_MouseLeave({ Restore-Log })
-    $btnTemp.Add_Click({ Invoke-AuditAsync -Category "Temp" -SenderButton $this })
 
     $btnAudTemp = New-Object System.Windows.Forms.Button
     $btnAudTemp.Text = "?"
@@ -314,7 +287,9 @@ function Initialize-Z1UI {
     $btnAudTemp.FlatStyle = "Flat"
     $btnAudTemp.Add_MouseEnter({ Show-Description "AUDIT: Weighs orphaned temporary files and prefetch data globally." })
     $btnAudTemp.Add_MouseLeave({ Restore-Log })
-    $btnAudTemp.Add_Click({ Invoke-AuditAsync -Category "Temp" -SenderButton $this -AuditOnly })
+
+    $btnTemp.Add_Click({ Invoke-AuditAsync -Category "Temp" -ControlsToDisable @($btnTemp, $btnAudTemp) }.GetNewClosure())
+    $btnAudTemp.Add_Click({ Invoke-AuditAsync -Category "Temp" -ControlsToDisable @($btnTemp, $btnAudTemp) -AuditOnly }.GetNewClosure())
 
     # ------------------------------------------
     # 3. EVENT VIEWER LOGS
@@ -328,7 +303,6 @@ function Initialize-Z1UI {
     $btnLogs.FlatStyle = "Flat"
     $btnLogs.Add_MouseEnter({ Show-Description "Calculates the size of Event Logs (.evtx) and safely clears diagnostic history using the native wevtutil engine." })
     $btnLogs.Add_MouseLeave({ Restore-Log })
-    $btnLogs.Add_Click({ Invoke-AuditAsync -Category "EventLogs" -SenderButton $this })
 
     $btnAudLogs = New-Object System.Windows.Forms.Button
     $btnAudLogs.Text = "?"
@@ -339,7 +313,9 @@ function Initialize-Z1UI {
     $btnAudLogs.FlatStyle = "Flat"
     $btnAudLogs.Add_MouseEnter({ Show-Description "AUDIT: Checks the current disk space consumed by Windows Event Logs." })
     $btnAudLogs.Add_MouseLeave({ Restore-Log })
-    $btnAudLogs.Add_Click({ Invoke-AuditAsync -Category "EventLogs" -SenderButton $this -AuditOnly })
+
+    $btnLogs.Add_Click({ Invoke-AuditAsync -Category "EventLogs" -ControlsToDisable @($btnLogs, $btnAudLogs) }.GetNewClosure())
+    $btnAudLogs.Add_Click({ Invoke-AuditAsync -Category "EventLogs" -ControlsToDisable @($btnLogs, $btnAudLogs) -AuditOnly }.GetNewClosure())
 
     # ------------------------------------------
     # 4. THIRD-PARTY APP CACHE
@@ -353,7 +329,6 @@ function Initialize-Z1UI {
     $btnThirdParty.FlatStyle = "Flat"
     $btnThirdParty.Add_MouseEnter({ Show-Description "Locates bloated application caches (Edge, Chrome, Discord, DxCache) across all user profiles for precise cleanup." })
     $btnThirdParty.Add_MouseLeave({ Restore-Log })
-    $btnThirdParty.Add_Click({ Invoke-AuditAsync -Category "ThirdParty" -SenderButton $this })
 
     $btnAudThirdParty = New-Object System.Windows.Forms.Button
     $btnAudThirdParty.Text = "?"
@@ -364,7 +339,9 @@ function Initialize-Z1UI {
     $btnAudThirdParty.FlatStyle = "Flat"
     $btnAudThirdParty.Add_MouseEnter({ Show-Description "AUDIT: Aggregates the storage space wasted by third-party caches." })
     $btnAudThirdParty.Add_MouseLeave({ Restore-Log })
-    $btnAudThirdParty.Add_Click({ Invoke-AuditAsync -Category "ThirdParty" -SenderButton $this -AuditOnly })
+
+    $btnThirdParty.Add_Click({ Invoke-AuditAsync -Category "ThirdParty" -ControlsToDisable @($btnThirdParty, $btnAudThirdParty) }.GetNewClosure())
+    $btnAudThirdParty.Add_Click({ Invoke-AuditAsync -Category "ThirdParty" -ControlsToDisable @($btnThirdParty, $btnAudThirdParty) -AuditOnly }.GetNewClosure())
 
     # ------------------------------------------
     # 5. RECYCLE BIN
@@ -378,7 +355,6 @@ function Initialize-Z1UI {
     $btnRecycle.FlatStyle = "Flat"
     $btnRecycle.Add_MouseEnter({ Show-Description "Scans all logical partitions for Recycle Bin contents and forcefully purges them, bypassing standard file locks." })
     $btnRecycle.Add_MouseLeave({ Restore-Log })
-    $btnRecycle.Add_Click({ Invoke-AuditAsync -Category "RecycleBin" -SenderButton $this })
 
     $btnAudRecycle = New-Object System.Windows.Forms.Button
     $btnAudRecycle.Text = "?"
@@ -389,9 +365,11 @@ function Initialize-Z1UI {
     $btnAudRecycle.FlatStyle = "Flat"
     $btnAudRecycle.Add_MouseEnter({ Show-Description "AUDIT: Reports the total size of deleted files waiting in the Recycle Bins across all partitions." })
     $btnAudRecycle.Add_MouseLeave({ Restore-Log })
-    $btnAudRecycle.Add_Click({ Invoke-AuditAsync -Category "RecycleBin" -SenderButton $this -AuditOnly })
 
-    # Dodanie do zakładki
+    $btnRecycle.Add_Click({ Invoke-AuditAsync -Category "RecycleBin" -ControlsToDisable @($btnRecycle, $btnAudRecycle) }.GetNewClosure())
+    $btnAudRecycle.Add_Click({ Invoke-AuditAsync -Category "RecycleBin" -ControlsToDisable @($btnRecycle, $btnAudRecycle) -AuditOnly }.GetNewClosure())
+
+    # Add controls to tab
     $tabClean.Controls.AddRange(@(
         $btnWU, $btnAudWU, 
         $btnTemp, $btnAudTemp, 

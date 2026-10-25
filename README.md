@@ -1,49 +1,55 @@
-# WinUltix Pro 2.5 🚀
-**An Advanced, Portable, Zero-Dependency Windows 11 Optimizer & Hardware Tuning Toolkit**
+# WinUltix Pro 2.7 🚀
+**An Advanced, Portable, Zero-Dependency Windows 11 (24H2 / 25H2 / 26H2) Optimizer & Hardware Tuning Toolkit**
 
-For years, I’ve been collecting various registry tweaks, optimization scripts, and diagnostics scattered across the internet. WinUltix was born to unify them. 
+For years, I’ve been collecting various registry tweaks, optimization scripts, and diagnostics scattered across the internet. WinUltix was born to unify them.
 
-With version 2.5, the project has evolved from a simple debloater (135KB) into a massive, heavily engineered diagnostic suite (~250KB). It abandons legacy WMI functions in favor of modular encapsulation, direct kernel-level registry manipulation, and deep hardware inspection. 
+With version 2.7, the project has evolved from a simple debloater into a heavily engineered, asynchronous diagnostic and low-level tuning suite (~300KB across 9 modular files). I completely abandoned legacy WMI functions and `wmic.exe` dependencies in favor of strict modular encapsulation, native CIM pipelines, isolated multithreaded Runspaces, direct kernel-level registry manipulation, and deep hardware inspection.
 
-Most "optimizers" on the market are black boxes that silently hijack OS privileges and break system integrity. WinUltix Pro is a **100% transparent, interactive, and fully reversible** toolkit that puts *you* in complete control of your OS, network stack, and hardware interrupts.
+Most "optimizers" on the market are black boxes that silently hijack OS privileges and break system integrity. WinUltix Pro is a **100% transparent, interactive, and symmetrically reversible** toolkit that puts *you* in complete control of your OS, network stack, and hardware interrupts.
 
 ![WinUltix Main Interface](assets/1.jpg)
 
 ### 🛡️ Core Architecture & Philosophy
-* **Modular Encapsulation:** The main `WinUltix_Pro.ps1` is now purely a UI launcher. All execution logic is safely sandboxed in isolated `Z1` to `Z7` modules.
-* **Symmetric Revert Engine:** Complete peace of mind. Registry (Z3) and Service (Z4) modules now feature a unified `Show-ActionModal` allowing you to apply or symmetrically **revert** any setting back to Windows factory defaults.
-* **Asynchronous Auditing:** Background Runspace threads and UI timers prevent the application from freezing during heavy file I/O operations (like deep Appx payload scans or WinSxS analysis).
-* **Zero-Dependency & Portable:** A standalone, native PowerShell / WinForms application. No installations, no background telemetry.
+* **Modular Encapsulation:** The main `WinUltix_Pro.ps1` is purely a lightweight UI launcher with deterministic GDI/HWND resource disposal. All execution logic is safely sandboxed across `Core_Helpers.ps1` and isolated `Z1` to `Z7` modules.
+* **Global Asynchronous Runspace Engine (`Invoke-AsyncTask`):** Heavy I/O, COM, and servicing operations—including Appx dependency scans, WinSxS `AnalyzeComponentStore`, Task Scheduler audits, Ghost Service sweeps, NDIS adapter inspection, and WHEA XML log parsing—run inside isolated background Runspaces polled by non-blocking 150ms WinForms timers, eliminating GUI freezes (ANR).
+* **Symmetric Revert Engine:** Complete peace of mind. Registry (`Z3`), Service (`Z4`), and Scheduled Task modules feature a unified `Show-ActionModal` supporting bidirectional state control (`Apply` vs. `Revert`), including `DELETE_KEY` and `DELETE_VALUE` tokens that strip residual GPO policy banners back to clean Windows factory defaults.
+* **Zero-Dependency & Windows 11 26H2 Ready:** A standalone, native PowerShell / WinForms application engineered for modern Windows 11 builds (24H2–26H2) with zero reliance on deprecated WMIC or VBScript binaries.
 
 ---
 
-### ⚙️ Feature Highlights (v2.5)
+### ⚙️ Feature Highlights (v2.7)
 
 ![WinUltix Z7](assets/7.jpg)
 
-#### 1. Hardware & Latency Tuning (Z7 - NEW)
-* **Affinity Lasso:** Automatically forces background applications (Discord, Browsers, Launchers) onto specific CPU cores (e.g., Cores 0-1) to dedicate prime threads to your games.
-* **CPPC P-State Unhider:** Unlocks advanced AMD/Intel power states (EPP, Idle Demote/Promote) directly in the active Power Plan.
-* **MSI Interrupt Enforcer:** Forces Message Signaled Interrupts (MSI) across the PCI bus to bypass IRQ sharing and drastically reduce DPC latency. Includes an automated registry backup mechanism.
-* **WHEA Error Logger:** Parses system logs for hardware instability and decodes APIC IDs to pinpoint exactly which CPU core or RAM timing is failing (crucial for PBO/Curve Optimizer tuning).
-* **Timer & NVMe Lock:** Directly injects `GlobalTimerResolutionRequests` to fix the Win11 0.5ms TSC API bug and disables PCIe ASPM/APST idle states to prevent NVMe micro-stuttering.
-* **Pre-Flight Generator:** Creates a standalone macro-script on your desktop to instantly engage Affinity/CPPC locks before launching a game.
+#### 1. Hardware & Latency Tuning (Z7)
+* **Topology-Aware Affinity Lasso:** Dynamically detects CPU architecture (`Get-CPUTopologyProfile`) and locks background applications (Discord, Browsers, Launchers, Overlays) with `BelowNormal` priority to dedicated threads—isolating them to Cores 0–1 on AMD 8-Core Single-CCD chips (SMT-aware `0x0F` / `0x03`), the tail 4 threads of CCD1 on AMD Dual-CCD processors (protecting 3D V-Cache on CCD0), or the E-Core cluster on Intel Hybrid CPUs.
+* **CPPC P-State Unhider & SYSTEM Dead Man's Switch:** Unlocks hidden AMD/Intel power attributes (`EPP`, `Idle Demote`, `Idle Promote`) directly in the active Power Plan using a locale-independent hex parser. Engaging Max CPPC (`EPP 0%`, `Demote/Promote 100%`) backs up factory values to `HKLM:\SOFTWARE\WinUltix\CPPC` and arms a `NT AUTHORITY\SYSTEM` Scheduled Task (`AtStartup` + `AtLogon`) to guarantee automatic rollback if an unstable undervolt causes a crash.
+* **MSI Interrupt Enforcer:** Scans PCI bus enumeration keys and forces Message Signaled Interrupts (`MSISupported = 1`) to bypass IRQ sharing and reduce DPC latency, backed by an idempotent Base64 registry backup mechanism.
+* **Asynchronous WHEA XML Decoder:** Parses `Microsoft-Windows-WHEA-Logger` XML payloads in a background Runspace, decoding raw `APICId` / `ProcessorId` attributes into physical CPU cores (SMT-aware) to pinpoint failing PBO/Curve Optimizer cores (Event ID 18), FCLK/SoC instability (ID 19), or unstable DDR5 memory timings (ID 47).
+* **Kernel Timer & NVMe Power Lock:** Queries real-time clock intervals via native P/Invoke (`NtQueryTimerResolution` in `ntdll.dll`), injects `GlobalTimerResolutionRequests = 1` to fix the Windows 11 0.5ms timer bug, enforces CPU TSC in BCD (`disabledynamictick yes`, `useplatformclock no`), and disables PCIe ASPM (`pci.sys`), StorNVMe APST (`stornvme.sys`), and RAM compression (`MMAgent`).
+* **Asynchronous NDIS & TCP Optimizer:** Audits physical network adapters in a background thread to disable Interrupt Moderation, Flow Control, EEE/Green Ethernet power saving, and RSC/LSO offloads while enforcing `TCPNoDelay` and `TcpAckFrequency`.
+* **Pre-Flight Game Mode Generator:** Generates an elevated, topology-aware desktop macro shortcut to instantly engage or release Affinity Lasso and Max CPPC locks before launching a game.
 
-#### 2. Deep Bloatware & Junk Removal (Z1 & Z2)
-* **Appx Garbage Collector:** Intelligently scans application dependency trees to find and eradicate orphaned UWP frameworks.
-* **Copilot & CBS Amputation:** Uses aggressive `takeown` / `icacls` binary amputation for persistent bloatware and safely purges underlying CBS capability stubs.
-* **Asynchronous Cleanup:** Weighs and purges Windows Update caches, Event Logs (via `wevtutil`), and Third-Party app caches (Discord, Edge, NVIDIA DxCache) across all user profiles simultaneously.
+#### 2. Deep Bloatware, OneDrive & Junk Removal (Z1 & Z2)
+* **Curated 26H2 Bloatware Catalog & Deprovision Lock:** Scans 46 non-overlapping UWP bloatware categories (including Copilot, DevHome, New Outlook, MSTeams, Edge Game Assist, Clipchamp, and Widgets) without size blind spots—detecting full payloads, installed stubs, and provisioned image packages while locking `AppxAllUserStore\Deprovisioned` so Windows Update never reinstalls them.
+* **Asynchronous Appx Garbage Collector:** Scans package dependency graphs in the background to eradicate orphaned UWP frameworks while strictly protecting critical gaming and system runtimes (`XboxIdentityProvider`, `XboxGameCallableUI`, `VCLibs`, `.NET`, `UI.Xaml`, `WindowsAppRuntime`, `WindowsAppSDK`, `DirectX`, `Graphics.Canvas`, `AIFabric`, `AugLoop`).
+* **SFC-Safe OneDrive Amputation with DLL Evacuation:** Dynamically maps user profiles via `Win32_UserProfile` (zero hardcoded `C:\Users` paths) to purge OneDrive payloads and registry remnants while keeping dormant `%SystemRoot%` stubs intact for DISM/SFC integrity. Automatically evacuates memory-mapped shell extensions (`FileSyncShell64.dll`) locked by `explorer.exe` to `%TEMP%` for clean folder eradication.
+* **Lock-Bypassing Cache Cleanup:** Asynchronously weighs and purges Windows Update caches (stopping `wuauserv`/`bits` and asserting ownership via locale-independent SID `*S-1-5-32-544`), Event Viewer logs (`wevtutil`), NTFS Recycle Bins across all partitions, and third-party caches (NVIDIA DXCache/GLCache, AMD DxCache, Discord, Steam, Browsers).
 
-#### 3. Registry & Privacy Lockdown (Z3)
-* **Software Restriction Policies (SRP):** Generates native OS-level execution locks (Safer API) to permanently block problematic executables (e.g., SearchHost, CrossDeviceResume) from ever running.
-* **Raw Mouse Input:** Hard-disables pointer acceleration at the registry level (`MouseThreshold1/2`) for true 1:1 sensor tracking.
-* **Extreme Gaming Profile:** Elevates gaming processes via Multimedia Class Scheduler (MMCSS) tweaks, disables VBS / Hypervisor Code Integrity, and disables Paging Executive to keep the kernel in RAM.
+#### 3. Registry, Dual-Layer SRP+IFEO & Privacy Lockdown (Z3)
+* **Dual-Layer Execution Locks (Safer API + Kernel IFEO):** Combines deterministic MD5-hashed Software Restriction Policies (Safer API) with kernel-level `Image File Execution Options` (`IFEO`) debugger hooks (`Debugger = "systray.exe"`) to permanently block persistent executables (`Widgets.exe`, `CompatTelRunner.exe`, `DeviceCensus.exe`, `GameBarPresenceWriter.exe`, `MicrosoftEdgeUpdate.exe`, or custom `.exe` targets) across all Windows 11 24H2–26H2 editions.
+* **Clean GPO Privacy Lockdown:** Blocks UWP background permissions (`AppPrivacy`, Camera, Microphone), Content Delivery Manager silent installs, and WPBT BIOS/UEFI binary injections, while symmetrically deleting policy values (`DELETE_VALUE`) on revert so Windows Settings never displays residual *"Some settings are managed by your organization"* banners.
+* **Raw Mouse Input & Extreme Gaming Profile:** Hard-disables pointer acceleration (`MouseSpeed`, `MouseThreshold1/2`) for 1:1 sensor tracking, elevates game threads via Multimedia Class Scheduler (`MMCSS`) tweaks (`SystemResponsiveness = 0`, `GPU Priority = 8`), enforces HAGS, disables VBS/HVCI overhead, and locks the kernel executive in RAM.
 
-#### 4. Services & Integrity (Z4 & Z6)
-* **Heavy/Light Service Profiles:** Pre-configured automated profiles to safely strip background services depending on whether the machine is an Office PC or a dedicated Gaming rig.
-* **Ghost Service Sweeper:** Identifies and cleans registry entries for orphaned drivers and services pointing to non-existent binaries.
-* **Print & Network Subsystem Resets:** Instantly fixes "No Internet" errors by flushing the network stack (Winsock) and repairs deadlocked print spoolers (purging stuck RAW/SHD files).
-* **ResetBase (WinSxS):** Aggressively compresses the Component Store by destroying superseded Windows Update backups to reclaim massive amounts of C: drive space.
+#### 4. Services, Native Start Menu Compiler & Integrity (Z4 & Z6)
+* **Deterministic Start Menu Reset (24H2/26H2 Native Compiler):** Replaces brittle binary blob replacement with an automated native compiler. Temporarily registers an MDM Enrollment & PolicyManager context (`ConfigureStartPins`), purges `CloudStore` tile caches, and activates `StartMenuExperienceHost.exe` via COM (`IApplicationActivationManager`) to compile a build-native `start2.bin` containing only **Microsoft Edge, Windows Settings, and File Explorer**, before stripping all MDM locks so you can freely customize pins. Also provisions `LayoutModification.json` for the `Default` user profile.
+* **Heavy/Light Service & Task Profiles:** Pre-configured, symmetrically reversible profiles to strip background telemetry services (`DiagTrack`, `WerSvc`, `WaaSMedicSvc`, `PcaSvc`) and Scheduled Tasks (`CEIP`, `WER`, `XblGameSave`), tailored for Office PCs or dedicated Gaming rigs.
+* **Ghost Service & Driver Sweeper:** Asynchronously audits `HKLM:\SYSTEM\CurrentControlSet\Services` against active Win32 services and kernel drivers (`Win32_SystemDriver`) using non-greedy binary path resolution to eradicate orphaned entries pointing to missing files.
+* **Asynchronous CBS/WinSxS ResetBase & Subsystem First-Aid:** Analyzes true Component Store footprint in a background Runspace, checks for `RebootPending` locks to prevent `0x800f0806` errors prior to `DISM /ResetBase`, refreshes the Winsock/TCP stack, and repairs deadlocked print queues by purging stuck `.SPL`/`.SHD` jobs in a background thread.
+
+#### 5. Interactive System Utilities & CIM DNS Enforcer (Z5)
+* **Protected `Out-GridView` Inspectors:** Selectively audit and remove installed Appx packages, provisioned base-image payloads, Features on Demand (FOD), Optional Features, and Services through interactive tables—shielded by a built-in regex filter that hides critical Xbox/Steam identity packages and core UWP runtimes.
+* **Deep Startup Inspector & CIM DNS Switcher:** Audit autorun entries across `HKLM` (x64 and `WOW6432Node` x86), `HKCU`, and startup folders without PowerShell metadata clutter, or switch active network adapters between hardened DNS providers (Quad9, Cloudflare, AdGuard, Google, OpenDNS) and DHCP in one click via native CIM methods.
 
 ![WinUltix Main tabs](assets/6.png)
 
@@ -51,8 +57,8 @@ Most "optimizers" on the market are black boxes that silently hijack OS privileg
 
 ### 🚀 Getting Started
 
-**No installation required.** 
-1. Download `WinUltix_Pro_EN.exe` from the Releases tab.
+**No installation required.**
+1. Download `WinUltix_Pro_EN.exe` (or run `WinUltix_Pro.ps1`) from the Releases tab.
 2. Right-click -> **Run as Administrator** (UAC prompt will appear automatically).
 
 ### ⚖️ License

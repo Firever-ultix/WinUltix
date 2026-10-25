@@ -6,52 +6,55 @@
 # ==========================================
 
 # ------------------------------------------
-# Z2: BLOATWARE AUDITS
+# Z2: BLOATWARE AUDITS (PURE RUNSPACE WORKERS)
 # ------------------------------------------
 function Get-OneDriveState {
-    $results = @()
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     
-    # 1. Core Executables & Run Keys
-    $coreSetupX64 = "$env:SystemRoot\SysWOW64\OneDriveSetup.exe"
-    $coreSetupX86 = "$env:SystemRoot\System32\OneDriveSetup.exe"
-    $runKey = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "OneDriveSetup" -ErrorAction SilentlyContinue
+    # 1. Core Executables & Run Keys (SystemRoot stubs are left dormant for SFC/DISM integrity, so check active user payload/startup)
+    $localExe = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
+    $runKey   = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "OneDriveSetup" -ErrorAction SilentlyContinue
+    $liveProc = Get-Process -Name "OneDrive", "OneDriveSetup" -ErrorAction SilentlyContinue
 
-    $isCoreDetected = ((Test-Path $coreSetupX64) -or (Test-Path $coreSetupX86) -or ($null -ne $runKey))
+    $isCoreDetected = ((Test-Path $localExe) -or ($null -ne $runKey) -or ($null -ne $liveProc))
     
-    $results += [PSCustomObject]@{
+    $results.Add([PSCustomObject]@{
         UIDisplayName = "Core: OneDrive Setup and Startup Routine"
         IsDetected    = $isCoreDetected
         ActionData    = @{ Type = "Core" }
-    }
+    })
 
     # 2. Zombie Registry Keys
     $zombieKeys = @("HKCU:\Software\Microsoft\OneDrive\SyncEngine", "HKCU:\Software\Microsoft\OneDrive\Client_Policy")
     foreach ($key in $zombieKeys) {
-        $results += [PSCustomObject]@{
+        $results.Add([PSCustomObject]@{
             UIDisplayName = "Registry: $($key | Split-Path -Leaf)"
             IsDetected    = (Test-Path -Path $key)
             ActionData    = @{ Type = "Registry"; Path = $key }
-        }
+        })
     }
 
     # 3. System Data Folders
-    $staticFolders = @("$env:PROGRAMDATA\Microsoft OneDrive", "C:\OneDriveTemp")
+    $staticFolders = @("$env:PROGRAMDATA\Microsoft OneDrive", "$env:SystemDrive\OneDriveTemp")
     foreach ($folder in $staticFolders) {
-        $results += [PSCustomObject]@{
+        $results.Add([PSCustomObject]@{
             UIDisplayName = "Folder: $folder"
             IsDetected    = (Test-Path -Path $folder)
             ActionData    = @{ Type = "Folder"; Path = $folder }
-        }
+        })
     }
 
-    # 4. User Profiles Data Folders
-    $users = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @("Public", "Default", "All Users") }
-    foreach ($user in $users) { 
-        $userPath = "$($user.FullName)\AppData\Local\Microsoft\OneDrive"
-        $results += [PSCustomObject]@{
-            UIDisplayName = "User Data: $($user.Name)"
-            IsDetected    = (Test-Path -Path $userPath)
-            ActionData    = @{ Type = "Folder"; Path = $userPath }
+    # 4. Dynamic User Profiles Data Folders (Zero hardcoded C:\Users)
+    $userProfiles = Get-CimInstance -ClassName Win32_UserProfile -Filter "Special = False" -ErrorAction SilentlyContinue
+    foreach ($cimProfile in $userProfiles) {
+        $userName = [System.IO.Path]::GetFileName($cimProfile.LocalPath)
+        if ($userName -notmatch '^(Public|Default.*|All Users)$') {
+            $userPath = Join-Path -Path $cimProfile.LocalPath -ChildPath "AppData\Local\Microsoft\OneDrive"
+            $results.Add([PSCustomObject]@{
+                UIDisplayName = "User Data: $userName"
+                IsDetected    = (Test-Path -Path $userPath)
+                ActionData    = @{ Type = "Folder"; Path = $userPath }
+            })
         }
     }
 
@@ -61,140 +64,196 @@ function Get-OneDriveState {
 function Get-CapabilitiesState {
     $capsWildcards = @("*Print.Fax.Scan*", "*App.StepsRecorder*", "*Media.WindowsMediaPlayer*", "*MathRecognizer*", "*App.Support.QuickAssist*", "*Microsoft.Windows.WordPad*", "*Hello.Face*", "*OneCoreUAP.OneSync*", "*Browser.InternetExplorer*", "*Microsoft.Wallpapers.Extended*", "*Print.Management.Console*", "*Language.Handwriting*", "*Language.Speech*", "*Wifi.Client*")
     
-    $installedCaps = Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object State -eq 'Installed'
+    $installedCaps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Installed' })
     
-    $results = @()
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($capName in $capsWildcards) {
-        $found = $installedCaps | Where-Object Name -like $capName
+        $found = @($installedCaps | Where-Object { $_.Name -like $capName })
         $isDetected = ($found.Count -gt 0)
         $cleanName = $capName.Replace("*", "") 
 
-        $results += [PSCustomObject]@{
+        $results.Add([PSCustomObject]@{
             UIDisplayName = "FOD: $cleanName"
             IsDetected    = $isDetected
             ActionData    = $found
-        }
+        })
     }
     return $results
 }
 
 function Get-GarbageCollectorState {
-    $allPackages = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-    $standardApps = $allPackages | Where-Object { $_.IsFramework -eq $false }
+    $allPackages = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue)
+    $standardApps = @($allPackages | Where-Object { $_.IsFramework -eq $false })
     
-    $activeDependencies = @()
+    $activeDependencies = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($app in $standardApps) { 
-        if ($app.Dependencies) { foreach ($dep in $app.Dependencies) { $activeDependencies += $dep.PackageFullName } } 
+        if ($app.Dependencies) {
+            foreach ($dep in $app.Dependencies) {
+                [void]$activeDependencies.Add($dep.PackageFullName)
+            }
+        }
     }
-    $activeDependencies = $activeDependencies | Select-Object -Unique
     
-    $critical = "Microsoft.VCLibs|Microsoft.NET.Native|Microsoft.UI.Xaml|Microsoft.WinJS|Microsoft.Services.Store|Microsoft.WindowsAppRuntime|Microsoft.AIFabric|Microsoft.Windows.AugLoop"
-    $frameworks = $allPackages | Where-Object { $_.IsFramework -eq $true -and $_.Name -notmatch $critical }
+    # Complete protected framework whitelist per WinUltix architecture standards
+    $critical = "Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop"
+    $frameworks = @($allPackages | Where-Object { $_.IsFramework -eq $true -and $_.Name -notmatch $critical })
     
-    $results = @()
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($fw in $frameworks) { 
-        if ($fw.PackageFullName -notin $activeDependencies) { 
-            $results += [PSCustomObject]@{
+        if (-not $activeDependencies.Contains($fw.PackageFullName)) { 
+            $results.Add([PSCustomObject]@{
                 UIDisplayName = "Orphaned Framework: $($fw.Name)"
                 IsDetected    = $true
                 ActionData    = @{ Type = "Framework"; Target = $fw.PackageFullName }
-            }
+            })
         } 
     }
     
-    $provisioned = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+    $provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
     foreach ($prov in $provisioned) { 
         if (-not ($allPackages | Where-Object { $_.Name -eq $prov.DisplayName })) { 
-            $results += [PSCustomObject]@{
+            $results.Add([PSCustomObject]@{
                 UIDisplayName = "Orphaned Base: $($prov.DisplayName)"
                 IsDetected    = $true
                 ActionData    = @{ Type = "Provisioned"; Target = $prov.PackageName }
-            }
+            })
         } 
     } 
     return $results
 }
 
 function Get-BloatwareState {
-    $appList = @(
-        "*3DBuilder*", "*3DViewer*", "*Bing*", "*BingNews*", "*BingWeather*", "*Clipchamp*", 
-        "*DevHome*", "*PowerAutomateDesktop*", "*Copilot*", "*Edge.GameAssist*", 
-        "*Family*", "*FeedbackHub*", "*GetHelp*", "*windowscommunicationsapps*", "*WindowsMaps*", 
-        "*MixedReality*", "*ZuneVideo*", "*ZuneMusic*", "*Gaming*", "*MicrosoftOfficeHub*", 
-        "*OneDriveSync*", "*OneNote*", "*OutlookForWindows*", "*People*", "*Photos*", "*QuickAssist*", 
-        "*SkypeApp*", "*SolitaireCollection*", "*MSTeams*", "*MicrosoftTeams*", "*Getstarted*", 
-        "*Todos*", "*XboxApp*", "*XboxGamingOverlay*", "*XboxSpeechToTextOverlay*", "*YourPhone*", 
-        "*Cortana*", "*WindowsAlarms*", "*SoundRecorder*", "*Client.WebExperience*", "*CrossDevice*", "*StickyNotes*",
-        "*CandyCrush*", "*BubbleWitch*", "*FarmHeroes*", "*MarchofEmpires*", "*Homescapes*", "*Township*",
-        "*TikTok*", "*Instagram*", "*Facebook*", "*Twitter*", "*LinkedIn*", "*Netflix*", "*Spotify*", 
-        "*Disney*", "*Amazon*", "*McAfee*", "*Norton*", "*Lenovo*", "*Dell*", "*HP*"
+    # Ordered, non-overlapping definitions with clear UI labels matching Windows 11 24H2/25H2/26H2 packages
+    $appCatalog = @(
+        @{ Label = "Microsoft Bing Search (BingSearch)";          Pattern = "*BingSearch*" }
+        @{ Label = "Microsoft News (BingNews)";                   Pattern = "*BingNews*" }
+        @{ Label = "Microsoft Weather (BingWeather)";             Pattern = "*BingWeather*" }
+        @{ Label = "Microsoft Finance / Sports / Food (Bing)";    Pattern = "Microsoft.BingFinance|Microsoft.BingSports|Microsoft.BingFoodAndDrink|Microsoft.BingTravel|Microsoft.BingHealthAndFitness|Microsoft.BingTranslator" }
+        @{ Label = "Microsoft To Do (Todos)";                     Pattern = "*Todos*" }
+        @{ Label = "Microsoft Sticky Notes (StickyNotes)";        Pattern = "*StickyNotes*" }
+        @{ Label = "Microsoft Teams Personal / Work (MSTeams)";   Pattern = "*MSTeams*|*MicrosoftTeams*" }
+        @{ Label = "New Outlook for Windows (OutlookForWindows)"; Pattern = "*OutlookForWindows*" }
+        @{ Label = "Mail & Calendar (CommunicationsApps)";        Pattern = "*windowscommunicationsapps*" }
+        @{ Label = "Microsoft 365 / Office Hub";                  Pattern = "*MicrosoftOfficeHub*" }
+        @{ Label = "Microsoft OneNote (UWP)";                     Pattern = "*OneNote*" }
+        @{ Label = "Microsoft Family Safety";                     Pattern = "*MicrosoftFamily*|*Family*" }
+        @{ Label = "Microsoft Clipchamp Video Editor";            Pattern = "*Clipchamp*" }
+        @{ Label = "Windows Dev Home (DevHome)";                  Pattern = "*DevHome*" }
+        @{ Label = "Power Automate Desktop";                      Pattern = "*PowerAutomateDesktop*" }
+        @{ Label = "Windows Copilot & AI Assistant";              Pattern = "*Copilot*" }
+        @{ Label = "Microsoft Edge Game Assist";                  Pattern = "*Edge.GameAssist*" }
+        @{ Label = "Windows Widgets (Client.WebExperience)";      Pattern = "*Client.WebExperience*" }
+        @{ Label = "Widgets Platform Runtime";                    Pattern = "*WidgetsPlatformRuntime*" }
+        @{ Label = "Cross Device Experience Host";                Pattern = "*CrossDevice*" }
+        @{ Label = "Phone Link (YourPhone)";                      Pattern = "*YourPhone*" }
+        @{ Label = "Quick Assist (Remote Help)";                  Pattern = "*QuickAssist*" }
+        @{ Label = "Windows Feedback Hub";                        Pattern = "*FeedbackHub*" }
+        @{ Label = "Get Help (Contact Support)";                  Pattern = "*GetHelp*" }
+        @{ Label = "Windows Tips (GetStarted)";                   Pattern = "*Getstarted*" }
+        @{ Label = "Windows Maps";                                Pattern = "*WindowsMaps*" }
+        @{ Label = "Windows Alarms & Clock";                      Pattern = "*WindowsAlarms*" }
+        @{ Label = "Windows Voice Recorder (SoundRecorder)";      Pattern = "*SoundRecorder*" }
+        @{ Label = "Windows Camera";                              Pattern = "*WindowsCamera*" }
+        @{ Label = "Windows Photos";                              Pattern = "*Windows.Photos*" }
+        @{ Label = "Media Player / Groove Music (ZuneMusic)";     Pattern = "*ZuneMusic*" }
+        @{ Label = "Movies & TV (ZuneVideo)";                     Pattern = "*ZuneVideo*" }
+        @{ Label = "Microsoft Solitaire Collection";              Pattern = "*SolitaireCollection*" }
+        @{ Label = "Xbox App (GamingApp)";                        Pattern = "*GamingApp*|*XboxApp*" }
+        @{ Label = "Xbox Game Bar (XboxGamingOverlay)";           Pattern = "*XboxGamingOverlay*" }
+        @{ Label = "Xbox Speech To Text Overlay";                 Pattern = "*XboxSpeechToTextOverlay*" }
+        @{ Label = "Xbox TCUI (Live In-Game Experience)";         Pattern = "*Xbox.TCUI*" }
+        @{ Label = "Microsoft People";                            Pattern = "*Microsoft.People*" }
+        @{ Label = "Skype UWP";                                   Pattern = "*SkypeApp*" }
+        @{ Label = "Cortana";                                     Pattern = "*Cortana*" }
+        @{ Label = "Mixed Reality Portal";                        Pattern = "*MixedReality*" }
+        @{ Label = "3D Builder & 3D Viewer";                      Pattern = "*3DBuilder*|*3DViewer*" }
+        @{ Label = "OneDrive UWP Sync Client";                    Pattern = "*OneDriveSync*" }
+        @{ Label = "Third-Party Games (CandyCrush / Disney / etc.)"; Pattern = "*CandyCrush*|*BubbleWitch*|*FarmHeroes*|*MarchofEmpires*|*Homescapes*|*Township*|*Disney*" }
+        @{ Label = "Third-Party Social & Media (TikTok / Spotify / etc.)"; Pattern = "*TikTok*|*Instagram*|*Facebook*|*Twitter*|*LinkedIn*|*Netflix*|*Spotify*|*Amazon*" }
+        @{ Label = "OEM & Antivirus Bloat (McAfee / Norton / OEM)"; Pattern = "*McAfee*|*Norton*|*Lenovo*|*Dell*|*HP*" }
     )
-    
-    $installedAppx = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider" }
-    $provAppx = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -notmatch "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider" }
 
-    $results = @()
-    foreach ($app in $appList) {
-        $foundInstalled = $installedAppx | Where-Object { $_.Name -like $app }
-        $foundProv = $provAppx | Where-Object { $_.DisplayName -like $app }
+    $protectedRegex = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|WindowsStore|StorePurchaseApp|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|ApplicationCompatibilityEnhancements|MicrosoftEdge\.Stable"
 
-        $validInstalled = @()
+    $installedAppx = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.IsFramework -eq $false -and $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedRegex })
+    $provAppx      = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -notmatch $protectedRegex })
+
+    $seenInstalled = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $seenProv      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $results       = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($entry in $appCatalog) {
+        $patterns = $entry.Pattern -split '\|'
+
+        $foundInstalled = [System.Collections.Generic.List[object]]::new()
+        foreach ($pkg in $installedAppx) {
+            if ($seenInstalled.Contains($pkg.PackageFullName)) { continue }
+            foreach ($pat in $patterns) {
+                if ($pkg.Name -like $pat) {
+                    $foundInstalled.Add($pkg)
+                    [void]$seenInstalled.Add($pkg.PackageFullName)
+                    break
+                }
+            }
+        }
+
+        $foundProv = [System.Collections.Generic.List[object]]::new()
+        foreach ($prov in $provAppx) {
+            if ($seenProv.Contains($prov.PackageName)) { continue }
+            foreach ($pat in $patterns) {
+                if ($prov.DisplayName -like $pat) {
+                    $foundProv.Add($prov)
+                    [void]$seenProv.Add($prov.PackageName)
+                    break
+                }
+            }
+        }
+
         $totalSizeMB = 0
-
         foreach ($pkg in $foundInstalled) {
             $loc = $pkg.InstallLocation
-            $pkgSizeMB = 0
-            
             if (-not [string]::IsNullOrWhiteSpace($loc) -and (Test-Path $loc)) {
-                # High-speed silent recursive read to bypass isolated ACL locks
                 $bytes = (Get-ChildItem -Path $loc -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-                if ($null -ne $bytes) { $pkgSizeMB = $bytes / 1MB }
-            }
-            
-            $totalSizeMB += $pkgSizeMB
-            
-            # Strict 10MB cutoff. Anything smaller is a dead stub/shell.
-            if ($pkgSizeMB -ge 10) { 
-                $validInstalled += $pkg 
+                if ($null -ne $bytes) { $totalSizeMB += ($bytes / 1MB) }
             }
         }
 
-        # Detection logic: Only flag if a substantial payload exists OR if it's deeply rooted in the Provisioned Base Image
-        $isDetected = ($validInstalled.Count -gt 0) -or ($foundProv.Count -gt 0)
-        $cleanName = $app.Replace("*", "") 
+        # Every registered package in Get-AppxPackage or Provisioned store is flagged for removal (no 10MB blind spot)
+        $isDetected = ($foundInstalled.Count -gt 0) -or ($foundProv.Count -gt 0)
 
-        # Format UX Label
         $sizeLabel = ""
         if ($isDetected) {
-            if ($totalSizeMB -ge 10) {
-                $sizeLabel = " ([math]::Round($totalSizeMB, 1) MB)"
+            if ($totalSizeMB -ge 0.5) {
+                $sizeLabel = " [ $([math]::Round($totalSizeMB, 1)) MB ]"
+            } elseif ($foundInstalled.Count -gt 0) {
+                $sizeLabel = " [ Installed Stub ]"
             } elseif ($foundProv.Count -gt 0) {
-                $sizeLabel = " (Provisioned Base Image)"
+                $sizeLabel = " [ Provisioned Image ]"
             }
         }
 
-        $results += [PSCustomObject]@{
-            UIDisplayName = "$cleanName$sizeLabel"
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = "$($entry.Label)$sizeLabel"
             IsDetected    = $isDetected
-            ActionData    = @{ Installed = $validInstalled; Provisioned = $foundProv }
-        }
+            ActionData    = @{ Installed = @($foundInstalled); Provisioned = @($foundProv) }
+        })
     }
-    
+
     return $results
 }
 
 function Get-CapabilityStubState {
     # Queries CBS directly for any installed packages acting as empty shells/stubs
-    $cbsStubs = Get-WindowsPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.PackageName -match "(?i)stub" -and $_.PackageState -eq "Installed" }
+    $cbsStubs = @(Get-WindowsPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.PackageName -match "(?i)stub" -and $_.PackageState -eq "Installed" })
     
-    $results = @()
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($stub in $cbsStubs) {
         $cleanName = ($stub.PackageName -split '~')[0]
-        $results += [PSCustomObject]@{
+        $results.Add([PSCustomObject]@{
             UIDisplayName = "CBS Stub: $cleanName"
             IsDetected    = $true
             ActionData    = $stub.PackageName
-        }
+        })
     }
     return $results
 }
@@ -202,15 +261,14 @@ function Get-CapabilityStubState {
 # ------------------------------------------
 # Z2: BLOATWARE & APPS ENGINE
 # ------------------------------------------
-
 function Invoke-RemoveOneDrive {
     param([Parameter(Mandatory=$true)][array]$SelectedItems)
     $total = $SelectedItems.Count
     if ($total -eq 0) { Write-GUI " -> No OneDrive components selected. Aborting."; return }
     $current = 0
     
-    # Pre-kill processes to unlock files/folders
-    Stop-Process -Name "OneDrive", "OneDriveSetup" -Force -ErrorAction SilentlyContinue
+    # Pre-kill all OneDrive and companion processes holding handles
+    Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 
     foreach ($item in $SelectedItems) {
@@ -224,7 +282,6 @@ function Invoke-RemoveOneDrive {
                 $setupX64 = "$env:SystemRoot\SysWOW64\OneDriveSetup.exe"
                 $setupX86 = "$env:SystemRoot\System32\OneDriveSetup.exe"
 
-                # 1. Graceful uninstall (removes AppData payloads)
                 if (Test-Path $setupX64) { 
                     Start-Process $setupX64 -ArgumentList "/uninstall" -NoNewWindow -Wait 
                 } elseif (Test-Path $setupX86) { 
@@ -232,10 +289,10 @@ function Invoke-RemoveOneDrive {
                 }
                 
                 Start-Sleep -Seconds 2
+                Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
 
-                # 2. Neutralize execution vectors without breaking CBS/WinSxS integrity
-                # We leave the dormant stub in SystemRoot to satisfy SFC/DISM.
-                reg.exe delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>$null
+                # Neutralize execution vectors while preserving dormant SystemRoot binary for SFC/DISM integrity
+                reg.exe delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>$null | Out-Null
                 
                 Write-GUI "    [+] Core installation payloads purged. SystemRoot stubs neutralized."
             }
@@ -243,7 +300,46 @@ function Invoke-RemoveOneDrive {
                 if (Test-Path -Path $data.Path) { Remove-Item -Path $data.Path -Recurse -Force -ErrorAction Stop }
             }
             elseif ($data.Type -eq "Folder") {
-                if (Test-Path -Path $data.Path) { Remove-Item -Path $data.Path -Recurse -Force -ErrorAction Stop }
+                $targetDir = $data.Path
+                if (-not [string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) {
+                    & takeown.exe /F "$targetDir" /R /A /D Y 2>$null | Out-Null
+                    & icacls.exe "$targetDir" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+
+                    # Evacuate memory-mapped shell extensions (e.g., FileSyncShell64.dll locked by explorer.exe)
+                    # Using explicit foreach variable ($dll) so catch block does not overwrite $_ with ErrorRecord
+                    $dllFiles = @(Get-ChildItem -LiteralPath $targetDir -Filter "*.dll" -Recurse -File -Force -ErrorAction SilentlyContinue)
+                    foreach ($dll in $dllFiles) {
+                        $dllPath = $dll.FullName
+                        $dllName = $dll.Name
+                        if ([string]::IsNullOrWhiteSpace($dllPath)) { continue }
+
+                        try {
+                            $dll.Attributes = 'Normal'
+                            Remove-Item -LiteralPath $dllPath -Force -ErrorAction Stop
+                        } catch {
+                            $trashPath = Join-Path -Path $env:TEMP -ChildPath "WinUltix_Locked_${dllName}_$([guid]::NewGuid().ToString('N')).tmp"
+                            Move-Item -LiteralPath $dllPath -Destination $trashPath -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+
+                    # Strip ReadOnly/Hidden/System attributes from remaining items and wipe directory
+                    Get-ChildItem -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        try { $_.Attributes = 'Normal' } catch {}
+                    }
+                    Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+
+                    # Final fallback: if directory still exists due to an open directory handle in Explorer, cycle explorer.exe
+                    if (Test-Path -LiteralPath $targetDir) {
+                        Write-GUI "    [*] Releasing Shell Extension lock via Explorer refresh..."
+                        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Milliseconds 600
+                        Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction Stop
+                        if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+                            Start-Process "explorer.exe"
+                        }
+                    }
+                    Write-GUI "    [OK] Folder eradicated: $targetDir"
+                }
             }
         } catch {
             Write-GUI "    [!] Error purging $($item.UIDisplayName): $($_.Exception.Message)"
@@ -264,7 +360,7 @@ function Invoke-RemoveCapabilities {
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
         Write-GUI " -> Removing Capability: $($item.UIDisplayName)"
         foreach ($cap in $item.ActionData) {
-            try { Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop } catch { }
+            try { Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null } catch { }
         }
     }
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
@@ -285,7 +381,7 @@ function Invoke-GarbageCollector {
             if ($item.ActionData.Type -eq "Framework") {
                 Remove-AppxPackage -Package $item.ActionData.Target -AllUsers -ErrorAction Stop
             } elseif ($item.ActionData.Type -eq "Provisioned") {
-                Remove-AppxProvisionedPackage -Online -PackageName $item.ActionData.Target -ErrorAction Stop
+                Remove-AppxProvisionedPackage -Online -PackageName $item.ActionData.Target -ErrorAction Stop | Out-Null
             }
         } catch { Write-GUI "    [!] Error removing $($item.UIDisplayName): $($_.Exception.Message)" }
     }
@@ -299,7 +395,7 @@ function Invoke-RemoveBloatware {
     if ($total -eq 0) { Write-GUI " -> No items selected. Operation aborted."; return }
     $current = 0
 
-    Stop-Process -Name "Widgets", "StoreExperienceHost", "WinStore.App", "Copilot" -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name "Widgets", "WidgetService", "StoreExperienceHost", "WinStore.App", "Copilot", "msteams", "olk" -Force -ErrorAction SilentlyContinue
     Stop-Service -Name "ClipSVC" -Force -ErrorAction SilentlyContinue
 
     foreach ($item in $SelectedItems) {
@@ -307,7 +403,6 @@ function Invoke-RemoveBloatware {
         if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
         Write-GUI " -> Purging: $($item.UIDisplayName)"
         
-        # [FIX] Target GPO isolation - strictly bound to selected Copilot
         if ($item.UIDisplayName -match "(?i)Copilot") {
             Write-GUI "    [*] Applying local policy constraints for Copilot..."
             $policies = @(
@@ -320,35 +415,47 @@ function Invoke-RemoveBloatware {
             }
         }
 
-        # Process Installed Packages
+        # 1. Process Installed Packages (AllUsers + CurrentUser fallback)
         foreach ($pkg in $item.ActionData.Installed) {
             $pfn = $pkg.PackageFamilyName
             
-            try { 
-                Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop 
+            try {
+                try {
+                    Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
+                } catch {
+                    # Fallback for packages staged only in the current user context
+                    Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
+                }
                 
-                # [FIX] Permanently blacklist the package from Appx Deployment Service respawning
+                # Register in Deprovisioned store to prevent Windows Update from reinstalling it
                 if (-not [string]::IsNullOrWhiteSpace($pfn)) {
                     $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$pfn"
                     if (-not (Test-Path $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
                 }
+                Write-GUI "    [+] Removed Appx: $($pkg.Name)"
             } catch { 
-                # Scoped Fallback solely for Copilot
                 if ($pkg.Name -match "(?i)Copilot") {
-                    Write-GUI "    [!] API uninstallation blocked for $($pkg.Name)."
-                    Write-GUI "    [*] Skipping physical deletion to maintain State Repository integrity. Relying on applied GPO restrictions."
+                    Write-GUI "    [!] API uninstallation blocked for $($pkg.Name). Relying on GPO lockdown."
                 } else {
                     Write-GUI "    [-] Error removing $($pkg.Name): $($_.Exception.Message)"
                 }
             }
         }
         
-        # Process Provisioned Packages (Base Images)
+        # 2. Process Provisioned Packages (Only if still present after Remove-AppxPackage -AllUsers)
+        $remainingProv = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
         foreach ($prov in $item.ActionData.Provisioned) {
+            $stillProvisioned = $remainingProv | Where-Object { $_.PackageName -eq $prov.PackageName }
+            if ($null -eq $stillProvisioned) { continue }
+
             try { 
-                Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop 
-            } catch { 
-                Write-GUI "    [-] Error removing provisioned package $($prov.DisplayName): $($_.Exception.Message)"
+                Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop | Out-Null
+                Write-GUI "    [+] Deprovisioned base image: $($prov.DisplayName)"
+            } catch {
+                # Ignore 0x80070002 / 0x80070003 if Remove-AppxPackage -AllUsers already wiped the staging directory
+                if ($_.Exception.Message -notmatch "(?i)nie można odnaleźć|cannot find|0x80070002|0x80070003") {
+                    Write-GUI "    [-] Error deprovisioning $($prov.DisplayName): $($_.Exception.Message)"
+                }
             }
         }
     }
@@ -369,13 +476,70 @@ function Invoke-RemoveCapabilityStubs {
         Write-GUI " -> Purging CBS Stub: $($item.UIDisplayName)"
         try {
             # Strips the underlying package, implicitly removing it from Get-WindowsCapability payload list
-            Remove-WindowsPackage -Online -PackageName $item.ActionData -NoRestart -ErrorAction Stop
+            Remove-WindowsPackage -Online -PackageName $item.ActionData -NoRestart -ErrorAction Stop | Out-Null
         } catch { 
             Write-GUI "    [!] Error purging stub: $($_.Exception.Message)" 
         }
     }
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
     Write-GUI " -> CBS capability stubs successfully eradicated."
+}
+
+# ------------------------------------------
+# Z2: ASYNC SCANNER DISPATCHER (VIA CORE_HELPERS)
+# ------------------------------------------
+function Invoke-Z2ScannerAsync {
+    param(
+        [Parameter(Mandatory=$true)][string]$ScannerFunction,
+        [Parameter(Mandatory=$true)][string]$AuditLabel,
+        [string]$ModalTitle = "",
+        [string]$ModalDescription = "",
+        [string]$ExecutorFunction = "",
+        [Parameter(Mandatory=$true)][System.Windows.Forms.Control[]]$ControlsToDisable,
+        [switch]$AuditOnly,
+        [switch]$SkipModalIfClean
+    )
+
+    if ($AuditOnly) {
+        Write-GUI "--- AUDIT: $AuditLabel (Background Thread) ---"
+    } else {
+        Write-GUI " -> Initializing $AuditLabel Scanner (Background Thread)..."
+    }
+    Update-Progress 25
+
+    $sb = (Get-Command -Name $ScannerFunction).ScriptBlock
+    $isAuditOnly = $AuditOnly.IsPresent
+    $skipIfClean = $SkipModalIfClean.IsPresent
+
+    Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable $ControlsToDisable -OnComplete {
+        param($output)
+        Update-Progress 0
+        [array]$auditData = @($output | Where-Object { $null -ne $_ })
+        $detected = @($auditData | Where-Object { $_.IsDetected })
+
+        if ($isAuditOnly) {
+            if ($detected.Count -gt 0) {
+                foreach ($d in $detected) { Write-GUI "  [!] Found: $($d.UIDisplayName)" }
+                Write-GUI "-> STATUS: $($detected.Count) item(s) detected.`n"
+            } else {
+                Write-GUI "  [OK] System clean.`n"
+            }
+            return
+        }
+
+        if ($skipIfClean -and $detected.Count -eq 0) {
+            Write-GUI "  [OK] System is completely clean. Nothing to remove.`n"
+            return
+        }
+
+        $selectedData = Show-ActionModal -Title $ModalTitle -Description $ModalDescription -AuditResults $auditData
+        if ($null -ne $selectedData -and $null -ne $selectedData.Items -and $selectedData.Items.Count -gt 0) {
+            & $ExecutorFunction -SelectedItems $selectedData.Items
+            Write-GUI ""
+        } else {
+            Write-GUI "Operation cancelled.`n"
+        }
+    }.GetNewClosure()
 }
 
 function Initialize-Z2UI {
@@ -394,25 +558,6 @@ function Initialize-Z2UI {
     $btnOneDrive.ForeColor = [System.Drawing.Color]::White
     $btnOneDrive.FlatStyle = "Flat"
     $btnOneDrive.Add_MouseEnter({ Show-Description "Completely uninstalls OneDrive, burns it from the Registry, and physically deletes folders across all profiles." })
-    $btnOneDrive.Add_Click({ 
-        Write-GUI "Initializing OneDrive Scanner..."
-        $auditData = Get-OneDriveState
-        $detected = $auditData | Where-Object { $_.IsDetected }
-        
-        if ($detected.Count -eq 0) {
-            Write-GUI "  [OK] System is perfectly clean. No OneDrive presence detected.`n"
-            return
-        }
-        
-        $selectedData = Show-ActionModal -Title "WinUltix - OneDrive" -Description "Select specific OneDrive traces to eradicate." -AuditResults $auditData
-        if ($null -ne $selectedData) { 
-            Invoke-RemoveOneDrive -SelectedItems $selectedData.Items
-            Write-GUI "" 
-        } else { 
-            Write-GUI "Operation cancelled."
-            Write-GUI "" 
-        } 
-    })
 
     $btnAudOneDrive = New-Object System.Windows.Forms.Button
     $btnAudOneDrive.Text = "?"
@@ -422,18 +567,13 @@ function Initialize-Z2UI {
     $btnAudOneDrive.ForeColor = [System.Drawing.Color]::White
     $btnAudOneDrive.FlatStyle = "Flat"
     $btnAudOneDrive.Add_MouseEnter({ Show-Description "AUDIT: Scans for active OneDrive installers and startup keys." })
-    $btnAudOneDrive.Add_Click({ 
-        Write-GUI "--- AUDIT: OneDrive ---"
-        $state = Get-OneDriveState
-        $detected = $state | Where-Object { $_.IsDetected }
-        
-        if ($detected.Count -gt 0) { 
-            foreach ($d in $detected) { Write-GUI "  [!] Found: $($d.UIDisplayName)" }
-        } else { 
-            Write-GUI "  [OK] System clean. No OneDrive presence detected." 
-        }
-        Write-GUI "" 
-    })
+
+    $btnOneDrive.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-OneDriveState" -AuditLabel "OneDrive" -ModalTitle "WinUltix - OneDrive" -ModalDescription "Select specific OneDrive traces to eradicate." -ExecutorFunction "Invoke-RemoveOneDrive" -ControlsToDisable @($btnOneDrive, $btnAudOneDrive) -SkipModalIfClean
+    }.GetNewClosure())
+    $btnAudOneDrive.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-OneDriveState" -AuditLabel "OneDrive" -ControlsToDisable @($btnOneDrive, $btnAudOneDrive) -AuditOnly
+    }.GetNewClosure())
 
     # Capabilities (FOD)
     $btnCaps = New-Object System.Windows.Forms.Button
@@ -444,19 +584,7 @@ function Initialize-Z2UI {
     $btnCaps.ForeColor = [System.Drawing.Color]::White
     $btnCaps.FlatStyle = "Flat"
     $btnCaps.Add_MouseEnter({ Show-Description "Interactive removal of optional built-in Features on Demand (FOD)." })
-    $btnCaps.Add_Click({ 
-        Write-GUI "Initializing Capabilities Scanner..."
-        $auditData = Get-CapabilitiesState
-        $selectedData = Show-ActionModal -Title "WinUltix - FOD Removal" -Description "Select features to remove." -AuditResults $auditData
-        if ($null -ne $selectedData) { 
-            Invoke-RemoveCapabilities -SelectedItems $selectedData.Items
-            Write-GUI "" 
-        } else { 
-            Write-GUI "Operation cancelled."
-            Write-GUI "" 
-        } 
-    })
-    
+
     $btnAudCaps = New-Object System.Windows.Forms.Button
     $btnAudCaps.Text = "?"
     $btnAudCaps.Location = New-Object System.Drawing.Point(345, 70)
@@ -465,7 +593,13 @@ function Initialize-Z2UI {
     $btnAudCaps.ForeColor = [System.Drawing.Color]::White
     $btnAudCaps.FlatStyle = "Flat"
     $btnAudCaps.Add_MouseEnter({ Show-Description "AUDIT: Verifies installed unnecessary Capabilities (FOD)." })
-    $btnAudCaps.Add_Click({ Write-GUI "--- AUDIT: Built-in Features ---"; $state = Get-CapabilitiesState; $detected = $state | Where-Object { $_.IsDetected }; if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] Found: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Clean." }; Write-GUI "" })
+
+    $btnCaps.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ModalTitle "WinUltix - FOD Removal" -ModalDescription "Select features to remove." -ExecutorFunction "Invoke-RemoveCapabilities" -ControlsToDisable @($btnCaps, $btnAudCaps)
+    }.GetNewClosure())
+    $btnAudCaps.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ControlsToDisable @($btnCaps, $btnAudCaps) -AuditOnly
+    }.GetNewClosure())
 
     # Aggressive Bloatware
     $btnBloat = New-Object System.Windows.Forms.Button
@@ -476,18 +610,6 @@ function Initialize-Z2UI {
     $btnBloat.ForeColor = [System.Drawing.Color]::White
     $btnBloat.FlatStyle = "Flat"
     $btnBloat.Add_MouseEnter({ Show-Description "Aggressive, interactive removal of junk Appx applications from the system." })
-    $btnBloat.Add_Click({ 
-        Write-GUI "Initializing Appx Scanner..."
-        $auditData = Get-BloatwareState
-        $selectedData = Show-ActionModal -Title "WinUltix - Bloatware Removal" -Description "Select components to remove. Detected items are checked by default." -AuditResults $auditData
-        if ($null -ne $selectedData) { 
-            Invoke-RemoveBloatware -SelectedItems $selectedData.Items
-            Write-GUI "" 
-        } else { 
-            Write-GUI "Operation cancelled."
-            Write-GUI "" 
-        } 
-    })
 
     $btnAudBloat = New-Object System.Windows.Forms.Button
     $btnAudBloat.Text = "?"
@@ -497,7 +619,13 @@ function Initialize-Z2UI {
     $btnAudBloat.ForeColor = [System.Drawing.Color]::White
     $btnAudBloat.FlatStyle = "Flat"
     $btnAudBloat.Add_MouseEnter({ Show-Description "AUDIT: Scans the system for target Appx Bloatware and prints a report." })
-    $btnAudBloat.Add_Click({ Write-GUI "--- AUDIT: Bloatware (Appx) ---"; $state = Get-BloatwareState; $detected = $state | Where-Object { $_.IsDetected }; if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] Found: $($d.UIDisplayName)" }; Write-GUI "-> STATUS: $($detected.Count) junk apps." } else { Write-GUI "  [OK] Clean." }; Write-GUI "" })
+
+    $btnBloat.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ModalTitle "WinUltix - Bloatware Removal" -ModalDescription "Select components to remove. Detected items are checked by default." -ExecutorFunction "Invoke-RemoveBloatware" -ControlsToDisable @($btnBloat, $btnAudBloat)
+    }.GetNewClosure())
+    $btnAudBloat.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ControlsToDisable @($btnBloat, $btnAudBloat) -AuditOnly
+    }.GetNewClosure())
 
     # Garbage Collector
     $btnGC = New-Object System.Windows.Forms.Button
@@ -508,25 +636,6 @@ function Initialize-Z2UI {
     $btnGC.ForeColor = [System.Drawing.Color]::White
     $btnGC.FlatStyle = "Flat"
     $btnGC.Add_MouseEnter({ Show-Description "Intelligently scans application dependencies and removes orphaned frameworks." })
-    $btnGC.Add_Click({ 
-        Write-GUI "Initializing Garbage Collector..."
-        $auditData = Get-GarbageCollectorState
-        $detected = $auditData | Where-Object { $_.IsDetected }
-        
-        if ($detected.Count -eq 0) { 
-            Write-GUI "  [OK] System is perfectly clean! No orphaned components.`n"
-            return 
-        }
-        
-        $selectedData = Show-ActionModal -Title "WinUltix - Garbage Collector" -Description "Select orphaned packages to remove." -AuditResults $auditData
-        if ($null -ne $selectedData) { 
-            Invoke-GarbageCollector -SelectedItems $selectedData.Items
-            Write-GUI "" 
-        } else { 
-            Write-GUI "Operation cancelled."
-            Write-GUI "" 
-        } 
-    })
 
     $btnAudGC = New-Object System.Windows.Forms.Button
     $btnAudGC.Text = "?"
@@ -536,7 +645,13 @@ function Initialize-Z2UI {
     $btnAudGC.ForeColor = [System.Drawing.Color]::White
     $btnAudGC.FlatStyle = "Flat"
     $btnAudGC.Add_MouseEnter({ Show-Description "AUDIT: Scans and lists all orphaned frameworks that will be removed." })
-    $btnAudGC.Add_Click({ Write-GUI "--- AUDIT: Garbage Collector ---"; $state = Get-GarbageCollectorState; $detected = $state | Where-Object { $_.IsDetected }; if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Clean." }; Write-GUI "" })
+
+    $btnGC.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-GarbageCollectorState" -AuditLabel "Garbage Collector" -ModalTitle "WinUltix - Garbage Collector" -ModalDescription "Select orphaned packages to remove." -ExecutorFunction "Invoke-GarbageCollector" -ControlsToDisable @($btnGC, $btnAudGC) -SkipModalIfClean
+    }.GetNewClosure())
+    $btnAudGC.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-GarbageCollectorState" -AuditLabel "Garbage Collector" -ControlsToDisable @($btnGC, $btnAudGC) -AuditOnly
+    }.GetNewClosure())
 
     # CBS Capability Stubs
     $btnStubs = New-Object System.Windows.Forms.Button
@@ -547,25 +662,6 @@ function Initialize-Z2UI {
     $btnStubs.ForeColor = [System.Drawing.Color]::White
     $btnStubs.FlatStyle = "Flat"
     $btnStubs.Add_MouseEnter({ Show-Description "Scans and eradicates underlying CBS Stub packages to permanently declutter the Windows Capabilities list." })
-    $btnStubs.Add_Click({ 
-        Write-GUI "Initializing CBS Stub Scanner..."
-        $auditData = Get-CapabilityStubState
-        $detected = $auditData | Where-Object { $_.IsDetected }
-        
-        if ($detected.Count -eq 0) { 
-            Write-GUI "  [OK] CBS store is completely clean. No stubs detected.`n"
-            return 
-        }
-        
-        $selectedData = Show-ActionModal -Title "WinUltix - Stub Purge" -Description "Select stubs to rip from the CBS store." -AuditResults $auditData
-        if ($null -ne $selectedData) { 
-            Invoke-RemoveCapabilityStubs -SelectedItems $selectedData.Items
-            Write-GUI "" 
-        } else { 
-            Write-GUI "Operation cancelled."
-            Write-GUI "" 
-        } 
-    })
 
     $btnAudStubs = New-Object System.Windows.Forms.Button
     $btnAudStubs.Text = "?"
@@ -575,8 +671,14 @@ function Initialize-Z2UI {
     $btnAudStubs.ForeColor = [System.Drawing.Color]::White
     $btnAudStubs.FlatStyle = "Flat"
     $btnAudStubs.Add_MouseEnter({ Show-Description "AUDIT: Queries CBS registry/payload directly for active stubs." })
-    $btnAudStubs.Add_Click({ Write-GUI "--- AUDIT: CBS Stubs ---"; $state = Get-CapabilityStubState; $detected = $state | Where-Object { $_.IsDetected }; if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] $($d.UIDisplayName)" } } else { Write-GUI "  [OK] No CBS stubs detected." }; Write-GUI "" })
 
-    $tabApps.Controls.AddRange(@($btnOneDrive, $btnAudOneDrive, $btnCaps, $btnAudCaps, $btnBloat, $btnAudBloat, $btnGC, $btnAudGC, $btnStubs, $btnAudStubs ))
+    $btnStubs.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-CapabilityStubState" -AuditLabel "CBS Stubs" -ModalTitle "WinUltix - Stub Purge" -ModalDescription "Select stubs to rip from the CBS store." -ExecutorFunction "Invoke-RemoveCapabilityStubs" -ControlsToDisable @($btnStubs, $btnAudStubs) -SkipModalIfClean
+    }.GetNewClosure())
+    $btnAudStubs.Add_Click({
+        Invoke-Z2ScannerAsync -ScannerFunction "Get-CapabilityStubState" -AuditLabel "CBS Stubs" -ControlsToDisable @($btnStubs, $btnAudStubs) -AuditOnly
+    }.GetNewClosure())
+
+    $tabApps.Controls.AddRange(@($btnOneDrive, $btnAudOneDrive, $btnCaps, $btnAudCaps, $btnBloat, $btnAudBloat, $btnGC, $btnAudGC, $btnStubs, $btnAudStubs))
     $TabControl.Controls.Add($tabApps)
 }
