@@ -63,8 +63,9 @@ foreach ($line in $mainLines) {
     }
 }
 
-# Single I/O dump with UTF8 BOM for Windows PowerShell 5.1 parser compatibility
-Set-Content -Path $outputFile -Value $monolithContent.ToString() -Encoding UTF8
+# Single I/O dump (Strict UTF-8 No-BOM to prevent \uFEFF parser error in Invoke-Expression)
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText($outputFile, $monolithContent.ToString(), $utf8NoBom)
 
 Write-Host "Monolith successfully linked ($outputFile). Executing PS2EXE (v$detectedVersion)..." -ForegroundColor Cyan
 

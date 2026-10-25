@@ -68,7 +68,7 @@ Most "optimizers" on the market are black boxes that silently hijack OS privileg
 **Option A: Instant PowerShell Launch (Zero-Download)**
 Open PowerShell as Administrator and run:
 ```powershell
-irm [https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith_EN.ps1](https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith_EN.ps1) | iex
+irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith_EN.ps1 | iex
 ```
 
 ### ⚖️ License
