@@ -1,3 +1,7 @@
+> 🔗 **Part of the Ultix Ecosystem:**
+> Looking for a clean, pre-debloated Windows 11 ISO deployment? Check out **[AutoUltixed](https://github.com/Firever-ultix/AutoUltixed)**.
+> Looking for live post-install hardware & OS tuning? You are at **[WinUltix Pro](https://github.com/Firever-ultix/WinUltix)**.
+
 # WinUltix Pro 2.7 🚀
 **An Advanced, Portable, Zero-Dependency Windows 11 (24H2 / 25H2 / 26H2) Optimizer & Hardware Tuning Toolkit**
 
@@ -60,6 +64,12 @@ Most "optimizers" on the market are black boxes that silently hijack OS privileg
 **No installation required.**
 1. Download `WinUltix_Pro_EN.exe` (or run `WinUltix_Pro.ps1`) from the Releases tab.
 2. Right-click -> **Run as Administrator** (UAC prompt will appear automatically).
+
+**Option A: Instant PowerShell Launch (Zero-Download)**
+Open PowerShell as Administrator and run:
+```powershell
+irm [https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith_EN.ps1](https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith_EN.ps1) | iex
+```
 
 ### ⚖️ License
 This project is licensed under the **MIT License**.

@@ -29,7 +29,6 @@ err/
 *.rar
 *.7z
 
-WinUltix_Pro.exe
-WinUltix_Monolith_EN.ps1
-O.cmd
-build/
+WinUltix_Pro_EN.exe
+
+tmp/
