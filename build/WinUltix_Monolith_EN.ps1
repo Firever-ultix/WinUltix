@@ -1,4 +1,4 @@
-﻿# ==========================================
+# ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
 # MODULAR MAIN LAUNCHER
@@ -5212,4 +5212,3 @@ try {
 } finally {
     $global:form.Dispose()
 }
-
