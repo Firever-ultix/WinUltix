@@ -12,8 +12,7 @@ $Global:AppVersion = "v2.7.0"
 # $ModulesDir = Join-Path $ScriptDir "Modules"
 
 # Core_Helpers: Global UI functions, registry engine, and shared modal interfaces.
-# . (Join-Path $ModulesDir "Core_Helpers.ps1")
-# >>> BEGIN INJECTED MODULE: Core_Helpers.ps1 <<<
+# >>> INJECTED: Core_Helpers.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -281,12 +280,11 @@ function Show-ActionModal {
         $modal.Dispose()
     }
 }
-# <<< END INJECTED MODULE: Core_Helpers.ps1 <<<
+# <<< END INJECTED: Core_Helpers.ps1 <<<
 
 
 # Z1_Cleanup: Deep system cleaning. Removes Windows Update cache, Temp files, Event Viewer logs (wevtutil), and 3rd-party app caches. Enhanced button interactivity and optimized execution flows.
-# . (Join-Path $ModulesDir "Z1_Cleanup.ps1")
-# >>> BEGIN INJECTED MODULE: Z1_Cleanup.ps1 <<<
+# >>> INJECTED: Z1_Cleanup.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -669,12 +667,11 @@ function Initialize-Z1UI {
     
     $TabControl.Controls.Add($tabClean)
 }
-# <<< END INJECTED MODULE: Z1_Cleanup.ps1 <<<
+# <<< END INJECTED: Z1_Cleanup.ps1 <<<
 
 
 # Z2_Bloatware: Aggressive debloatifier. Incorporates CBS and Appx state verification. Enhanced OneDrive removal across profiles, FOD package management, and intelligent orphaned framework collection (Garbage Collector).
-# . (Join-Path $ModulesDir "Z2_Bloatware.ps1")
-# >>> BEGIN INJECTED MODULE: Z2_Bloatware.ps1 <<<
+# >>> INJECTED: Z2_Bloatware.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -1359,12 +1356,11 @@ function Initialize-Z2UI {
     $tabApps.Controls.AddRange(@($btnOneDrive, $btnAudOneDrive, $btnCaps, $btnAudCaps, $btnBloat, $btnAudBloat, $btnGC, $btnAudGC, $btnStubs, $btnAudStubs))
     $TabControl.Controls.Add($tabApps)
 }
-# <<< END INJECTED MODULE: Z2_Bloatware.ps1 <<<
+# <<< END INJECTED: Z2_Bloatware.ps1 <<<
 
 
 # Z3_Registry: Main registry engine (Invoke-ApplyRegistry) featuring dedicated revert modals. Manages UI tweaks, telemetry blocks, gaming optimizations (VBS/HVCI, GameDVR), and implements Software Restriction Policies (SRP).
-# . (Join-Path $ModulesDir "Z3_Registry.ps1")
-# >>> BEGIN INJECTED MODULE: Z3_Registry.ps1 <<<
+# >>> INJECTED: Z3_Registry.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -2098,12 +2094,11 @@ function Initialize-Z3UI {
     $tabReg.Controls.AddRange(@($btnRegTaskbar, $btnAudTaskbar, $btnRegExplorer, $btnAudExplorer, $btnRegAnnoyances, $btnAudAnnoyances, $btnRegPrivacy, $btnAudPrivacy, $btnRegSystemBoot, $btnAudSystemBoot, $btnRegMouse, $btnAudMouse, $btnRegGaming, $btnAudGaming, $btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP))
     $TabControl.Controls.Add($tabReg)
 }
-# <<< END INJECTED MODULE: Z3_Registry.ps1 <<<
+# <<< END INJECTED: Z3_Registry.ps1 <<<
 
 
 # Z4_Services: Service state management and Task Scheduler control via centralized revert modals. Disables telemetry tasks, configures TCPNoDelay, and enforces strict service operational profiles with improved UI interactivity.
-# . (Join-Path $ModulesDir "Z4_Services.ps1")
-# >>> BEGIN INJECTED MODULE: Z4_Services.ps1 <<<
+# >>> INJECTED: Z4_Services.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -2839,12 +2834,11 @@ function Initialize-Z4UI {
 
     $TabControl.Controls.Add($tabServices)
 }
-# <<< END INJECTED MODULE: Z4_Services.ps1 <<<
+# <<< END INJECTED: Z4_Services.ps1 <<<
 
 
 # Z5_Utilities: Interactive tools and applets via Out-GridView for selective package and service management. Includes DNS Enforcer and classic Windows applet launchers.
-# . (Join-Path $ModulesDir "Z5_Utilities.ps1")
-# >>> BEGIN INJECTED MODULE: Z5_Utilities.ps1 <<<
+# >>> INJECTED: Z5_Utilities.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -3281,12 +3275,11 @@ function Initialize-Z5UI {
     $tabUtil.Controls.AddRange(@($lblInspect, $btnUtilAppx, $btnUtilAppxProv, $btnUtilCaps, $btnUtilOpt, $btnUtilSvc, $btnUtilStartup, $lblClassic, $btnUtilNet, $btnUtilApps, $btnUtilSound, $btnUtilPrint, $lblDNS, $comboDNS, $btnApplyDNS, $global:lblCurrentDNS))
     $TabControl.Controls.Add($tabUtil)
 }
-# <<< END INJECTED MODULE: Z5_Utilities.ps1 <<<
+# <<< END INJECTED: Z5_Utilities.ps1 <<<
 
 
 # Z6_Integrity: Advanced repair and reset module. Features WinSXS compression (DISM /ResetBase) with deployment auditing, full network stack refresh, Print Spooler subsystem reset, and core file repairs.
-# . (Join-Path $ModulesDir "Z6_Integrity.ps1")
-# >>> BEGIN INJECTED MODULE: Z6_Integrity.ps1 <<<
+# >>> INJECTED: Z6_Integrity.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -3519,12 +3512,11 @@ function Initialize-Z6UI {
     $tabWinSXS.Controls.AddRange(@($btnCheckSystem, $btnResetBase, $btnAudWinSxS, $btnNetFix, $btnFixPrinters))
     $TabControl.Controls.Add($tabWinSXS)
 }
-# <<< END INJECTED MODULE: Z6_Integrity.ps1 <<<
+# <<< END INJECTED: Z6_Integrity.ps1 <<<
 
 
 # Z7_Hardware: Low-level hardware diagnostics and tuning with interactive modals. Includes Affinity Lasso, CPPC P-State control, MSI Interrupt Enforcer, WHEA APIC decoder, Network NDIS offload tuning, System Timer (TSC) configuration, and NVMe APST/ASPM power management.
-# . (Join-Path $ModulesDir "Z7_Hardware.ps1")
-# >>> BEGIN INJECTED MODULE: Z7_Hardware.ps1 <<<
+# >>> INJECTED: Z7_Hardware.ps1 <<<
 # ==========================================
 # WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
@@ -5047,7 +5039,7 @@ function Initialize-Z7UI {
 
     $TabControl.Controls.Add($tab)
 }
-# <<< END INJECTED MODULE: Z7_Hardware.ps1 <<<
+# <<< END INJECTED: Z7_Hardware.ps1 <<<
 
 
 Add-Type -AssemblyName System.Windows.Forms

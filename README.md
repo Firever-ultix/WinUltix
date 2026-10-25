@@ -59,16 +59,23 @@ Most "optimizers" on the market are black boxes that silently hijack OS privileg
 
 ---
 
-### 🚀 Getting Started
+### 🛡️ Antivirus Detections & Transparency (False Positives)
+Because WinUltix Pro modifies low-level kernel registry keys, adjusts hardware power states, and disables OS telemetry services, some aggressive machine-learning (ML) engines may flag the executable:
+* **Why does this happen?** The binary is unsigned and requires Administrator privileges to access `HKLM` and SCM hardware subsystems.
+* **100% Transparent:** The complete source code is open and verifiable. You can inspect every module in `/src` or build the standalone executable yourself using `Compile-WinUltix.ps1`.
+* **Zero-Download Alternative:** If you prefer not to run compiled binaries, run the verified source script directly via PowerShell
 
+### 🚀 Getting Started
 **Option A: No installation required.**
 1. Download `WinUltix_Pro_EN.exe` (or run `WinUltix_Pro.ps1`) from the Releases tab.
+.exe SHA-256: 61DC6041363F8A4C2627FA162211B2B3EE45BF326206A67C966178184AF9406D
 2. Right-click -> **Run as Administrator** (UAC prompt will appear automatically).
 
 **Option B: Instant PowerShell Launch (Zero-Download)**
 Open PowerShell as Administrator and run:
 ```powershell
 irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith_EN.ps1 | iex
+
 ```
 
 ### ⚖️ License
