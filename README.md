@@ -66,17 +66,24 @@ Because WinUltix Pro modifies low-level kernel registry keys, adjusts hardware p
 * **Zero-Download Alternative:** If you prefer not to run compiled binaries, run the verified source script directly via PowerShell
 
 ### 🚀 Getting Started
-**Option A: No installation required.**
-1. Download `WinUltix_Pro_EN.exe` (or run `WinUltix_Pro.ps1`) from the Releases tab.
-.exe SHA-256: 61DC6041363F8A4C2627FA162211B2B3EE45BF326206A67C966178184AF9406D
-2. Right-click -> **Run as Administrator** (UAC prompt will appear automatically).
 
-**Option B: Instant PowerShell Launch (Zero-Download)**
-Open PowerShell as Administrator and run:
+WinUltix Pro offers two deployment methods:
+
+#### Option 1: Instant Launch (Recommended — Zero Download)
+Run the latest verified build directly in memory with Administrator privileges:
 ```powershell
 irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith_EN.ps1 | iex
-
 ```
+
+#### Option 2: Standalone Executable
+1. Download `WinUltix_Pro_EN.exe` from the **[Releases](https://github.com/Firever-ultix/WinUltix/releases)** tab.
+2. Right-click -> **Run as Administrator** (UAC prompt will appear automatically).
+
+WinUltix_Pro_EN.exe SHA-256: 61DC6041363F8A4C2627FA162211B2B3EE45BF326206A67C966178184AF9406D
+
+> ℹ️ **Antivirus & SmartScreen Notice:** WinUltix Pro modifies low-level kernel registry keys, adjusts hardware power states, and disables OS telemetry services. Because this open-source executable is unsigned, some aggressive machine-learning (ML) engines may flag it as a false positive. You can inspect every module in `/src`, review the VirusTotal report, or use **Option 1** to run directly from transparent source code.
+
+
 
 ### ⚖️ License
 This project is licensed under the **MIT License**.
