@@ -1,29 +1,27 @@
 ﻿# ==========================================
-# WINULTIX PRO - ULTIMATE SYSTEM TOOLKIT
+# WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z4_SERVICES.PS1 - SERVICES & SYSTEM MODULE
-# Z4_Services: Manages services (Set-Service), Task Scheduler, and global tweaks. Disables telemetry tasks, optimizes Power Plans (sleep, monitor), clears Start Menu DB, and enforces service profiles (Light/Heavy).
+# Z4_SERVICES.PS1 - SERVICES & SYSTEM MODULE (v3.0.0)
+# Z4_Services: Manages services (Set-ProtectedServiceStart with TrustedInstaller DACL escalation), Task Scheduler lockdown, locale-independent Power Plan audits, deterministic Start Menu native compilation (COM AppActivator), Ghost Service sweeping, and Light/Heavy service profiles.
 # ==========================================
 
 # ------------------------------------------
 # Z4: AUDIT HELPERS
 # ------------------------------------------
-function Assert-Power { 
-    param($Sub, $Setting, $MinSeconds, $Desc)
-    $out = (powercfg /q SCHEME_CURRENT $Sub $Setting) -join " "
-    if ($out -match "Current AC Power Setting Index: (0x[0-9a-fA-F]+)") { 
-        $intVal = [convert]::ToInt32($matches[1], 16)
-        if ($intVal -eq 0 -or $intVal -ge $MinSeconds) { Write-GUI "  [OK] $Desc ($intVal sec)"; return 0 } 
-        else { Write-GUI "  [!] $Desc (Too short: $intVal sec)"; return 1 } 
-    }
-    Write-GUI "  [!] $Desc (Read error)"; return 1 
-}
 
 function Invoke-ServicesAudit {
     param([array]$Rules)
     
-    $results = @()
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $total   = $Rules.Count
+    $current = 0
+
     foreach ($rule in $Rules) {
+        $current++
+        if ($null -ne $UltixSync -and $total -gt 0) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+
         $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
         
         $isDetected = $true
@@ -31,19 +29,21 @@ function Invoke-ServicesAudit {
             $isDetected = $false
         }
 
-        $results += [PSCustomObject]@{
+        $results.Add([PSCustomObject]@{
             UIDisplayName = $rule.UIDisplayName
             IsDetected    = $isDetected
             ActionData    = $rule
-        }
+        })
     }
-    return $results
+    return @($results)
 }
 
 # ------------------------------------------
-# Z4: SERVICES & TASKS AUDITS
+# Z4: SERVICES & TASKS AUDITS (RUNSPACE-SAFE WORKERS)
 # ------------------------------------------
 function Get-TelemetryTasksState { 
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 15 }
+
     $rules = @(
         @{ UIDisplayName = "Task: CEIP (Customer Experience Improvement Program)"; TaskPath = "\Microsoft\Windows\Customer Experience Improvement Program\*"; ExpectedState = "Disabled" }
         @{ UIDisplayName = "Task: Windows Feedback & Diagnostics"; TaskPath = "\Microsoft\Windows\Feedback\*"; ExpectedState = "Disabled" }
@@ -53,19 +53,22 @@ function Get-TelemetryTasksState {
     )
     
     # Single COM/CIM query instead of querying Get-ScheduledTask 5 times in a loop
-    $allTasks = Get-ScheduledTask -ErrorAction SilentlyContinue
+    $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 70 }
     
-    $results = @()
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($rule in $rules) {
         $activeTasks = @($allTasks | Where-Object { $_.TaskPath -like $rule.TaskPath -and ($_.State -eq 'Ready' -or $_.State -eq 'Running') })
         
-        $results += [PSCustomObject]@{
+        $results.Add([PSCustomObject]@{
             UIDisplayName = $rule.UIDisplayName
             IsDetected    = ($activeTasks.Count -gt 0)
             ActionData    = $rule
-        }
+        })
     }
-    return $results
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($results)
 }
 
 function Invoke-StartMenuAudit {
@@ -101,15 +104,6 @@ function Invoke-StartMenuAudit {
     }
 }
 
-function Invoke-PowerAudit { 
-    Write-GUI "--- AUDIT: Power Profile ---"; $err = 0
-    $hiber = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue
-    if ($hiber -and $hiber.HibernateEnabled -eq 0) { Write-GUI "  [OK] Hibernation (Disabled)" } else { Write-GUI "  [!] Hibernation (Likely active)"; $err++ }
-    $err += Assert-Power "SUB_SLEEP" "STANDBYIDLE" 999999 "System Sleep"
-    $err += Assert-Power "SUB_VIDEO" "VIDEOIDLE" 3600 "Display Turn Off"
-    Write-GUI "-> STATUS: $err issues with power profile." 
-}
-
 function Get-ServicesState_Light {
     $rules = @(
         @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4; DefaultStart = 2 }
@@ -118,8 +112,30 @@ function Get-ServicesState_Light {
         @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
         @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
     )
-    return Invoke-ServicesAudit -Rules $rules
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $total   = $rules.Count
+    $current = 0
+
+    foreach ($rule in $rules) {
+        $current++
+        if ($null -ne $UltixSync -and $total -gt 0) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
+        $isDetected   = ($null -ne $currentStart -and $currentStart -ne $rule.ExpectedStart)
+
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        })
+    }
+    return @($results)
 }
 
 function Get-ServicesState_Heavy {
@@ -156,6 +172,27 @@ function Get-ServicesState_Heavy {
         @{ UIDisplayName = "Telemetry: Windows Error Reporting Service (WerSvc)"; Name = "WerSvc"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Logitech: Lamp Array Service RGB (logi_lamparray_service)"; Name = "logi_lamparray_service"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Updates: Delivery Optimization (DoSvc)"; Name = "DoSvc"; ExpectedStart = 4; DefaultStart = 2 }
+
+        # Diagnostics & SRUM Disk I/O Elimination
+        @{ UIDisplayName = "Diagnostics: Diagnostic Policy Service - Stops SRUM disk logging (DPS)"; Name = "DPS"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Diagnostics: Diagnostic Service Host (WdiServiceHost)"; Name = "WdiServiceHost"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Diagnostics: Diagnostic System Host (WdiSystemHost)"; Name = "WdiSystemHost"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
+
+        # File System & Backup Overhead
+        @{ UIDisplayName = "FileSystem: Distributed Link Tracking Client (TrkWks)"; Name = "TrkWks"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Backup: Windows File History Service (fhsvc)"; Name = "fhsvc"; ExpectedStart = 4; DefaultStart = 3 }
+
+        # Mobile, NFC & Time Zone Bloat
+        @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Mobile: Cellular Time Synchronization (autotimesvc)"; Name = "autotimesvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Location: Auto Time Zone Updater (tzautoupdate)"; Name = "tzautoupdate"; ExpectedStart = 4; DefaultStart = 4 }
+
+        # Legacy Network Discovery (UPnP / SSDP / NetBIOS)
+        @{ UIDisplayName = "Network: SSDP Multicast Discovery (SSDPSRV)"; Name = "SSDPSRV"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: UPnP Device Host (upnphost)"; Name = "upnphost"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: TCP/IP NetBIOS Helper (lmhosts)"; Name = "lmhosts"; ExpectedStart = 4; DefaultStart = 3 }
         
         @{ UIDisplayName = "Xbox: Xbox Live Auth Manager (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Xbox: Xbox Live Game Save (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 4; DefaultStart = 3 }
@@ -164,29 +201,64 @@ function Get-ServicesState_Heavy {
         @{ UIDisplayName = "Camera: Windows Camera Frame Server (FrameServer)"; Name = "FrameServer"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 4; DefaultStart = 3 }
     )
-    return Invoke-ServicesAudit -Rules $rules
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $total   = $rules.Count
+    $current = 0
+
+    foreach ($rule in $rules) {
+        $current++
+        if ($null -ne $UltixSync -and $total -gt 0) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
+        $isDetected   = ($null -ne $currentStart -and $currentStart -ne $rule.ExpectedStart)
+
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        })
+    }
+    return @($results)
 }
 
 function Get-GhostServicesState {
-    $ghosts = @()
+    $ghosts = [System.Collections.Generic.List[PSCustomObject]]::new()
     
     $runningNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.Name) }
     Get-CimInstance -ClassName Win32_SystemDriver -Filter "State = 'Running'" -Property Name -ErrorAction SilentlyContinue | ForEach-Object { [void]$runningNames.Add($_.Name) }
 
-    $services = Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue
-    
+    $services = @(Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue)
+    $total = $services.Count
+    $current = 0
+
     foreach ($svc in $services) {
+        $current++
+        if ($null -ne $UltixSync -and ($current % 15 -eq 0 -or $current -eq $total)) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+
         $svcName = $svc.PSChildName
         if ($runningNames.Contains($svcName)) { continue }
 
         $props = Get-ItemProperty -Path $svc.PSPath -Name "ImagePath", "Type" -ErrorAction SilentlyContinue
+        if ($null -eq $props) { continue }
+
+        # Skip Per-User service templates and dynamic session instances (SERVICE_USER_SERVICE bit 0x40)
+        if ($null -ne $props.Type -and (($props.Type -band 0x40) -ne 0)) { continue }
+
         $imagePath = $props.ImagePath
         if ([string]::IsNullOrWhiteSpace($imagePath)) { continue }
         if ($imagePath -match '(?i)^\\(?:Driver|FileSystem)\\') { continue }
         
-        $rawPath = $imagePath -replace '(?i)^\\SystemRoot\\', "$env:windir\"
+        # Normalize kernel and relative root prefixes (\SystemRoot\, SystemRoot\, \System32\, system32\)
+        $rawPath = $imagePath.Trim()
         $rawPath = $rawPath -replace '^\\+?\?\?\\+', ''
+        $rawPath = $rawPath -replace '(?i)^\\?SystemRoot\\', "$env:windir\"
+        $rawPath = $rawPath -replace '(?i)^\\?System32\\', "$env:windir\System32\"
+        $rawPath = $rawPath -replace '(?i)^\\?SysWOW64\\', "$env:windir\SysWOW64\"
         $rawPath = [System.Environment]::ExpandEnvironmentVariables($rawPath).Trim()
         
         if ($rawPath -match '^"([^"]+)"') { 
@@ -202,19 +274,19 @@ function Get-GhostServicesState {
             $candidateSys32  = Join-Path -Path "$env:windir\System32" -ChildPath $rawPath
             $candidateDrv    = Join-Path -Path "$env:windir\System32\drivers" -ChildPath $rawPath
             
-            if (Test-Path -Path $candidateWinDir -PathType Leaf) { $rawPath = $candidateWinDir }
-            elseif (Test-Path -Path $candidateSys32 -PathType Leaf) { $rawPath = $candidateSys32 }
-            elseif (Test-Path -Path $candidateDrv -PathType Leaf) { $rawPath = $candidateDrv }
+            if (Test-Path -LiteralPath $candidateWinDir -PathType Leaf) { $rawPath = $candidateWinDir }
+            elseif (Test-Path -LiteralPath $candidateSys32 -PathType Leaf) { $rawPath = $candidateSys32 }
+            elseif (Test-Path -LiteralPath $candidateDrv -PathType Leaf) { $rawPath = $candidateDrv }
             else { $rawPath = $candidateWinDir }
         }
         
-        if (-not (Test-Path -Path $rawPath -PathType Leaf)) {
-            $ghosts += [PSCustomObject]@{
+        if (-not (Test-Path -LiteralPath $rawPath -PathType Leaf)) {
+            $ghosts.Add([PSCustomObject]@{
                 Name          = $svcName
                 Path          = $rawPath
                 UIDisplayName = "Ghost: $svcName (Missing: $rawPath)"
                 IsDetected    = $true
-            }
+            })
         }
     }
     return $ghosts
@@ -223,104 +295,265 @@ function Get-GhostServicesState {
 # ------------------------------------------
 # Z4: SERVICES & SYSTEM ENGINE
 # ------------------------------------------
-function Optimize-PowerSettings { 
-    powercfg.exe /hibernate off
-    powercfg.exe /change standby-timeout-ac 0
-    powercfg.exe /change standby-timeout-dc 0
-    powercfg.exe /change monitor-timeout-ac 60
-    powercfg.exe /change monitor-timeout-dc 60 
+
+function Get-PowerDisplayState {
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 10 }
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # 1. System Hibernation (hiberfil.sys)
+    $hiberVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue).HibernateEnabled
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Power: Disable Hibernation & Purge hiberfil.sys"
+        IsDetected    = ($null -eq $hiberVal -or $hiberVal -ne 0)
+        ActionData    = @{ Type = "Hiber" }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 25 }
+
+    # 2. System Standby / Sleep Timeout (SUB_SLEEP -> STANDBYIDLE)
+    $standbySec = Get-UltixPowerAcIndex -SubGroupGuid "238c9fa8-0aad-41ed-83f4-97be242c8f20" -SettingGuid "29f6c1db-86da-48c5-9fdb-f2b67b1f44da" -IncludeHidden
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Power: Disable System Sleep / Standby Timeout (Current AC: $(if ($null -ne $standbySec) { "$standbySec s" } else { 'N/A' }))"
+        IsDetected    = ($null -eq $standbySec -or $standbySec -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "238c9fa8-0aad-41ed-83f4-97be242c8f20"; Guid = "29f6c1db-86da-48c5-9fdb-f2b67b1f44da"; OptAC = 0; OptDC = 0; DefAC = 1800; DefDC = 900 }
+    })
+
+    # 3. Display Turn-Off Timeout (SUB_VIDEO -> VIDEOIDLE >= 3600s or 0)
+    $videoSec = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e" -IncludeHidden
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Display: Set Monitor Turn-Off Timeout to 60 Min (Current AC: $(if ($null -ne $videoSec) { "$([math]::Round($videoSec / 60)) min" } else { 'N/A' }))"
+        IsDetected    = ($null -eq $videoSec -or ($videoSec -ne 0 -and $videoSec -lt 3600))
+        ActionData    = @{ Type = "PowerCfg"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e"; OptAC = 3600; OptDC = 3600; DefAC = 900; DefDC = 300 }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 50 }
+
+    # 4. Hard Disk / SATA AHCI Spin-Down Timeout (SUB_DISK -> DISKIDLE = 0)
+    $diskSec = Get-UltixPowerAcIndex -SubGroupGuid "0012ee47-9041-4b5d-9b77-535fba8b1442" -SettingGuid "6738e2c4-e8a5-4a42-b16a-e040e769756e" -IncludeHidden
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Storage: Disable HDD / SATA Controller Spin-Down (Current AC: $(if ($null -ne $diskSec) { "$diskSec s" } else { 'N/A' }))"
+        IsDetected    = ($null -eq $diskSec -or $diskSec -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "0012ee47-9041-4b5d-9b77-535fba8b1442"; Guid = "6738e2c4-e8a5-4a42-b16a-e040e769756e"; OptAC = 0; OptDC = 0; DefAC = 1200; DefDC = 600 }
+    })
+
+    # 5. USB Selective Suspend (SUB_USB -> USBSELECTIVESUSPEND = 0)
+    $usbVal = Get-UltixPowerAcIndex -SubGroupGuid "2a737441-1930-4402-8d77-b2bebba308a3" -SettingGuid "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" -IncludeHidden
+    $usbLabel = if ($usbVal -eq 0) { "Disabled" } elseif ($usbVal -eq 1) { "Enabled" } else { "N/A" }
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "USB: Disable USB Selective Suspend - Protects DACs/VR/Dongles (Current: $usbLabel)"
+        IsDetected    = ($null -eq $usbVal -or $usbVal -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "2a737441-1930-4402-8d77-b2bebba308a3"; Guid = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 1 }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 75 }
+
+    # 6. Power Plan PCIe Link State Power Management (SUB_PCIEXPRESS -> ASPM = 0)
+    $pcieVal = Get-UltixPowerAcIndex -SubGroupGuid "501a4d13-42af-4429-9fd1-a8218c268e20" -SettingGuid "ee12f906-d277-404b-b6da-e5fa1a576df5" -IncludeHidden
+    $pcieLabel = switch ($pcieVal) { 0 { "Off" } 1 { "Moderate" } 2 { "Max Saving" } default { "N/A" } }
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "PCIe: Disable Plan Link State Power Management (Current AC: $pcieLabel)"
+        IsDetected    = ($null -eq $pcieVal -or $pcieVal -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "501a4d13-42af-4429-9fd1-a8218c268e20"; Guid = "ee12f906-d277-404b-b6da-e5fa1a576df5"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 2 }
+    })
+
+    # 7. Processor Minimum State on AC (SUB_PROCESSOR -> PROCTHROTTLEMIN = 100%)
+    $minCpu = Get-UltixPowerAcIndex -SubGroupGuid "54533251-82be-4824-96c1-47b60b740d00" -SettingGuid "893dee8e-2bef-41e0-89c6-b55d0929964c" -IncludeHidden
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "CPU: Lock Minimum Processor State to 100% on AC (Current AC: $(if ($null -ne $minCpu) { "$minCpu%" } else { 'N/A' }))"
+        IsDetected    = ($null -eq $minCpu -or $minCpu -lt 100)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "54533251-82be-4824-96c1-47b60b740d00"; Guid = "893dee8e-2bef-41e0-89c6-b55d0929964c"; OptAC = 100; OptDC = 5; DefAC = 5; DefDC = 5 }
+    })
+
+    # 8. Display Content Adaptive Brightness Control (CABC / Adaptive Dimming = 0)
+    $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
+    $cabcReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
+    $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming)"
+        IsDetected    = (-not $isCabcOpt)
+        ActionData    = @{ Type = "CABC"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "aded5e82-b909-4619-9949-f5d71dac0bcb" }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($results)
 }
 
+function Invoke-ApplyPowerDisplay {
+    param(
+        [Parameter(Mandatory=$true)][array]$SelectedItems,
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
+    )
+    if ($SelectedItems.Count -eq 0) { Write-GUI " -> No power/display items selected."; return }
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $Operation) -ScriptBlock {
+        param([array]$Items, [string]$Op)
+        $total   = $Items.Count
+        $current = 0
+        $verb    = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
+
+        foreach ($item in $Items) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 90)
+                $UltixSync.Logs.Enqueue(" -> $($verb): $($item.UIDisplayName)")
+            }
+
+            $d = $item.ActionData
+            try {
+                if ($d.Type -eq "Hiber") {
+                    if ($Op -eq 'Apply') {
+                        powercfg.exe /hibernate off 2>$null
+                    } else {
+                        powercfg.exe /hibernate on 2>$null
+                    }
+                } elseif ($d.Type -eq "PowerCfg") {
+                    $acVal = if ($Op -eq 'Apply') { $d.OptAC } else { $d.DefAC }
+                    $dcVal = if ($Op -eq 'Apply') { $d.OptDC } else { $d.DefDC }
+                    powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $acVal 2>$null
+                    powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $dcVal 2>$null
+                } elseif ($d.Type -eq "CABC") {
+                    $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+                    if ($Op -eq 'Apply') {
+                        powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid 0 2>$null
+                        powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid 0 2>$null
+                        Set-ItemProperty -Path $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    } else {
+                        Remove-ItemProperty -Path $gfxKey -Name "DisableCABC" -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch {
+                if ($null -ne $UltixSync) {
+                    $UltixSync.Logs.Enqueue("    [!] Failed on $($item.UIDisplayName): $($_.Exception.Message)")
+                }
+            }
+        }
+
+        powercfg.exe /setactive SCHEME_CURRENT 2>$null
+        if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    } -OnComplete {
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI " -> Power & Display subsystem configuration completed ($Operation).`n"
+    }.GetNewClosure()
+}
 function Invoke-ApplyTasks { 
     param(
         [Parameter(Mandatory=$true)][array]$SelectedItems,
-        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply'
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
     )
     
-    $total = $SelectedItems.Count
-    if ($total -eq 0) { Write-GUI " -> No tasks selected."; return }
-    $current = 0
+    if ($SelectedItems.Count -eq 0) { Write-GUI " -> No tasks selected."; return }
 
-    $actionVerb = if ($Operation -eq 'Apply') { "Disabling" } else { "Enabling" }
-    $allTasks = Get-ScheduledTask -ErrorAction SilentlyContinue
-
-    foreach ($item in $SelectedItems) {
-        $current++
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        Write-GUI " -> $($actionVerb): $($item.UIDisplayName)"
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $Operation) -ScriptBlock {
+        param([array]$Items, [string]$Op)
         
-        $taskRule = $item.ActionData
-        try {
-            $tasks = @($allTasks | Where-Object { $_.TaskPath -like $taskRule.TaskPath })
-            foreach ($task in $tasks) { 
-                if ($Operation -eq 'Apply') {
-                    Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null
-                } else {
-                    Enable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null
+        $total = $Items.Count
+        $current = 0
+        $actionVerb = if ($Op -eq 'Apply') { "Disabling" } else { "Enabling" }
+        $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
+
+        foreach ($item in $Items) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> $($actionVerb): $($item.UIDisplayName)")
+            }
+            
+            $taskRule = $item.ActionData
+            try {
+                $tasks = @($allTasks | Where-Object { $_.TaskPath -like $taskRule.TaskPath })
+                foreach ($task in $tasks) { 
+                    if ($Op -eq 'Apply') {
+                        Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+                    } else {
+                        Enable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+                    }
+                }
+            } catch {
+                if ($null -ne $UltixSync) {
+                    $UltixSync.Logs.Enqueue("    [!] Failed to modify task path: $($taskRule.TaskPath)")
                 }
             }
-        } catch { Write-GUI "    [!] Failed to modify task path: $($taskRule.TaskPath)" }
-    }
-
-    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-    Write-GUI " -> Telemetry tasks lockdown completed ($Operation)."
+        }
+    } -OnComplete {
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI " -> Telemetry tasks lockdown completed ($Operation).`n"
+    }.GetNewClosure()
 }
 
 function Invoke-ApplyServices {
     param(
         [Parameter(Mandatory=$true)][array]$SelectedItems,
         [Parameter(Mandatory=$true)][string]$ProfileName,
-        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply'
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
     )
-    $total = $SelectedItems.Count
-    if ($total -eq 0) { Write-GUI " -> No services selected."; return }
-    $current = 0
 
-    $actionVerb = if ($Operation -eq 'Apply') { "Configuring" } else { "Reverting" }
+    if ($SelectedItems.Count -eq 0) { Write-GUI " -> No services selected."; return }
 
-    foreach ($item in $SelectedItems) {
-        $current++
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        $svc = $item.ActionData
-        $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)"
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $ProfileName, $Operation) -ScriptBlock {
+        param([array]$Items, [string]$ProfName, [string]$Op)
 
-        if (-not (Test-Path -Path $svcRegPath)) {
-            Write-GUI " -> Skipping absent service: $($svc.Name)"
-            continue
-        }
+        $total = $Items.Count
+        $current = 0
+        $actionVerb = if ($Op -eq 'Apply') { "Configuring" } else { "Reverting" }
 
-        Write-GUI " -> $($actionVerb): $($item.UIDisplayName)"
-        $targetValue = if ($Operation -eq 'Apply') { $svc.ExpectedStart } else { $svc.DefaultStart }
-
-        if ($null -eq $targetValue -and $Operation -eq 'Revert') {
-            Write-GUI "    [!] Missing 'DefaultStart' property. Skipping."
-            continue
-        }
-
-        try {
-            if ($Operation -eq 'Apply') {
-                Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        foreach ($item in $Items) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 100)
             }
-            Set-ItemProperty -Path $svcRegPath -Name "Start" -Value $targetValue -Type DWord -ErrorAction Stop
-        } catch { Write-GUI "    [!] Failed to modify service: $($svc.Name)" }
-    }
-    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-    Write-GUI " -> $ProfileName services enforcement completed ($Operation)."
+
+            $svc = $item.ActionData
+            $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)"
+
+            if (-not (Test-Path -Path $svcRegPath)) {
+                if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue(" -> Skipping absent service: $($svc.Name)") }
+                continue
+            }
+
+            if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue(" -> $($actionVerb): $($item.UIDisplayName)") }
+            $targetValue = if ($Op -eq 'Apply') { $svc.ExpectedStart } else { $svc.DefaultStart }
+
+            if ($null -eq $targetValue -and $Op -eq 'Revert') {
+                if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Missing 'DefaultStart' property. Skipping.") }
+                continue
+            }
+
+            try {
+                if ($Op -eq 'Apply') {
+                    Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                }
+                # Uses Set-ProtectedServiceStart pre-hydrated by Core_Helpers InitialSessionState
+                Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue
+            } catch {
+                if ($null -ne $UltixSync) {
+                    $UltixSync.Logs.Enqueue("    [!] Failed to modify service $($svc.Name): $($_.Exception.Message)")
+                }
+            }
+        }
+    } -OnComplete {
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI " -> $ProfileName services enforcement completed ($Operation).`n"
+    }.GetNewClosure()
 }
 
 function Clear-StartMenu {
     param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 
     Write-GUI " -> Initializing deterministic Start Menu reset (Pinning: Edge, Settings, Explorer)..."
-    Update-Progress 20
+    Update-Progress 5
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $logs = [System.Collections.Generic.List[string]]::new()
         $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
         
         if ($null -eq $pkgDir) {
-            $logs.Add("    [!] StartMenuExperienceHost package directory not found. Aborting.")
-            return $logs
+            if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] StartMenuExperienceHost package directory not found. Aborting.") }
+            return
         }
 
         $startStatePath   = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
@@ -328,6 +561,7 @@ function Clear-StartMenu {
         $enrollmentPath   = "HKLM:\SOFTWARE\Microsoft\Enrollments\$provGuid"
         $providerPath     = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid\default\Device\Start"
         $policyDevicePath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
+        $policyLegacyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\device\Start"
         $policyUserPath   = "HKCU:\Software\Microsoft\PolicyManager\current\user\Start"
 
         # Minimal 3-icon layout: Microsoft Edge, Windows Settings, File Explorer
@@ -336,7 +570,11 @@ function Clear-StartMenu {
         $createdEnrollment = $false
 
         try {
-            # 1. Disable ContentDeliveryManager OEM/Stub placeholder tile injection
+            # Stage 1: ContentDeliveryManager lockdown
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 15
+                $UltixSync.Logs.Enqueue(" -> [1/7] Disabling ContentDeliveryManager silent tile injection...")
+            }
             $cdmPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
             if (Test-Path $cdmPath) {
                 foreach ($cdmName in @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "SubscribedContentEnabled")) {
@@ -347,7 +585,11 @@ function Clear-StartMenu {
                 }
             }
 
-            # 2. Register temporary MDM Enrollment & Provider context required by 24H2/26H2 StartTileData.dll
+            # Stage 2: Temporary MDM Provider Registration
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 30
+                $UltixSync.Logs.Enqueue(" -> [2/7] Injecting temporary MDM PolicyManager provider context...")
+            }
             if (-not (Test-Path $enrollmentPath)) {
                 New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
                 $createdEnrollment = $true
@@ -370,7 +612,11 @@ function Clear-StartMenu {
             Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
             Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
 
-            # 3. Purge CloudStore & Start caches BEFORE stopping shell processes
+            # Stage 3: Purge CloudStore caches
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 45
+                $UltixSync.Logs.Enqueue(" -> [3/7] Purging CloudStore tile grid and Start registry caches...")
+            }
             $cloudStoreRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
             if (Test-Path $cloudStoreRoot) {
                 Get-ChildItem -Path $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
@@ -383,7 +629,11 @@ function Clear-StartMenu {
                 Remove-Item -Path $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
             }
 
-            # 4. Stop Explorer (unloads StartTileData.dll in-memory cache) and StartMenuExperienceHost, then wipe start*.bin
+            # Stage 4: Stop shell processes and wipe start*.bin
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 60
+                $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
+            }
             Stop-Process -Name "StartMenuExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
             Start-Sleep -Milliseconds 300
 
@@ -396,32 +646,17 @@ function Clear-StartMenu {
                 Start-Sleep -Milliseconds 50
             }
 
-            # Restart Explorer so StartTileData.dll initializes fresh and reads the 3-pin MDM policy
             if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
                 Start-Process "explorer.exe"
                 Start-Sleep -Milliseconds 800
             }
 
-            # 5. Trigger StartMenuExperienceHost respawn via COM IApplicationActivationManager so it compiles the 3-pin MDM layout
+            # Stage 5: Trigger native compilation via Core_Helpers [WinUltix.AppActivator] COM interop
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 75
+                $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
+            }
             try {
-                if (-not ([System.Management.Automation.PSTypeName]'WinUltix.AppActivator').Type) {
-                    Add-Type -TypeDefinition @"
-                    using System;
-                    using System.Runtime.CompilerServices;
-                    using System.Runtime.InteropServices;
-                    namespace WinUltix {
-                        [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-                        public interface IApplicationActivationManager {
-                            IntPtr ActivateApplication([In] String appUserModelId, [In] String arguments, [In] UInt32 options, [Out] out UInt32 processId);
-                        }
-                        [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
-                        public class AppActivator : IApplicationActivationManager {
-                            [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
-                            public extern IntPtr ActivateApplication([In] String appUserModelId, [In] String arguments, [In] UInt32 options, [Out] out UInt32 processId);
-                        }
-                    }
-"@ -ErrorAction Stop
-                }
                 $appActivator = New-Object WinUltix.AppActivator
                 [uint32]$activatedPid = 0
                 [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
@@ -430,27 +665,38 @@ function Clear-StartMenu {
 
             $compiledBinPath = Join-Path $startStatePath "start2.bin"
             $elapsed = 0
-            while ($elapsed -lt 4000) {
+            while ($elapsed -lt 4500) {
                 Start-Sleep -Milliseconds 250
                 $elapsed += 250
-                if (Test-Path -Path $compiledBinPath) {
-                    Start-Sleep -Milliseconds 800
-                    break
+                if (Test-Path -LiteralPath $compiledBinPath) {
+                    $fileInfo = Get-Item -LiteralPath $compiledBinPath -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $fileInfo -and $fileInfo.Length -gt 1024) {
+                        Start-Sleep -Milliseconds 600
+                        break
+                    }
                 }
             }
 
-            if (Test-Path -Path $compiledBinPath) {
+            if (Test-Path -LiteralPath $compiledBinPath) {
                 $newBinSize = (Get-Item -LiteralPath $compiledBinPath -Force).Length
                 if (-not (Test-Path "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
                 Set-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
             }
 
-            $logs.Add("    [OK] Native start2.bin compiled (Pinned: Edge, Settings, File Explorer).")
+            if ($null -ne $UltixSync) {
+                $UltixSync.Logs.Enqueue("    [OK] Native start2.bin compiled (Pinned: Edge, Settings, File Explorer).")
+            }
         } catch {
-            $logs.Add("    [!] Error during Start Menu native compilation: $($_.Exception.Message)")
+            if ($null -ne $UltixSync) {
+                $UltixSync.Logs.Enqueue("    [!] Error during Start Menu native compilation: $($_.Exception.Message)")
+            }
         } finally {
-            # 6. Clean up all temporary MDM locks so I can freely pin/unpin items afterwards
-            foreach ($polPath in @($policyDevicePath, $policyUserPath)) {
+            # Stage 6: Deterministic MDM cleanup so pins remain unlocked
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 90
+                $UltixSync.Logs.Enqueue(" -> [6/7] Stripping temporary MDM PolicyManager locks...")
+            }
+            foreach ($polPath in @($policyDevicePath, $policyLegacyPath, $policyUserPath)) {
                 if (Test-Path -Path $polPath) {
                     Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins" -Force -ErrorAction SilentlyContinue
                     Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_ProviderSet" -Force -ErrorAction SilentlyContinue
@@ -469,7 +715,11 @@ function Clear-StartMenu {
             }
         }
 
-        # 7. Provision Default User profile with the same 3-icon layout
+        # Stage 7: Default User provisioning
+        if ($null -ne $UltixSync) {
+            $UltixSync.Progress = 100
+            $UltixSync.Logs.Enqueue(" -> [7/7] Provisioning Default User profile LayoutModification.json...")
+        }
         $defaultShellPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell"
         if (-not (Test-Path -Path $defaultShellPath)) {
             New-Item -Path $defaultShellPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
@@ -484,12 +734,12 @@ function Clear-StartMenu {
                 Get-ChildItem -Path (Join-Path $_.FullName "LocalState") -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
             }
         }
-        $logs.Add("    [OK] Default User LayoutModification.json provisioned.")
-        return $logs
+        if ($null -ne $UltixSync) {
+            $UltixSync.Logs.Enqueue("    [OK] Default User LayoutModification.json provisioned.")
+        }
     } -OnComplete {
-        param($logLines)
+        param($nullOut)
         Update-Progress 0
-        foreach ($line in $logLines) { Write-GUI $line }
         Write-GUI ""
     }
 }
@@ -503,17 +753,20 @@ function Remove-GhostServices {
 
     foreach ($item in $SelectedItems) {
         $current++
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
+        Update-Progress ([int](($current / $total) * 100))
         
         Write-GUI " -> Removing: $($item.Name)"
         # SCM deletion might fail if driver is loaded (unlikely for ghosts) or locked. Registry brute-force is cleaner here.
         Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($item.Name)" -Recurse -Force -ErrorAction SilentlyContinue
     }
     
-    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-    Write-GUI " -> Ghost services purged from system registry."
+    Update-Progress 0
+    Write-GUI " -> Ghost services purged from system registry.`n"
 }
 
+# ------------------------------------------
+# Z4: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# ------------------------------------------
 function Initialize-Z4UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
@@ -521,215 +774,89 @@ function Initialize-Z4UI {
     $tabServices.Text = "Services"
     $tabServices.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
 
-    # Telemetry
-    $btnTelemetry = New-Object System.Windows.Forms.Button
-    $btnTelemetry.Text = "Disable Telemetry Tasks (Scheduler)"
-    $btnTelemetry.Location = New-Object System.Drawing.Point(15, 20)
-    $btnTelemetry.Size = New-Object System.Drawing.Size(320, 40)
-    $btnTelemetry.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
-    $btnTelemetry.ForeColor = [System.Drawing.Color]::White
-    $btnTelemetry.FlatStyle = "Flat"
-    $btnTelemetry.Add_MouseEnter({ Show-Description "Paralyzes the Task Scheduler. Disables analytics, error reporting, Windows AI, and feedback." })
-    $btnTelemetry.Add_Click({
-        Write-GUI " -> Scanning Scheduled Tasks (Background Thread)..."
-        $sb = (Get-Command -Name Get-TelemetryTasksState).ScriptBlock
-        Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable @($btnTelemetry, $btnAudTelemetry) -OnComplete {
-            param($auditData)
-            $modalOutput = Show-ActionModal -Title "WinUltix - Scheduled Tasks Lockdown" -Description "Select tasks to modify (Apply = Disable, Revert = Enable)." -AuditResults @($auditData) -EnableRevert
-            if ($null -ne $modalOutput) {
-                Invoke-ApplyTasks -SelectedItems $modalOutput.Items -Operation $modalOutput.Action
-                Write-GUI ""
-            }
-        }
-    }.GetNewClosure())
+    $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-    $btnAudTelemetry = New-Object System.Windows.Forms.Button
-    $btnAudTelemetry.Text = "?"
-    $btnAudTelemetry.Location = New-Object System.Drawing.Point(345, 20)
-    $btnAudTelemetry.Size = New-Object System.Drawing.Size(40, 40)
-    $btnAudTelemetry.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80)
-    $btnAudTelemetry.ForeColor = [System.Drawing.Color]::White
-    $btnAudTelemetry.FlatStyle = "Flat"
-    $btnAudTelemetry.Add_MouseEnter({ Show-Description "AUDIT: Verifies if telemetry tasks are active in the scheduler." })
-    $btnAudTelemetry.Add_Click({
-        Write-GUI "--- AUDIT: Scheduled Tasks (Background Thread) ---"
-        $sb = (Get-Command -Name Get-TelemetryTasksState).ScriptBlock
-        Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable @($btnTelemetry, $btnAudTelemetry) -OnComplete {
-            param($state)
-            $detected = @($state | Where-Object { $_.IsDetected })
-            if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] Active: $($d.UIDisplayName)" }
+    # 1. Telemetry Scheduled Tasks
+    $rowTelemetry = New-UltixActionRow -Parent $tabServices -Y 20 `
+        -Text "Disable Telemetry Tasks (Scheduler)" `
+        -Description "Paralyzes the Task Scheduler. Disables analytics, error reporting, Windows AI, and feedback." `
+        -AuditDescription "AUDIT: Verifies if telemetry tasks are active in the scheduler." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-TelemetryTasksState" -AuditLabel "Scheduled Tasks" -ModalTitle "WinUltix - Scheduled Tasks Lockdown" -ModalDescription "Select tasks to modify (Apply = Disable, Revert = Enable)." -ExecutorFunction "Invoke-ApplyTasks" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-TelemetryTasksState" -AuditLabel "Scheduled Tasks" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Active"
+        }.GetNewClosure())
+
+    # 2. Start Menu Reset
+    $rowStartMenu = New-UltixActionRow -Parent $tabServices -Y 70 `
+        -Text "Reset Start Menu Layout (Unpin All)" `
+        -Description "Wipes the internal Start Menu database (start2.bin) and removes MDM locks." `
+        -AuditDescription "AUDIT: Scans the size of the current Start Menu layout database." `
+        -OnClick ({
+            $msgText = "This action will permanently wipe your Start Menu pins and layout database.`n`nStartMenuExperienceHost will be restarted in the background (System Tray remains intact).`n`nDo you want to proceed?"
+            $msgResult = [System.Windows.Forms.MessageBox]::Show($msgText, "WinUltix - Destructive Action", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+                Clear-StartMenu -ControlsToDisable $allTabButtons.ToArray()
             } else {
-                Write-GUI "  [OK] All monitored tasks disabled."
+                Write-GUI " -> Start Menu reset aborted by user.`n"
             }
-            Write-GUI ""
-        }
-    }.GetNewClosure())
+        }.GetNewClosure()) `
+        -OnAudit ({ Invoke-StartMenuAudit; Write-GUI "" })
 
-    # Start Menu
-    $btnStartMenu = New-Object System.Windows.Forms.Button
-    $btnStartMenu.Text = "Reset Start Menu Layout (Unpin All)"
-    $btnStartMenu.Location = New-Object System.Drawing.Point(15, 70)
-    $btnStartMenu.Size = New-Object System.Drawing.Size(320, 40)
-    $btnStartMenu.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
-    $btnStartMenu.ForeColor = [System.Drawing.Color]::White
-    $btnStartMenu.FlatStyle = "Flat"
-    $btnStartMenu.Add_MouseEnter({ Show-Description "Wipes the internal Start Menu database (start2.bin) and removes MDM locks." })
-    $btnStartMenu.Add_Click({
-        $msgText = "This action will permanently wipe your Start Menu pins and layout database.`n`nStartMenuExperienceHost will be restarted in the background (System Tray remains intact).`n`nDo you want to proceed?"
-        $msgResult = [System.Windows.Forms.MessageBox]::Show($msgText, "WinUltix - Destructive Action", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        
-        if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
-            Clear-StartMenu -ControlsToDisable @($btnStartMenu, $btnAudStartMenu)
-        } else {
-            Write-GUI " -> Start Menu reset aborted by user.`n"
-        }
-    }.GetNewClosure())
+    # 3. Power & Display
+    $rowPower = New-UltixActionRow -Parent $tabServices -Y 120 `
+        -Text "Optimize Power and Display" `
+        -Description "Interactive Power & Display tuner: Hibernation, Sleep/Monitor timeouts, SATA spin-down, USB Selective Suspend, PCIe ASPM, and OLED/CABC dimming." `
+        -AuditDescription "AUDIT: Verifies active Power Plan timeouts, USB Selective Suspend, PCIe ASPM, and Hibernation state." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ModalTitle "WinUltix - Power & Display Optimizer" -ModalDescription "Select power and display parameters to enforce or revert to Windows defaults." -ExecutorFunction "Invoke-ApplyPowerDisplay" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Unoptimized"
+        }.GetNewClosure())
 
-    $btnAudStartMenu = New-Object System.Windows.Forms.Button
-    $btnAudStartMenu.Text = "?"
-    $btnAudStartMenu.Location = New-Object System.Drawing.Point(345, 70)
-    $btnAudStartMenu.Size = New-Object System.Drawing.Size(40, 40)
-    $btnAudStartMenu.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80)
-    $btnAudStartMenu.ForeColor = [System.Drawing.Color]::White
-    $btnAudStartMenu.FlatStyle = "Flat"
-    $btnAudStartMenu.Add_MouseEnter({ Show-Description "AUDIT: Scans the size of the current Start Menu layout database." })
-    $btnAudStartMenu.Add_Click({ Invoke-StartMenuAudit; Write-GUI "" })
+    # 4. Ghost Services & Drivers
+    $rowGhostSvc = New-UltixActionRow -Parent $tabServices -Y 170 `
+        -Text "Cleanup Ghost Services" `
+        -Description "Scans registry for services/drivers pointing to non-existent binaries and removes them." `
+        -AuditDescription "AUDIT: Detects orphaned service/driver registrations." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-GhostServicesState" -AuditLabel "Ghost Services & Drivers" -ModalTitle "WinUltix - Ghost Services Cleanup" -ModalDescription "Select orphaned items to remove." -ExecutorFunction "Remove-GhostServices" -ControlsToDisable $allTabButtons.ToArray() -SkipModalIfClean
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-GhostServicesState" -AuditLabel "Ghost Services & Drivers" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Found"
+        }.GetNewClosure())
 
-    # Power
-    $btnPower = New-Object System.Windows.Forms.Button
-    $btnPower.Text = "Optimize Power and Display"
-    $btnPower.Location = New-Object System.Drawing.Point(15, 120)
-    $btnPower.Size = New-Object System.Drawing.Size(320, 40)
-    $btnPower.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
-    $btnPower.ForeColor = [System.Drawing.Color]::White
-    $btnPower.FlatStyle = "Flat"
-    $btnPower.Add_MouseEnter({ Show-Description "Disables the hibernation file, system sleep, and sets display turn-off to 60 minutes." })
-    $btnPower.Add_Click({ Optimize-PowerSettings; Write-GUI "Completed."; Write-GUI "" })
+    # 5. Office Services Profile (Light)
+    $rowSvcLight = New-UltixActionRow -Parent $tabServices -Y 270 `
+        -Text "Background Services: OFFICE PROFILE" `
+        -MainRGB @(60, 100, 150) `
+        -Description "OFFICE PROFILE: Kills telemetry and tracking, leaving print and network services intact." `
+        -AuditDescription "AUDIT: Verifies standard telemetry and background bloat services." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Light" -AuditLabel "Services (Office Profile)" -ModalTitle "WinUltix - Office Services Profile" -ModalDescription "Select services to configure. Unoptimized services are checked by default." -ExecutorFunction "Invoke-ApplyServices" -ExecutorExtraParams @{ ProfileName = "Office Profile" } -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Light" -AuditLabel "Services (Office Profile)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "To Disable"
+        }.GetNewClosure())
 
-    $btnAudPower = New-Object System.Windows.Forms.Button
-    $btnAudPower.Text = "?"
-    $btnAudPower.Location = New-Object System.Drawing.Point(345, 120)
-    $btnAudPower.Size = New-Object System.Drawing.Size(40, 40)
-    $btnAudPower.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80)
-    $btnAudPower.ForeColor = [System.Drawing.Color]::White
-    $btnAudPower.FlatStyle = "Flat"
-    $btnAudPower.Add_MouseEnter({ Show-Description "AUDIT: Verifies power profile (hibernation, sleep state, and display)." })
-    $btnAudPower.Add_Click({ Invoke-PowerAudit; Write-GUI "" })
+    # 6. Gaming Services Profile (Heavy)
+    $rowSvcHeavy = New-UltixActionRow -Parent $tabServices -Y 320 `
+        -Text "Background Services: GAMING PROFILE" `
+        -MainRGB @(150, 60, 60) `
+        -Description "GAMING PROFILE: Disables almost everything in the background, including print spooler and file indexing." `
+        -AuditDescription "AUDIT: Verifies heavy background services including indexer and print spooler." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Heavy" -AuditLabel "Services (Gaming Profile)" -ModalTitle "WinUltix - Gaming Services Profile" -ModalDescription "Select services to configure. Unoptimized services are checked by default." -ExecutorFunction "Invoke-ApplyServices" -ExecutorExtraParams @{ ProfileName = "Gaming Profile" } -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Heavy" -AuditLabel "Services (Gaming Profile)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "To Configure"
+        }.GetNewClosure())
 
-    # Ghost Services
-    $btnGhostSvc = New-Object System.Windows.Forms.Button
-    $btnGhostSvc.Text = "Cleanup Ghost Services"
-    $btnGhostSvc.Location = New-Object System.Drawing.Point(15, 170)
-    $btnGhostSvc.Size = New-Object System.Drawing.Size(320, 40)
-    $btnGhostSvc.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
-    $btnGhostSvc.ForeColor = [System.Drawing.Color]::White
-    $btnGhostSvc.FlatStyle = "Flat"
-    $btnGhostSvc.Add_MouseEnter({ Show-Description "Scans registry for services/drivers pointing to non-existent binaries and removes them." })
-    $btnGhostSvc.Add_Click({
-        Write-GUI "--- AUDIT: Ghost Services & Drivers (Background Thread) ---"
-        $sb = (Get-Command -Name Get-GhostServicesState).ScriptBlock
-        Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable @($btnGhostSvc, $btnAudGhostSvc) -OnComplete {
-            param($output)
-            [array]$auditData = @($output)
-            if ($auditData.Count -eq 0) {
-                Write-GUI "  [OK] No orphaned services or drivers detected.`n"
-                return
-            }
-            $modalOutput = Show-ActionModal -Title "WinUltix - Ghost Services Cleanup" -Description "Select orphaned items to remove." -AuditResults $auditData
-            if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
-                Remove-GhostServices -SelectedItems $modalOutput.Items
-                Write-GUI ""
-            }
-        }
-    }.GetNewClosure())
-
-    $btnAudGhostSvc = New-Object System.Windows.Forms.Button
-    $btnAudGhostSvc.Text = "?"
-    $btnAudGhostSvc.Location = New-Object System.Drawing.Point(345, 170)
-    $btnAudGhostSvc.Size = New-Object System.Drawing.Size(40, 40)
-    $btnAudGhostSvc.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80)
-    $btnAudGhostSvc.ForeColor = [System.Drawing.Color]::White
-    $btnAudGhostSvc.FlatStyle = "Flat"
-    $btnAudGhostSvc.Add_MouseEnter({ Show-Description "AUDIT: Detects orphaned service/driver registrations." })
-    $btnAudGhostSvc.Add_Click({
-        Write-GUI "--- AUDIT: Ghost Services & Drivers (Background Thread) ---"
-        $sb = (Get-Command -Name Get-GhostServicesState).ScriptBlock
-        Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable @($btnGhostSvc, $btnAudGhostSvc) -OnComplete {
-            param($output)
-            [array]$state = @($output)
-            if ($state.Count -gt 0) {
-                foreach ($d in $state) { Write-GUI "  [!] Found: $($d.UIDisplayName)" }
-            } else {
-                Write-GUI "  [OK] No orphaned services or drivers detected."
-            }
-            Write-GUI ""
-        }
-    }.GetNewClosure())
-	
-    # Profiles (Light/Heavy)
-    $btnSvcLight = New-Object System.Windows.Forms.Button
-    $btnSvcLight.Text = "Background Services: OFFICE PROFILE"
-    $btnSvcLight.Location = New-Object System.Drawing.Point(15, 270)
-    $btnSvcLight.Size = New-Object System.Drawing.Size(320, 40)
-    $btnSvcLight.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 100, 150)
-    $btnSvcLight.ForeColor = [System.Drawing.Color]::White
-    $btnSvcLight.FlatStyle = "Flat"
-    $btnSvcLight.Add_MouseEnter({ Show-Description "OFFICE PROFILE: Kills telemetry and tracking, leaving print and network services intact." })
-    $btnSvcLight.Add_Click({ 
-        $auditData = Get-ServicesState_Light
-        $modalOutput = Show-ActionModal -Title "WinUltix - Office Services Profile" -Description "Select services to configure. Unoptimized services are checked by default." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput) { 
-            Invoke-ApplyServices -SelectedItems $modalOutput.Items -ProfileName "Office Profile" -Operation $modalOutput.Action
-            Write-GUI "" 
-        } 
-    })
-
-    $btnAudSvcLight = New-Object System.Windows.Forms.Button
-    $btnAudSvcLight.Text = "?"
-    $btnAudSvcLight.Location = New-Object System.Drawing.Point(345, 270)
-    $btnAudSvcLight.Size = New-Object System.Drawing.Size(40, 40)
-    $btnAudSvcLight.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80)
-    $btnAudSvcLight.ForeColor = [System.Drawing.Color]::White
-    $btnAudSvcLight.FlatStyle = "Flat"
-    $btnAudSvcLight.Add_MouseEnter({ Show-Description "AUDIT: Verifies standard telemetry and background bloat services." })
-    $btnAudSvcLight.Add_Click({ Write-GUI "--- AUDIT: Services (Office Profile) ---"; $state = Get-ServicesState_Light; $detected = $state | Where-Object { $_.IsDetected }; if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Disable: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Optimized." }; Write-GUI "" })
-
-    $btnSvcHeavy = New-Object System.Windows.Forms.Button
-    $btnSvcHeavy.Text = "Background Services: GAMING PROFILE"
-    $btnSvcHeavy.Location = New-Object System.Drawing.Point(15, 320)
-    $btnSvcHeavy.Size = New-Object System.Drawing.Size(320, 40)
-    $btnSvcHeavy.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
-    $btnSvcHeavy.ForeColor = [System.Drawing.Color]::White
-    $btnSvcHeavy.FlatStyle = "Flat"
-    $btnSvcHeavy.Add_MouseEnter({ Show-Description "GAMING PROFILE: Disables almost everything in the background, including print spooler and file indexing." })
-    $btnSvcHeavy.Add_Click({ 
-        $auditData = Get-ServicesState_Heavy
-        $modalOutput = Show-ActionModal -Title "WinUltix - Gaming Services Profile" -Description "Select services to configure. Unoptimized services are checked by default." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput) { 
-            Invoke-ApplyServices -SelectedItems $modalOutput.Items -ProfileName "Gaming Profile" -Operation $modalOutput.Action
-            Write-GUI "" 
-        } 
-    })
-
-    $btnAudSvcHeavy = New-Object System.Windows.Forms.Button
-    $btnAudSvcHeavy.Text = "?"
-    $btnAudSvcHeavy.Location = New-Object System.Drawing.Point(345, 320)
-    $btnAudSvcHeavy.Size = New-Object System.Drawing.Size(40, 40)
-    $btnAudSvcHeavy.BackColor = [System.Drawing.Color]::FromArgb(255, 80, 80, 80)
-    $btnAudSvcHeavy.ForeColor = [System.Drawing.Color]::White
-    $btnAudSvcHeavy.FlatStyle = "Flat"
-    $btnAudSvcHeavy.Add_MouseEnter({ Show-Description "AUDIT: Verifies heavy background services including indexer and print spooler." })
-    $btnAudSvcHeavy.Add_Click({ Write-GUI "--- AUDIT: Services (Gaming Profile) ---"; $state = Get-ServicesState_Heavy; $detected = $state | Where-Object { $_.IsDetected }; if ($detected.Count -gt 0) { foreach ($d in $detected) { Write-GUI "  [!] To Configure: $($d.UIDisplayName)" } } else { Write-GUI "  [OK] Optimized." }; Write-GUI "" })
-
-    $tabServices.Controls.AddRange(@(
-        $btnTelemetry, $btnAudTelemetry,
-        $btnStartMenu, $btnAudStartMenu,
-        $btnPower, $btnAudPower,
-        $btnGhostSvc, $btnAudGhostSvc,
-        $btnSvcLight, $btnAudSvcLight,
-        $btnSvcHeavy, $btnAudSvcHeavy
-    ))
+    foreach ($row in @($rowTelemetry, $rowStartMenu, $rowPower, $rowGhostSvc, $rowSvcLight, $rowSvcHeavy)) {
+        $allTabButtons.AddRange($row.Controls)
+    }
 
     $TabControl.Controls.Add($tabServices)
 }
