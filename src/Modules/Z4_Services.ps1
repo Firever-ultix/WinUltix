@@ -356,15 +356,7 @@ function Get-PowerDisplayState {
         ActionData    = @{ Type = "PowerCfg"; Sub = "501a4d13-42af-4429-9fd1-a8218c268e20"; Guid = "ee12f906-d277-404b-b6da-e5fa1a576df5"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 2 }
     })
 
-    # 7. Processor Minimum State on AC (SUB_PROCESSOR -> PROCTHROTTLEMIN = 100%)
-    $minCpu = Get-UltixPowerAcIndex -SubGroupGuid "54533251-82be-4824-96c1-47b60b740d00" -SettingGuid "893dee8e-2bef-41e0-89c6-b55d0929964c" -IncludeHidden
-    $results.Add([PSCustomObject]@{
-        UIDisplayName = "CPU: Lock Minimum Processor State to 100% on AC (Current AC: $(if ($null -ne $minCpu) { "$minCpu%" } else { 'N/A' }))"
-        IsDetected    = ($null -eq $minCpu -or $minCpu -lt 100)
-        ActionData    = @{ Type = "PowerCfg"; Sub = "54533251-82be-4824-96c1-47b60b740d00"; Guid = "893dee8e-2bef-41e0-89c6-b55d0929964c"; OptAC = 100; OptDC = 5; DefAC = 5; DefDC = 5 }
-    })
-
-    # 8. Display Content Adaptive Brightness Control (CABC / Adaptive Dimming = 0)
+    # 7. Display Content Adaptive Brightness Control (CABC / Adaptive Dimming = 0)
     $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
     $cabcReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
     $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)

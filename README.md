@@ -21,6 +21,7 @@ irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix
 ```
 
 *(Prefer a traditional `.exe`? Grab the standalone executable from the **[Releases](https://github.com/Firever-ultix/WinUltix/releases)** tab).*
+WinUltix.exe SHA-256: C878FE4A6BA2A2A79BCAE06663A23B51BF3A8E5B425736704D6B8AB9884E87AC
 
 ---
 
@@ -64,7 +65,7 @@ Selectively remove **64 pre-installed bloatware apps**, disable **Windows Recall
 Restore the classic Windows 10 right-click menu, align the taskbar left, kill Bing search in the Start Menu, enforce **1:1 Raw Mouse Input** (zero acceleration), disable Multiplane Overlay (**MPO**—fixes VRR/OLED screen flickering), boost gaming thread priorities (`MMCSS`), and block stubborn telemetry `.exe` files (`CompatTelRunner.exe`, `Widgets.exe`) from ever running again.
 * **⚙️ Service Profiles, Clean Start Menu & OLED/Power Tuner (`Services` Tab):**
 * **Office & Gaming Service Profiles:** Symmetrically disable up to 51 background services (including disk-thrashing diagnostics and telemetry) and revert them anytime.
-* **8-Point Power & Display Optimizer:** Disable Hibernation (`hiberfil.sys`), stop SATA HDD spin-down lag, disable **USB Selective Suspend** (prevents disconnects on external audio DACs, VR headsets, and 4K/8KHz wireless mice), and turn off **Content Adaptive Brightness (CABC)** to stop annoying auto-dimming on OLED/IPS monitors.
+* **7-Point Power & Display Optimizer:** Disable Hibernation (`hiberfil.sys`), stop SATA HDD spin-down lag, disable **USB Selective Suspend** (prevents disconnects on external audio DACs, VR headsets, and 4K/8KHz wireless mice), and turn off **Content Adaptive Brightness (CABC)** to stop annoying auto-dimming on OLED/IPS monitors.
 * **1-Click Clean Start Menu:** Wipes pre-installed promotional tiles (TikTok, Instagram, Candy Crush) and compiles a clean, native 3-icon Start Menu (*Edge, Settings, File Explorer*) with zero MDM policy locks left behind.
 
 

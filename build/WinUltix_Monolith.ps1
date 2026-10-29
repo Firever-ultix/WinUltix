@@ -674,7 +674,7 @@ function Write-GUI {
             $msgColor = [System.Drawing.Color]::LightGray
             if ($Message -match '^\s*(===|---)') {
                 $msgColor = [System.Drawing.Color]::Cyan
-            } elseif ($Message -match '\[ERROR\]|\[\-\]|(?i)\b(failed|error)\b') {
+            } elseif ($Message -match '\[ERROR\]|\[\-\]|(?i)\bfailed\b|(?i)(?<!Windows\s|Hardware\s)\berror\b(?!\s+Reporting)') {
                 $msgColor = [System.Drawing.Color]::IndianRed
             } elseif ($Message -match '\[!\]|(?i)\bWARNING\b|-> STATUS:') {
                 $msgColor = [System.Drawing.Color]::Orange
@@ -3106,8 +3106,13 @@ function Invoke-RegistryAudit {
                 
                 # Distinguishes (value not set) [$null] from an initialized empty string [""]
                 if ($null -ne $rawVal) {
-                    $currentValue = $rawVal
-                    $valueExists  = $true
+                    # Convert negative signed Int32 REG_DWORD reads (e.g. -1 for 0xFFFFFFFF) to unsigned UInt32
+                    if ($rule.Type -eq "DWord" -and $rawVal -is [int] -and $rawVal -lt 0) {
+                        $currentValue = [BitConverter]::ToUInt32([BitConverter]::GetBytes($rawVal), 0)
+                    } else {
+                        $currentValue = $rawVal
+                    }
+                    $valueExists = $true
                 }
             }
             
@@ -3122,6 +3127,14 @@ function Invoke-RegistryAudit {
             } else {
                 if ($valueExists -and ([string]$currentValue -eq [string]$rule.Expected)) { 
                     $isDetected = $false 
+                }
+            }
+
+            # Fallback check for UCPD-protected keys (e.g., DisableWidgetsBoard on Win11 25H2/26H2)
+            if ($isDetected -and $rule.ContainsKey("AltName") -and $null -ne $regKey) {
+                $altRaw = $regKey.GetValue($rule.AltName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ($null -ne $altRaw -and ([string]$altRaw -eq [string]$rule.AltExpected)) {
+                    $isDetected = $false
                 }
             }
 
@@ -3158,7 +3171,7 @@ function Get-RegState_Taskbar {
         @{ UIDisplayName = "Start Menu: Disable Recent Docs History"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "NoRecentDocsHistory"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "Start Menu: Disable Search Highlights (Bing bloat)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "EnableSearchBoxSearchHighlights"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Start Menu: Disable Tailored Search Suggestions"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowTailoredSearch"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
-        @{ UIDisplayName = "Widgets: Disable News & Interests (Saves RAM/Network)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"; Name = "AllowNewsAndInterests"; Expected = 0; Default = 1; Type = "DWord"; RestartShell = $true }
+        @{ UIDisplayName = "Widgets: Disable News & Interests (Saves RAM/Network)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"; Name = "AllowNewsAndInterests"; Expected = 0; Default = 1; AltName = "DisableWidgetsBoard"; AltExpected = 1; Type = "DWord"; RestartShell = $true }
         @{ UIDisplayName = "Bloat: Disable Consumer Features (Stops auto-installing apps)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; Name = "DisableWindowsConsumerFeatures"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "UI: Disable Toast Notifications (Flyouts)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "ToastEnabled"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "UI: Disable Focus Assist (Global)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings"; Name = "NOC_GLOBAL_SETTING_TOASTS_ENABLED"; Expected = 0; Default = 1; Type = "DWord" }
@@ -3273,7 +3286,7 @@ function Get-RegState_Gaming {
         @{ UIDisplayName = "Gaming: Enable Windowed Game Optimizations (Flip Model)"; Path = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"; Name = "DirectXUserGlobalSettings"; Expected = "SwapEffectUpgradeEnable=1;"; Default = "DELETE_VALUE"; MatchRegex = "SwapEffectUpgradeEnable=1"; Type = "String" }
         @{ UIDisplayName = "Kernel: Disable Paging Executive (Keeps core system in RAM)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS: System Responsiveness (Allocate 100% CPU to Games)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Expected = 0; Default = 20; Type = "DWord" }
-        @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; Type = "DWord" }
+        @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; ValidValues = @(4294967295, -1); Type = "DWord" }
         @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "Power: Disable Windows Power Throttling globally"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; Name = "PowerThrottlingOff"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
@@ -3582,6 +3595,17 @@ function Invoke-ApplyRegistry {
             }
 
             if (-not (Test-Path -LiteralPath $reg.Path)) { New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null }
+
+            # Sync 25H2/26H2 DisableWidgetsBoard policy alongside AllowNewsAndInterests
+            if ($reg.ContainsKey("AltName")) {
+                if ($Operation -eq 'Apply') {
+                    Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                    Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                } else {
+                    Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
+                    Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
             
             if ($reg.Name -eq "" -or $reg.Name -eq "(Default)") {
                 # Explicitly write empty or target string into unnamed (Default) value
@@ -3600,7 +3624,30 @@ function Invoke-ApplyRegistry {
             } else { 
                 Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $targetValue -Type $reg.Type -Force -ErrorAction Stop | Out-Null 
             }
-        } catch { Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)" }
+        } catch {
+            # Handle Windows 11 24H2/25H2/26H2 UCPD.sys kernel filter blocking AllowNewsAndInterests
+            if ($reg.ContainsKey("AltName")) {
+                try {
+                    if ($Operation -eq 'Apply') {
+                        Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction Stop | Out-Null
+                        Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                        if (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\UCPD") {
+                            Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4
+                            Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
+                        }
+                        Write-GUI "    [+] Bypassed UCPD.sys filter via $($reg.AltName)=1 & disarmed UCPD driver."
+                    } else {
+                        Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
+                        Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
+                        Write-GUI "    [+] Reverted $($reg.AltName) policy."
+                    }
+                } catch {
+                    Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+                }
+            } else {
+                Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+            }
+        }
     }
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
     Write-GUI " -> $CategoryName registry modifications completed ($Operation)."
@@ -4133,15 +4180,7 @@ function Get-PowerDisplayState {
         ActionData    = @{ Type = "PowerCfg"; Sub = "501a4d13-42af-4429-9fd1-a8218c268e20"; Guid = "ee12f906-d277-404b-b6da-e5fa1a576df5"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 2 }
     })
 
-    # 7. Processor Minimum State on AC (SUB_PROCESSOR -> PROCTHROTTLEMIN = 100%)
-    $minCpu = Get-UltixPowerAcIndex -SubGroupGuid "54533251-82be-4824-96c1-47b60b740d00" -SettingGuid "893dee8e-2bef-41e0-89c6-b55d0929964c" -IncludeHidden
-    $results.Add([PSCustomObject]@{
-        UIDisplayName = "CPU: Lock Minimum Processor State to 100% on AC (Current AC: $(if ($null -ne $minCpu) { "$minCpu%" } else { 'N/A' }))"
-        IsDetected    = ($null -eq $minCpu -or $minCpu -lt 100)
-        ActionData    = @{ Type = "PowerCfg"; Sub = "54533251-82be-4824-96c1-47b60b740d00"; Guid = "893dee8e-2bef-41e0-89c6-b55d0929964c"; OptAC = 100; OptDC = 5; DefAC = 5; DefDC = 5 }
-    })
-
-    # 8. Display Content Adaptive Brightness Control (CABC / Adaptive Dimming = 0)
+    # 7. Display Content Adaptive Brightness Control (CABC / Adaptive Dimming = 0)
     $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
     $cabcReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
     $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)

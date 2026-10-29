@@ -659,7 +659,7 @@ function Write-GUI {
             $msgColor = [System.Drawing.Color]::LightGray
             if ($Message -match '^\s*(===|---)') {
                 $msgColor = [System.Drawing.Color]::Cyan
-            } elseif ($Message -match '\[ERROR\]|\[\-\]|(?i)\b(failed|error)\b') {
+            } elseif ($Message -match '\[ERROR\]|\[\-\]|(?i)\bfailed\b|(?i)(?<!Windows\s|Hardware\s)\berror\b(?!\s+Reporting)') {
                 $msgColor = [System.Drawing.Color]::IndianRed
             } elseif ($Message -match '\[!\]|(?i)\bWARNING\b|-> STATUS:') {
                 $msgColor = [System.Drawing.Color]::Orange
