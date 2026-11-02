@@ -3,21 +3,21 @@
 # https://github.com/Firever-ultix/WinUltix
 # MODULAR MAIN LAUNCHER
 # ==========================================
-$Global:AppVersion = "v3.0.0"
+$Global:AppVersion = "v3.1.0"
 
 # ------------------------------------------
 # 1. MODULE LOADING (ARCHITECTURE MANIFESTS)
 # ------------------------------------------
-# $ScriptDir = Split-Path $script:MyInvocation.MyCommand.Path
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($script:MyInvocation.MyCommand.Path) { Split-Path $script:MyInvocation.MyCommand.Path } else { "" }
 # $ModulesDir = Join-Path $ScriptDir "Modules"
 
-# Core_Helpers: Global UI functions, registry engine, and shared modal interfaces.
+# Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer/DPC, CfgMgr32 PnpTree), async Runspace engine ($UltixSync), 4-color UI factories, and JSON profile snapshotter.
 # >>> INJECTED: Core_Helpers.ps1 <<<
 # ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# CORE_HELPERS.PS1 - UNIFIED CORE ENGINE (v3.0.0)
-# Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer, ListView Sorter), O(1) UI logger, InitialSessionState async Runspace engine ($UltixSync), UI control factories, shared modals, and JSON profile snapshotter.
+# CORE_HELPERS.PS1 - UNIFIED CORE ENGINE (v3.1.0)
+# Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer/DPC, CfgMgr32 PnpTree), async Runspace engine ($UltixSync), 4-color UI factories, and JSON profile snapshotter.
 # ==========================================
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -37,13 +37,24 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
     using System.Windows.Forms;
 
     namespace WinUltix {
-        // DWM Dark Title Bar & High-DPI GDI Scaling
+        // DWM Dark Title Bar, High-DPI GDI Scaling & High-Res PE Icon Extractor
         public static class NativeMethods {
             [DllImport("dwmapi.dll", PreserveSig = true)]
             private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
             [DllImport("user32.dll", SetLastError = true)]
             private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+            [DllImport("shell32.dll", SetLastError = true)]
+            private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+
+            [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+            private static extern uint PrivateExtractIconsW(
+                string szFileName, int nIconIndex, int cxIcon, int cyIcon,
+                IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool DestroyIcon(IntPtr hIcon);
 
             public static void EnableDarkTitleBar(IntPtr handle) {
                 if (handle == IntPtr.Zero) return;
@@ -54,9 +65,26 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             }
 
             public static void EnableGdiDpiScaling() {
-                try {
-                    SetProcessDpiAwarenessContext(new IntPtr(-5));
-                } catch { }
+                try { SetCurrentProcessExplicitAppUserModelID("Firever.WinUltix"); } catch { }
+                try { SetProcessDpiAwarenessContext(new IntPtr(-5)); } catch { }
+            }
+
+            public static Bitmap ExtractHighResExeIcon(string exePath, int size) {
+                IntPtr[] hIcons = new IntPtr[1];
+                uint[] ids = new uint[1];
+                uint count = PrivateExtractIconsW(exePath, 0, size, size, hIcons, ids, 1, 0);
+                if (count > 0 && hIcons[0] != IntPtr.Zero) {
+                    try {
+                        using (Icon ico = Icon.FromHandle(hIcons[0])) {
+                            return ico.ToBitmap();
+                        }
+                    } catch {
+                        try { return Bitmap.FromHicon(hIcons[0]); } catch { }
+                    } finally {
+                        DestroyIcon(hIcons[0]);
+                    }
+                }
+                return null;
             }
         }
 
@@ -292,6 +320,72 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 }
             }
         }
+        
+        // Native CfgMgr32 PnP Device Tree Walker for USB XHCI & PCIe Topology Mapping (<5ms)
+        public static class PnpTree {
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Get_Device_IDW(uint dnDevInst, System.Text.StringBuilder Buffer, int BufferLen, uint ulFlags);
+
+            public static string GetDeviceId(uint devInst) {
+                var sb = new System.Text.StringBuilder(512);
+                if (CM_Get_Device_IDW(devInst, sb, sb.Capacity, 0) == 0) return sb.ToString();
+                return "";
+            }
+
+            public static List<string> GetParentChain(string instanceId) {
+                var chain = new List<string>();
+                uint cur;
+                if (CM_Locate_DevNodeW(out cur, instanceId, 0) != 0) return chain;
+                uint parent;
+                int guard = 0;
+                while (guard++ < 32 && CM_Get_Parent(out parent, cur, 0) == 0) {
+                    string pid = GetDeviceId(parent);
+                    if (string.IsNullOrEmpty(pid)) break;
+                    chain.Add(pid);
+                    cur = parent;
+                }
+                return chain;
+            }
+
+            private static void CollectDescendants(uint devInst, int depth, List<string> output) {
+                if (depth > 16) return;
+                uint child;
+                if (CM_Get_Child(out child, devInst, 0) != 0) return;
+
+                uint cur = child;
+                int guard = 0;
+                while (guard++ < 256) {
+                    string id = GetDeviceId(cur);
+                    if (!string.IsNullOrEmpty(id)) {
+                        output.Add(depth.ToString() + "|" + id);
+                        CollectDescendants(cur, depth + 1, output);
+                    }
+                    uint sibling;
+                    if (CM_Get_Sibling(out sibling, cur, 0) != 0) break;
+                    cur = sibling;
+                }
+            }
+
+            public static List<string> GetDescendants(string instanceId) {
+                var list = new List<string>();
+                uint root;
+                if (CM_Locate_DevNodeW(out root, instanceId, 0) != 0) return list;
+                CollectDescendants(root, 1, list);
+                return list;
+            }
+        }
 
         // Owner-Drawn Dark TabControl (Eliminates Win32 white 3D borders & gray headers)
         public class DarkTabControl : TabControl {
@@ -369,8 +463,8 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     bool isHovered  = (i == _hoverIndex);
 
                     Color backColor = isSelected
-                        ? Color.FromArgb(45, 45, 45)
-                        : (isHovered ? Color.FromArgb(38, 38, 38) : Color.FromArgb(22, 22, 22));
+                        ? Color.FromArgb(40, 40, 42)
+                        : (isHovered ? Color.FromArgb(34, 34, 36) : Color.FromArgb(22, 22, 22));
 
                     using (SolidBrush bgBrush = new SolidBrush(backColor)) {
                         g.FillRectangle(bgBrush, tabRect);
@@ -465,10 +559,114 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
 "@ -ErrorAction SilentlyContinue
 }
 
+function Read-HighResBitmapFromIco {
+    param([Parameter(Mandatory=$true)][string]$IcoFilePath)
+    try {
+        [byte[]]$bytes = [System.IO.File]::ReadAllBytes($IcoFilePath)
+        if ($bytes.Length -lt 22) { return $null }
+
+        $count = [BitConverter]::ToUInt16($bytes, 4)
+        $bestOffset = 0
+        $bestLength = 0
+        $bestDim    = -1
+
+        for ($i = 0; $i -lt $count; $i++) {
+            $entryPos = 6 + ($i * 16)
+            if (($entryPos + 16) -gt $bytes.Length) { break }
+            $w = [int]$bytes[$entryPos]
+            if ($w -eq 0) { $w = 256 }
+            $len = [BitConverter]::ToInt32($bytes, $entryPos + 8)
+            $off = [BitConverter]::ToInt32($bytes, $entryPos + 12)
+
+            if ($w -ge $bestDim -and ($off + $len) -le $bytes.Length) {
+                $bestDim    = $w
+                $bestOffset = $off
+                $bestLength = $len
+            }
+        }
+
+        if ($bestLength -gt 8) {
+            # Check for PNG signature (89 50 4E 47) inside the largest .ico frame
+            if ($bytes[$bestOffset] -eq 0x89 -and $bytes[$bestOffset + 1] -eq 0x50 -and $bytes[$bestOffset + 2] -eq 0x4E -and $bytes[$bestOffset + 3] -eq 0x47) {
+                $ms = New-Object System.IO.MemoryStream($bytes, $bestOffset, $bestLength)
+                $img = [System.Drawing.Image]::FromStream($ms)
+                $bmp = New-Object System.Drawing.Bitmap($img)
+                $img.Dispose()
+                $ms.Dispose()
+                return $bmp
+            }
+        }
+
+        $icoLarge = New-Object System.Drawing.Icon($IcoFilePath, 256, 256)
+        $bmpFallback = $icoLarge.ToBitmap()
+        $icoLarge.Dispose()
+        return $bmpFallback
+    } catch {
+        return $null
+    }
+}
+
+function Initialize-WinUltixIcon {
+    if ($null -ne $global:UltixAppIcon) { return }
+    try {
+        # 1. Compiled Standalone .EXE Mode: Check WINULTIX_HOST_EXE passed by C# wrapper or own process PE header
+        $hostExe = if (-not [string]::IsNullOrWhiteSpace($env:WINULTIX_HOST_EXE) -and (Test-Path -LiteralPath $env:WINULTIX_HOST_EXE)) {
+            $env:WINULTIX_HOST_EXE
+        } else {
+            [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        }
+
+        if ($hostExe -and $hostExe -notmatch '(?i)(powershell|pwsh|ise)\.exe$' -and (Test-Path -LiteralPath $hostExe)) {
+            $global:UltixAppIcon     = [System.Drawing.Icon]::ExtractAssociatedIcon($hostExe)
+            $global:UltixHighResLogo = [WinUltix.NativeMethods]::ExtractHighResExeIcon($hostExe, 256)
+            if ($null -eq $global:UltixHighResLogo) {
+                $global:UltixHighResLogo = [WinUltix.NativeMethods]::ExtractHighResExeIcon($hostExe, 64)
+            }
+            if ($null -ne $global:UltixAppIcon) { return }
+        }
+
+        # 2. Local Script Mode (src\ or build\): Resolve single root X:\assets\WinUltix.ico
+        $resolvedIco = $null
+        if (-not [string]::IsNullOrWhiteSpace($ScriptDir)) {
+            $parentDir = Split-Path -Path $ScriptDir -Parent
+            foreach ($cand in @((Join-Path $ScriptDir "assets\WinUltix.ico"), (Join-Path $parentDir "assets\WinUltix.ico"))) {
+                if (-not [string]::IsNullOrWhiteSpace($cand) -and (Test-Path -LiteralPath $cand)) {
+                    $resolvedIco = $cand
+                    break
+                }
+            }
+        }
+
+        # 3. Memory-Only 'irm | iex' Mode: Cache WinUltix.ico once in %LOCALAPPDATA%\WinUltix
+        if ([string]::IsNullOrWhiteSpace($resolvedIco)) {
+            $cacheDir = Join-Path $env:LOCALAPPDATA "WinUltix"
+            $cacheIco = Join-Path $cacheDir "WinUltix.ico"
+            if (-not (Test-Path -LiteralPath $cacheIco)) {
+                try {
+                    if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null }
+                    $wc = New-Object System.Net.WebClient
+                    $wc.DownloadFile("https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/assets/WinUltix.ico", $cacheIco)
+                    $wc.Dispose()
+                } catch { }
+            }
+            if (Test-Path -LiteralPath $cacheIco) { $resolvedIco = $cacheIco }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($resolvedIco)) {
+            $global:UltixAppIcon     = New-Object System.Drawing.Icon($resolvedIco, 32, 32)
+            $global:UltixHighResLogo = Read-HighResBitmapFromIco -IcoFilePath $resolvedIco
+        }
+    } catch { }
+}
+
 function Enable-WinUltixDarkTitleBar {
     param([Parameter(Mandatory=$true)][System.Windows.Forms.Form]$Form)
     try {
         [WinUltix.NativeMethods]::EnableDarkTitleBar($Form.Handle)
+        Initialize-WinUltixIcon
+        if ($null -ne $global:UltixAppIcon) {
+            $Form.Icon = $global:UltixAppIcon
+        }
     } catch { }
 }
 
@@ -811,6 +1009,16 @@ function Set-RegKey {
     } 
 }
 
+# Unified 4-Color Engineering Palette
+$global:UltixColors = @{
+    Standard  = @(55, 58, 64)    # Matte Slate: Standard OS tweaks, cleaners, and repairs
+    Inspector = @(45, 85, 125)   # Steel Blue: Interactive grid inspectors, analyzers, and safe profiles
+    Danger    = @(135, 50, 50)   # Deep Crimson: Aggressive/destructive actions and hard kernel locks
+    Audit     = @(72, 76, 82)    # Neutral Gray: All [?] audit buttons
+    Add       = @(45, 95, 60)    # Muted Green: [+] add target buttons
+    TabBg     = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
+}
+
 function New-UltixButton {
     param(
         [Parameter(Mandatory=$true)][string]$Text,
@@ -818,7 +1026,7 @@ function New-UltixButton {
         [Parameter(Mandatory=$true)][int]$Y,
         [int]$Width = 370,
         [int]$Height = 40,
-        [int[]]$RGB = @(60, 60, 60),
+        [int[]]$RGB = @(55, 58, 64),
         [System.Drawing.Color]$ForeColor = [System.Drawing.Color]::White,
         [string]$Description = "",
         [scriptblock]$OnClick = $null,
@@ -851,8 +1059,8 @@ function New-UltixActionRow {
     param(
         [Parameter(Mandatory=$true)][string]$Text,
         [Parameter(Mandatory=$true)][int]$Y,
-        [int[]]$MainRGB = @(60, 60, 60),
-        [int[]]$AuditRGB = @(80, 80, 80),
+        [int[]]$MainRGB = @(55, 58, 64),
+        [int[]]$AuditRGB = @(72, 76, 82),
         [string]$Description = "",
         [string]$AuditDescription = "",
         [scriptblock]$OnClick = $null,
@@ -1249,7 +1457,8 @@ function Show-UltixGridModal {
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][array]$Data,
         [Parameter(Mandatory=$true)][array]$Columns,
         [string]$PrimaryButtonText = "Remove Selected",
-        [string]$SecondaryButtonText = ""
+        [string]$SecondaryButtonText = "",
+        [switch]$SecondaryAlwaysEnabled
     )
 
     $modal = New-Object System.Windows.Forms.Form
@@ -1504,11 +1713,11 @@ function Show-UltixGridModal {
         $btnSecondary.Text = $SecondaryButtonText
         $btnSecondary.Location = New-Object System.Drawing.Point(295, 585)
         $btnSecondary.Size = New-Object System.Drawing.Size(270, 38)
-        $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 100, 150)
+        $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSecondary.ForeColor = [System.Drawing.Color]::White
         $btnSecondary.FlatStyle = "Flat"
         $btnSecondary.DialogResult = [System.Windows.Forms.DialogResult]::Yes
-        $btnSecondary.Enabled = ($indexedData.Count -gt 0)
+        $btnSecondary.Enabled = ($SecondaryAlwaysEnabled.IsPresent -or $indexedData.Count -gt 0)
         $btnSecondary.Anchor = 'Bottom, Left'
 
         $btnCancel.Location = New-Object System.Drawing.Point(575, 585)
@@ -1527,6 +1736,18 @@ function Show-UltixGridModal {
 
     try {
         $dlgRes = $modal.ShowDialog($global:form)
+        if ($dlgRes -eq [System.Windows.Forms.DialogResult]::Yes -and $SecondaryAlwaysEnabled.IsPresent) {
+            $selectedList = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $indexedData) {
+                if ($checkedIds.Contains($entry.RowId)) {
+                    $selectedList.Add($entry.Item)
+                }
+            }
+            return [PSCustomObject]@{
+                Action = "Secondary"
+                Items  = @($selectedList)
+            }
+        }
         if ($checkedIds.Count -gt 0 -and ($dlgRes -eq [System.Windows.Forms.DialogResult]::OK -or $dlgRes -eq [System.Windows.Forms.DialogResult]::Yes)) {
             $selectedList = [System.Collections.Generic.List[object]]::new()
             foreach ($entry in $indexedData) {
@@ -1760,13 +1981,13 @@ function Import-WinUltixProfile {
 # <<< END INJECTED: Core_Helpers.ps1 <<<
 
 
-# Z1_Cleanup: Deep system cleaning. Removes Windows Update cache, Temp files, Event Viewer logs (wevtutil), and 3rd-party app caches. Enhanced button interactivity and optimized execution flows.
+# Z1_Cleanup: Deep disk & orphan hygiene (WU/CBS cache, Temp/Dumps, 3rd-party/GPU shader caches, Event Logs, DriverStore OEM INF Sweeper, Windows Installer MSI/MSP Sweeper, Surgical Registry Orphan Sweeper, Ghost Services, and NTFS Recycle Bin).
 # >>> INJECTED: Z1_Cleanup.ps1 <<<
 # ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z1_CLEANUP.PS1 - CLEANUP MODULE (v3.0.0)
-# Z1_Cleanup: Manages deep system cleaning. Uses Core_Helpers high-speed .NET directory enumeration (Get-UltixFastSize) and asynchronous Runspace workers ($UltixSync) to weigh and purge Windows Update/CBS/DeliveryOptimization caches, Temp/WER/Dump buffers, Event Viewer logs (wevtutil), and multi-profile 3rd-party app/shader caches.
+# Z1_CLEANUP.PS1 - CLEANUP MODULE (v3.1.0)
+# Z1_Cleanup: Deep disk & orphan hygiene (WU/CBS cache, Temp/Dumps, 3rd-party/GPU shader caches, Event Logs, DriverStore OEM INF Sweeper, Windows Installer MSI/MSP Sweeper, Surgical Registry Orphan Sweeper, Ghost Services, and NTFS Recycle Bin).
 # ==========================================
 
 # ------------------------------------------
@@ -2103,18 +2324,951 @@ function Invoke-InteractiveCleanup {
 }
 
 # ------------------------------------------
-# Z1: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z1: DRIVERSTORE ORPHAN SWEEPER (PNPUTIL & KERNEL DRIVERDATABASE)
+# ------------------------------------------
+function Get-DriverStoreOrphans_Worker {
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 10 }
+
+    $activeOemInfs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    # 1. Authoritative CfgMgr32 device-to-driver dump (catches Base INFs, Extension INFs, Audio KS, and Root devices)
+    $devDrvOut = (pnputil.exe /enum-devices /drivers 2>$null) -join "`n"
+    if (-not [string]::IsNullOrWhiteSpace($devDrvOut)) {
+        foreach ($m in [regex]::Matches($devDrvOut, '(?i)\b(oem\d+\.inf)\b')) {
+            [void]$activeOemInfs.Add($m.Groups[1].Value.ToLowerInvariant())
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 30 }
+
+    # 2. Cross-check all buses in HKLM:\SYSTEM\CurrentControlSet\Enum (including ROOT, SWD, USB, PCI, HID)
+    $boundDeviceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $enumBase = "HKLM:\SYSTEM\CurrentControlSet\Enum"
+    if (Test-Path -LiteralPath $enumBase) {
+        foreach ($busKey in (Get-ChildItem -LiteralPath $enumBase -ErrorAction SilentlyContinue)) {
+            foreach ($devKey in (Get-ChildItem -LiteralPath $busKey.PSPath -ErrorAction SilentlyContinue)) {
+                foreach ($instKey in (Get-ChildItem -LiteralPath $devKey.PSPath -ErrorAction SilentlyContinue)) {
+                    $drvLink = (Get-ItemProperty -LiteralPath $instKey.PSPath -Name "Driver" -ErrorAction SilentlyContinue).Driver
+                    if (-not [string]::IsNullOrWhiteSpace($drvLink)) {
+                        [void]$boundDeviceIds.Add($drvLink)
+                    }
+                }
+            }
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 45 }
+
+    # 3. Inspect Control\Class bindings + unconditionally lock active Extension & SoftwareComponent classes
+    $alwaysLockClasses = @(
+        "{e2f84ce7-8efa-411c-aa69-97454ca4cb57}", # Extension INF Class (e.g. lgmonitorappextension, rzs3ext)
+        "{5c4c3332-344d-483c-8739-259e934c9cc8}"  # SoftwareComponent Class
+    )
+    $classRoot = "HKLM:\SYSTEM\CurrentControlSet\Control\Class"
+    foreach ($clsKey in (Get-ChildItem -LiteralPath $classRoot -ErrorAction SilentlyContinue)) {
+        $clsGuid = $clsKey.PSChildName
+        $isAlwaysLockedClass = ($alwaysLockClasses -contains $clsGuid)
+        foreach ($subKey in (Get-ChildItem -LiteralPath $clsKey.PSPath -ErrorAction SilentlyContinue)) {
+            if ($subKey.PSChildName -notmatch '^\d{4}$') { continue }
+            $infPath = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "InfPath" -ErrorAction SilentlyContinue).InfPath
+            if ($infPath -match '^(?i)(oem\d+\.inf)$') {
+                $relDrv = "$clsGuid\$($subKey.PSChildName)"
+                if ($isAlwaysLockedClass -or $boundDeviceIds.Contains($relDrv)) {
+                    [void]$activeOemInfs.Add($matches[1].ToLowerInvariant())
+                }
+            }
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 60 }
+
+    # 4. Map oemXX.inf -> FileRepository folder paths via HKLM:\SYSTEM\DriverDatabase\DriverPackages + directory fallback
+    $repoBase  = "$env:SystemRoot\System32\DriverStore\FileRepository"
+    $oemToRepo = @{}
+    $drvDbPath = "HKLM:\SYSTEM\DriverDatabase\DriverPackages"
+    if (Test-Path -LiteralPath $drvDbPath) {
+        foreach ($pkgKey in (Get-ChildItem -LiteralPath $drvDbPath -ErrorAction SilentlyContinue)) {
+            try {
+                $oemVal = [string]$pkgKey.GetValue("")
+                if ($oemVal -match '^(?i)(oem\d+\.inf)$') {
+                    $oemToRepo[$matches[1].ToLowerInvariant()] = Join-Path $repoBase $pkgKey.PSChildName
+                }
+            } catch { }
+        }
+    }
+
+    # 5. Parse pnputil.exe /enum-drivers in a 100% locale-independent positional manner
+    $rawPnp = (pnputil.exe /enum-drivers 2>$null) -join "`n"
+    $blocks = $rawPnp -split "(?:\r?\n){2,}"
+    $parsedDrivers = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($blk in $blocks) {
+        if ($blk -notmatch '(?im)^\s*[^:]+:\s*(oem\d+\.inf)\s*$') { continue }
+        $oemInf = $matches[1].ToLowerInvariant()
+
+        $lines = @($blk -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match ':' })
+        $origInf   = "Unknown.inf"
+        $provider  = "Unknown"
+        $className = "System"
+        $verDate   = "N/A"
+
+        foreach ($ln in $lines) {
+            $val = ($ln -split ':\s*', 2)[1].Trim()
+            if ($val -eq $oemInf) { continue }
+            elseif ($origInf -eq "Unknown.inf" -and $val -match '(?i)^[a-z0-9_\-\.]+\.inf$') { $origInf = $val }
+            elseif ($val -match '^\d{2}/\d{2}/\d{4}\s+[\d\.]+$') { $verDate = $val }
+            elseif ($provider -eq "Unknown") { $provider = $val }
+            elseif ($className -eq "System") { $className = $val }
+        }
+
+        $repoDir = $oemToRepo[$oemInf]
+        if ([string]::IsNullOrWhiteSpace($repoDir) -and $origInf -ne "Unknown.inf") {
+            $cand = Get-ChildItem -LiteralPath $repoBase -Filter "$($origInf)_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $cand) { $repoDir = $cand.FullName }
+        }
+
+        $bytes  = if (-not [string]::IsNullOrWhiteSpace($repoDir) -and [System.IO.Directory]::Exists($repoDir)) { Get-UltixFastSize -TargetPaths @($repoDir) } else { 0 }
+        $sizeMB = [math]::Round($bytes / 1MB, 2)
+
+        $isActive  = $activeOemInfs.Contains($oemInf)
+        $statusStr = if ($isActive) { "[ACTIVE - LOCKED]" } else { "[ORPHAN / OLD]" }
+
+        $parsedDrivers.Add([PSCustomObject]@{
+            OemInf        = $oemInf
+            OriginalInf   = $origInf
+            Provider      = $provider
+            DriverClass   = $className
+            VersionDate   = $verDate
+            SizeMB        = $sizeMB
+            SizeDisplay   = ("{0,7:N2} MB" -f $sizeMB)
+            Status        = $statusStr
+            IsLocked      = $isActive
+            IsDetected    = (-not $isActive)
+            UIDisplayName = "$oemInf ($origInf | $provider | $verDate) [ $sizeMB MB ]"
+        })
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($parsedDrivers | Sort-Object IsLocked, @{Expression="SizeMB"; Descending=$true}, OriginalInf)
+}
+
+function Show-DriverStoreSweeper {
+    param(
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @(),
+        [switch]$AuditOnly
+    )
+
+    if ($AuditOnly) {
+        Write-GUI "--- AUDIT: DriverStore FileRepository (Background Thread) ---"
+    } else {
+        Write-GUI " -> Scanning DriverStore FileRepository & PnP bindings (Background Thread)..."
+    }
+    Update-Progress 10
+
+    $sb = (Get-Command -Name Get-DriverStoreOrphans_Worker).ScriptBlock
+    $isAudit = $AuditOnly.IsPresent
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$allDrv = @($output | Where-Object { $null -ne $_ })
+        $orphans = @($allDrv | Where-Object { -not $_.IsLocked })
+        $totalOrphanMB = [math]::Round((($orphans | Measure-Object -Property SizeMB -Sum).Sum), 2)
+
+        if ($isAudit) {
+            if ($orphans.Count -gt 0) {
+                foreach ($o in $orphans) {
+                    Write-GUI "  [!] Orphaned Package: $($o.UIDisplayName)"
+                }
+                Write-GUI "-> STATUS: $($orphans.Count) orphaned/superseded driver package(s) found (Reclaimable: $totalOrphanMB MB).`n"
+            } else {
+                Write-GUI "  [OK] DriverStore is completely clean. Zero orphaned driver packages found.`n"
+            }
+            return
+        }
+
+        if ($allDrv.Count -eq 0) {
+            Write-GUI "  [OK] No third-party OEM driver packages found in DriverStore.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "OEM INF";      Property = "OemInf";      Width = 95  }
+            @{ Header = "Status";       Property = "Status";      Width = 140 }
+            @{ Header = "Size";         Property = "SizeDisplay"; Width = 95  }
+            @{ Header = "Original INF"; Property = "OriginalInf"; Width = 145 }
+            @{ Header = "Provider";     Property = "Provider";    Width = 150 }
+            @{ Header = "Class";        Property = "DriverClass"; Width = 120 }
+            @{ Header = "Date & Ver";   Property = "VersionDate"; Width = 165 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - DriverStore Orphan Sweeper (Reclaimable: $totalOrphanMB MB)" `
+            -Description "Active drivers bound to hardware are locked in RED. Select orphaned/superseded OEM packages to purge from FileRepository." `
+            -Data $allDrv -Columns $cols -PrimaryButtonText "Delete Selected Orphans (pnputil)"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> DriverStore cleanup cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $cur   = 0
+            [double]$freedMB = 0
+
+            foreach ($drv in $Selected) {
+                $cur++
+                if ($null -ne $UltixSync) { $UltixSync.Progress = [int](($cur / $total) * 100) }
+                if ($drv.IsLocked) { continue }
+
+                $UltixSync.Logs.Enqueue(" -> Deleting DriverStore package: $($drv.OemInf) ($($drv.OriginalInf) - $($drv.SizeDisplay.Trim()))...")
+                $null = pnputil.exe /delete-driver $drv.OemInf 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $freedMB += $drv.SizeMB
+                    $UltixSync.Logs.Enqueue("    [OK] Purged $($drv.OemInf) from DriverStore.")
+                } else {
+                    $UltixSync.Logs.Enqueue("    [!] OS protected $($drv.OemInf) (Still referenced by a device node). Skipped.")
+                }
+            }
+            return [math]::Round($freedMB, 2)
+        } -OnComplete ({
+            param($reclaimed)
+            Update-Progress 0
+            Write-GUI " -> DriverStore sweep completed. Reclaimed: $reclaimed MB.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+# ------------------------------------------
+# Z1: WINDOWS INSTALLER (MSI / MSP / PATCHCACHE) ORPHAN SWEEPER
+# ------------------------------------------
+function Get-InstallerOrphans_Worker {
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 5 }
+    $installerDir = "$env:windir\Installer"
+    if (-not [System.IO.Directory]::Exists($installerDir)) { return @() }
+
+    # 1. Build map of all active .msi / .msp LocalPackage paths referenced by installed products & patches
+    $activePackages = @{}
+    $patchLookup    = @{}
+    $activePatchIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    $userDataRoot = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData"
+    if (Test-Path -LiteralPath $userDataRoot) {
+        foreach ($sidKey in (Get-ChildItem -LiteralPath $userDataRoot -ErrorAction SilentlyContinue)) {
+            # Collect registered patches metadata first
+            $patchesRoot = "$($sidKey.PSPath)\Patches"
+            if (Test-Path -LiteralPath $patchesRoot) {
+                foreach ($pKey in (Get-ChildItem -LiteralPath $patchesRoot -ErrorAction SilentlyContinue)) {
+                    $pProps = Get-ItemProperty -LiteralPath $pKey.PSPath -Name "LocalPackage", "DisplayName" -ErrorAction SilentlyContinue
+                    if ($null -ne $pProps -and -not [string]::IsNullOrWhiteSpace($pProps.LocalPackage)) {
+                        $patchLookup[$pKey.PSChildName] = [PSCustomObject]@{
+                            Path = $pProps.LocalPackage.Trim()
+                            Name = if ($pProps.DisplayName) { $pProps.DisplayName } else { "Registered OS/App Patch" }
+                        }
+                    }
+                }
+            }
+
+            # Collect installed products and their active patch bindings
+            $prodsRoot = "$($sidKey.PSPath)\Products"
+            if (Test-Path -LiteralPath $prodsRoot) {
+                foreach ($prodKey in (Get-ChildItem -LiteralPath $prodsRoot -ErrorAction SilentlyContinue)) {
+                    $instPropPath = "$($prodKey.PSPath)\InstallProperties"
+                    $props = Get-ItemProperty -LiteralPath $instPropPath -Name "LocalPackage", "DisplayName", "Publisher", "DisplayVersion" -ErrorAction SilentlyContinue
+                    $prodName = if ($props.DisplayName) { [string]$props.DisplayName } else { "Installed MSI Product" }
+                    $prodPub  = if ($props.Publisher)   { [string]$props.Publisher }   else { "Microsoft / OEM" }
+
+                    if ($null -ne $props -and -not [string]::IsNullOrWhiteSpace($props.LocalPackage)) {
+                        $leaf = [System.IO.Path]::GetFileName($props.LocalPackage).ToLowerInvariant()
+                        $activePackages[$leaf] = [PSCustomObject]@{
+                            ProductName = $prodName
+                            Publisher   = $prodPub
+                        }
+                    }
+
+                    $prodPatchesPath = "$($prodKey.PSPath)\Patches"
+                    if (Test-Path -LiteralPath $prodPatchesPath) {
+                        foreach ($ppKey in (Get-ChildItem -LiteralPath $prodPatchesPath -ErrorAction SilentlyContinue)) {
+                            [void]$activePatchIds.Add($ppKey.PSChildName)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    foreach ($patchId in $activePatchIds) {
+        if ($patchLookup.ContainsKey($patchId)) {
+            $pInfo = $patchLookup[$patchId]
+            $leaf  = [System.IO.Path]::GetFileName($pInfo.Path).ToLowerInvariant()
+            if (-not $activePackages.ContainsKey($leaf)) {
+                $activePackages[$leaf] = [PSCustomObject]@{
+                    ProductName = $pInfo.Name
+                    Publisher   = "Active MSP Patch"
+                }
+            }
+        }
+    }
+
+    # Cross-check standard Uninstall keys for any direct LocalPackage references
+    foreach ($uninstRoot in @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
+        if (-not (Test-Path -LiteralPath $uninstRoot)) { continue }
+        foreach ($uKey in (Get-ChildItem -LiteralPath $uninstRoot -ErrorAction SilentlyContinue)) {
+            $uProps = Get-ItemProperty -LiteralPath $uKey.PSPath -Name "LocalPackage", "DisplayName", "Publisher" -ErrorAction SilentlyContinue
+            if ($null -ne $uProps -and -not [string]::IsNullOrWhiteSpace($uProps.LocalPackage)) {
+                $leaf = [System.IO.Path]::GetFileName($uProps.LocalPackage).ToLowerInvariant()
+                if (-not $activePackages.ContainsKey($leaf)) {
+                    $activePackages[$leaf] = [PSCustomObject]@{
+                        ProductName = if ($uProps.DisplayName) { $uProps.DisplayName } else { $uKey.PSChildName }
+                        Publisher   = if ($uProps.Publisher)   { $uProps.Publisher }   else { "Installed App" }
+                    }
+                }
+            }
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 40 }
+
+    # 2. Enumerate C:\Windows\Installer (*.msi, *.msp) and inspect orphaned metadata via COM SummaryInformation
+    $files = @(Get-ChildItem -LiteralPath $installerDir -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -match '^\.(?i)(msi|msp)$' })
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $wiCom = $null
+    try { $wiCom = New-Object -ComObject WindowsInstaller.Installer -ErrorAction SilentlyContinue } catch { }
+
+    $totalFiles = [math]::Max(1, $files.Count)
+    $idx = 0
+
+    foreach ($file in $files) {
+        $idx++
+        if ($null -ne $UltixSync -and ($idx % 15 -eq 0 -or $idx -eq $totalFiles)) {
+            $UltixSync.Progress = 40 + [int](($idx / $totalFiles) * 55)
+        }
+
+        $leafLower = $file.Name.ToLowerInvariant()
+        $sizeMB    = [math]::Round($file.Length / 1MB, 2)
+        if ($sizeMB -lt 0.05) { continue }
+
+        $isActive = $activePackages.ContainsKey($leafLower)
+        $prodName = "Orphaned Installer Package"
+        $pubName  = "Unknown Vendor"
+
+        if ($isActive) {
+            $prodName = $activePackages[$leafLower].ProductName
+            $pubName  = $activePackages[$leafLower].Publisher
+        } elseif ($null -ne $wiCom) {
+            $sumInfo = $null
+            try {
+                $sumInfo = $wiCom.SummaryInformation($file.FullName, 0)
+                $subj = [string]$sumInfo.Property(3)
+                $auth = [string]$sumInfo.Property(4)
+                if (-not [string]::IsNullOrWhiteSpace($subj)) { $prodName = $subj.Trim() }
+                if (-not [string]::IsNullOrWhiteSpace($auth)) { $pubName  = $auth.Trim() }
+            } catch {
+            } finally {
+                if ($null -ne $sumInfo) {
+                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($sumInfo)
+                }
+            }
+        }
+
+        $statusTag = if ($isActive) { "[ACTIVE - LOCKED]" } else { "[ORPHAN / SAFE]" }
+
+        $results.Add([PSCustomObject]@{
+            FileName      = $file.Name
+            Status        = $statusTag
+            SizeMB        = $sizeMB
+            SizeDisplay   = ("{0,7:N2} MB" -f $sizeMB)
+            ProductName   = $prodName
+            Publisher     = $pubName
+            FullPath      = $file.FullName
+            IsDirectory   = $false
+            IsLocked      = $isActive
+            IsDetected    = (-not $isActive)
+            UIDisplayName = "$($file.Name) ($prodName | $pubName) [ $sizeMB MB ]"
+        })
+    }
+
+    if ($null -ne $wiCom) {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wiCom)
+    }
+
+    # 3. Check $PatchCache$\Managed baseline cache folder
+    $patchCacheDir = "$installerDir\`$PatchCache`$\Managed"
+    if ([System.IO.Directory]::Exists($patchCacheDir)) {
+        $pcBytes = Get-UltixFastSize -TargetPaths @($patchCacheDir)
+        $pcMB    = [math]::Round($pcBytes / 1MB, 2)
+        if ($pcMB -ge 1.0) {
+            $results.Add([PSCustomObject]@{
+                FileName      = "`$PatchCache`$"
+                Status        = "[ORPHAN / CACHE]"
+                SizeMB        = $pcMB
+                SizeDisplay   = ("{0,7:N2} MB" -f $pcMB)
+                ProductName   = "Windows Installer Baseline RTM Patch Cache (Safe to empty)"
+                Publisher     = "Microsoft Corporation"
+                FullPath      = $patchCacheDir
+                IsDirectory   = $true
+                IsLocked      = $false
+                IsDetected    = $true
+                UIDisplayName = "`$PatchCache`$\Managed (Baseline RTM Cache) [ $pcMB MB ]"
+            })
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($results | Sort-Object IsLocked, @{Expression="SizeMB"; Descending=$true}, ProductName)
+}
+
+function Show-InstallerSweeper {
+    param(
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @(),
+        [switch]$AuditOnly
+    )
+
+    if ($AuditOnly) {
+        Write-GUI "--- AUDIT: Windows Installer (C:\Windows\Installer) Orphans ---"
+    } else {
+        Write-GUI " -> Auditing C:\Windows\Installer packages & UserData bindings (Background Thread)..."
+    }
+    Update-Progress 10
+
+    $sb = (Get-Command -Name Get-InstallerOrphans_Worker).ScriptBlock
+    $isAudit = $AuditOnly.IsPresent
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$allItems = @($output | Where-Object { $null -ne $_ })
+        $orphans = @($allItems | Where-Object { -not $_.IsLocked })
+        $totalOrphanMB = [math]::Round((($orphans | Measure-Object -Property SizeMB -Sum).Sum), 2)
+
+        if ($isAudit) {
+            if ($orphans.Count -gt 0) {
+                foreach ($o in $orphans) {
+                    Write-GUI "  [!] Orphaned MSI/MSP: $($o.UIDisplayName)"
+                }
+                Write-GUI "-> STATUS: $($orphans.Count) orphaned installer package(s) found (Reclaimable: $totalOrphanMB MB).`n"
+            } else {
+                Write-GUI "  [OK] C:\Windows\Installer has zero orphaned packages.`n"
+            }
+            return
+        }
+
+        if ($allItems.Count -eq 0) {
+            Write-GUI "  [OK] No MSI/MSP packages found in C:\Windows\Installer.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Package";      Property = "FileName";    Width = 110 }
+            @{ Header = "Status";       Property = "Status";      Width = 140 }
+            @{ Header = "Size";         Property = "SizeDisplay"; Width = 95  }
+            @{ Header = "Product Name"; Property = "ProductName"; Width = 335 }
+            @{ Header = "Publisher";    Property = "Publisher";   Width = 175 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Windows Installer (MSI/MSP) Orphan Sweeper (Reclaimable: $totalOrphanMB MB)" `
+            -Description "Active MSI/MSP packages required for app uninstallation are locked in RED. Select orphaned packages to permanently delete." `
+            -Data $allItems -Columns $cols -PrimaryButtonText "Purge Selected Orphans"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Windows Installer cleanup cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $cur   = 0
+            [double]$freedMB = 0
+
+            foreach ($pkg in $Selected) {
+                $cur++
+                if ($null -ne $UltixSync) { $UltixSync.Progress = [int](($cur / $total) * 100) }
+                if ($pkg.IsLocked) { continue }
+
+                try {
+                    if ($pkg.IsDirectory) {
+                        Get-ChildItem -LiteralPath $pkg.FullPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                        $freedMB += $pkg.SizeMB
+                        $UltixSync.Logs.Enqueue("    [OK] Purged Windows Installer `$PatchCache`$ ($($pkg.SizeDisplay.Trim())).")
+                    } elseif (Test-Path -LiteralPath $pkg.FullPath -PathType Leaf) {
+                        $fItem = Get-Item -LiteralPath $pkg.FullPath -Force -ErrorAction SilentlyContinue
+                        if ($null -ne $fItem) { $fItem.Attributes = 'Normal' }
+                        Remove-Item -LiteralPath $pkg.FullPath -Force -ErrorAction Stop
+                        $freedMB += $pkg.SizeMB
+                        $UltixSync.Logs.Enqueue("    [OK] Deleted orphaned $($pkg.FileName) ($($pkg.ProductName) - $($pkg.SizeDisplay.Trim())).")
+                    }
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Locked/Skipped $($pkg.FileName): $($_.Exception.Message)")
+                }
+            }
+            return [math]::Round($freedMB, 2)
+        } -OnComplete ({
+            param($reclaimed)
+            Update-Progress 0
+            Write-GUI " -> Windows Installer sweep completed. Reclaimed: $reclaimed MB.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+# ------------------------------------------
+# Z1: SURGICAL REGISTRY ORPHAN SWEEPER
+# ------------------------------------------
+function Get-RegistryOrphans_Worker {
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 5 }
+    $orphans = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    $readyDrives = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($drv in ([System.IO.DriveInfo]::GetDrives())) {
+        if ($drv.IsReady) { [void]$readyDrives.Add($drv.Name.Substring(0, 1)) }
+    }
+
+    function Test-IsOrphanedDiskPath {
+        param([string]$RawPath, [switch]$IsDirectory)
+        if ([string]::IsNullOrWhiteSpace($RawPath)) { return $false }
+        $clean = [System.Environment]::ExpandEnvironmentVariables($RawPath.Trim().Trim('"')).Trim()
+        if ($clean -notmatch '^([a-zA-Z]):\\') { return $false }
+
+        $driveLetter = $matches[1]
+        if (-not $readyDrives.Contains($driveLetter)) { return $false }
+        if ($clean -match '(?i)^[a-z]:\\Windows(\\|$)' -or $clean -match '(?i)\\WindowsApps\\') { return $false }
+
+        if ($IsDirectory) {
+            return (-not [System.IO.Directory]::Exists($clean))
+        } else {
+            return (-not [System.IO.File]::Exists($clean))
+        }
+    }
+
+    # 1. Orphaned Windows Firewall Application Rules
+    $fwPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+    if (Test-Path -LiteralPath $fwPath) {
+        $fwKey = Get-Item -LiteralPath $fwPath -ErrorAction SilentlyContinue
+        if ($null -ne $fwKey) {
+            try {
+                foreach ($valName in $fwKey.Property) {
+                    $ruleStr = [string]$fwKey.GetValue($valName)
+                    if ($ruleStr -match '\|App=([^|]+)\|') {
+                        $appPath = $matches[1]
+                        if (Test-IsOrphanedDiskPath -RawPath $appPath) {
+                            $ruleTitle = if ($ruleStr -match '\|Name=([^|]+)\|') { $matches[1] } else { $valName }
+                            $orphans.Add([PSCustomObject]@{
+                                Category      = "[Firewall Rule]"
+                                TargetName    = $ruleTitle
+                                MissingPath   = $appPath
+                                RegPath       = $fwPath
+                                ValueName     = $valName
+                                RawValueData  = $ruleStr
+                                ValueKind     = "String"
+                                EntryType     = "Value"
+                                IsDetected    = $true
+                                UIDisplayName = "[Firewall Rule] $ruleTitle -> $appPath"
+                            })
+                        }
+                    }
+                }
+            } finally { $fwKey.Dispose() }
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 30 }
+
+    # 2. Orphaned AppCompat Flags (Compatibility Assistant Store & Layers)
+    $compatKeys = @(
+        "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store",
+        "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+        "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+    )
+    foreach ($cPath in $compatKeys) {
+        if (-not (Test-Path -LiteralPath $cPath)) { continue }
+        $cKey = Get-Item -LiteralPath $cPath -ErrorAction SilentlyContinue
+        if ($null -ne $cKey) {
+            try {
+                foreach ($valName in $cKey.Property) {
+                    if (Test-IsOrphanedDiskPath -RawPath $valName) {
+                        $leaf   = [System.IO.Path]::GetFileName($valName)
+                        $rawObj = $cKey.GetValue($valName)
+                        $vKind  = if ($rawObj -is [byte[]]) { "Binary" } else { "String" }
+                        $vData  = if ($rawObj -is [byte[]]) { [Convert]::ToBase64String($rawObj) } else { [string]$rawObj }
+                        $orphans.Add([PSCustomObject]@{
+                            Category      = "[AppCompat Cache]"
+                            TargetName    = $leaf
+                            MissingPath   = $valName
+                            RegPath       = $cPath
+                            ValueName     = $valName
+                            RawValueData  = $vData
+                            ValueKind     = $vKind
+                            EntryType     = "Value"
+                            IsDetected    = $true
+                            UIDisplayName = "[AppCompat Cache] $leaf -> $valName"
+                        })
+                    }
+                }
+            } finally { $cKey.Dispose() }
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 55 }
+
+    # 3. Orphaned DirectX Per-App GPU Preferences
+    $dxPath = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    if (Test-Path -LiteralPath $dxPath) {
+        $dxKey = Get-Item -LiteralPath $dxPath -ErrorAction SilentlyContinue
+        if ($null -ne $dxKey) {
+            try {
+                foreach ($valName in $dxKey.Property) {
+                    if ($valName -eq "DirectXUserGlobalSettings") { continue }
+                    if (Test-IsOrphanedDiskPath -RawPath $valName) {
+                        $leaf = [System.IO.Path]::GetFileName($valName)
+                        $orphans.Add([PSCustomObject]@{
+                            Category      = "[GPU Preference]"
+                            TargetName    = $leaf
+                            MissingPath   = $valName
+                            RegPath       = $dxPath
+                            ValueName     = $valName
+                            RawValueData  = [string]$dxKey.GetValue($valName)
+                            ValueKind     = "String"
+                            EntryType     = "Value"
+                            IsDetected    = $true
+                            UIDisplayName = "[GPU Preference] $leaf -> $valName"
+                        })
+                    }
+                }
+            } finally { $dxKey.Dispose() }
+        }
+    }
+
+    # 4. Orphaned SharedDLLs Reference Counters
+    $sharedDllPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDlls"
+    if (Test-Path -LiteralPath $sharedDllPath) {
+        $sdKey = Get-Item -LiteralPath $sharedDllPath -ErrorAction SilentlyContinue
+        if ($null -ne $sdKey) {
+            try {
+                foreach ($valName in $sdKey.Property) {
+                    if (Test-IsOrphanedDiskPath -RawPath $valName) {
+                        $leaf = [System.IO.Path]::GetFileName($valName)
+                        $orphans.Add([PSCustomObject]@{
+                            Category      = "[SharedDLLs]"
+                            TargetName    = $leaf
+                            MissingPath   = $valName
+                            RegPath       = $sharedDllPath
+                            ValueName     = $valName
+                            RawValueData  = [string]$sdKey.GetValue($valName)
+                            ValueKind     = "DWord"
+                            EntryType     = "Value"
+                            IsDetected    = $true
+                            UIDisplayName = "[SharedDLLs] $leaf -> $valName"
+                        })
+                    }
+                }
+            } finally { $sdKey.Dispose() }
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 80 }
+
+    # 5. Orphaned Windows Installer Folder References
+    $msiFoldersPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\Folders"
+    if (Test-Path -LiteralPath $msiFoldersPath) {
+        $mfKey = Get-Item -LiteralPath $msiFoldersPath -ErrorAction SilentlyContinue
+        if ($null -ne $mfKey) {
+            try {
+                foreach ($valName in $mfKey.Property) {
+                    if ($valName -match '(?i)\\Microsoft\\|\\Common Files\\|\\Windows\\') { continue }
+                    if (Test-IsOrphanedDiskPath -RawPath $valName -IsDirectory) {
+                        $dirName = [System.IO.Path]::GetFileName($valName.TrimEnd('\'))
+                        $orphans.Add([PSCustomObject]@{
+                            Category      = "[MSI Folder Ref]"
+                            TargetName    = $dirName
+                            MissingPath   = $valName
+                            RegPath       = $msiFoldersPath
+                            ValueName     = $valName
+                            RawValueData  = [string]$mfKey.GetValue($valName)
+                            ValueKind     = "String"
+                            EntryType     = "Value"
+                            IsDetected    = $true
+                            UIDisplayName = "[MSI Folder Ref] $dirName -> $valName"
+                        })
+                    }
+                }
+            } finally { $mfKey.Dispose() }
+        }
+    }
+
+    # 6. Orphaned App Paths Subkeys
+    foreach ($apRoot in @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths", "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths")) {
+        if (-not (Test-Path -LiteralPath $apRoot)) { continue }
+        foreach ($sub in (Get-ChildItem -LiteralPath $apRoot -ErrorAction SilentlyContinue)) {
+            try {
+                $defVal = [string]$sub.GetValue("")
+                if (-not [string]::IsNullOrWhiteSpace($defVal) -and (Test-IsOrphanedDiskPath -RawPath $defVal)) {
+                    $orphans.Add([PSCustomObject]@{
+                        Category      = "[App Paths]"
+                        TargetName    = $sub.PSChildName
+                        MissingPath   = $defVal.Trim('"')
+                        RegPath       = $sub.PSPath
+                        ValueName     = "(Default)"
+                        RawValueData  = $defVal
+                        ValueKind     = "String"
+                        EntryType     = "SubKey"
+                        IsDetected    = $true
+                        UIDisplayName = "[App Paths] $($sub.PSChildName) -> $defVal"
+                    })
+                }
+            } catch { }
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($orphans | Sort-Object Category, TargetName)
+}
+
+function Show-RegistryOrphanSweeper {
+    param(
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @(),
+        [switch]$AuditOnly
+    )
+
+    if ($AuditOnly) {
+        Write-GUI "--- AUDIT: Surgical Registry Orphan Sweeper (Background Thread) ---"
+    } else {
+        Write-GUI " -> Scanning Firewall, AppCompat, DirectX GPU, SharedDLLs & AppPaths for dead file paths..."
+    }
+    Update-Progress 10
+
+    $sb = (Get-Command -Name Get-RegistryOrphans_Worker).ScriptBlock
+    $isAudit = $AuditOnly.IsPresent
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$orphans = @($output | Where-Object { $null -ne $_ })
+
+        if ($isAudit) {
+            if ($orphans.Count -gt 0) {
+                $grouped = $orphans | Group-Object Category
+                foreach ($g in $grouped) {
+                    Write-GUI "  [!] $($g.Name): $($g.Count) orphaned registry reference(s)"
+                }
+                Write-GUI "-> STATUS: $($orphans.Count) total orphaned registry path reference(s) detected.`n"
+            } else {
+                Write-GUI "  [OK] Zero orphaned path references found in registry.`n"
+            }
+            return
+        }
+
+        $backupFile = "$env:LOCALAPPDATA\WinUltix\RegOrphans_LastBackup.json"
+        $hasBackup  = (Test-Path -LiteralPath $backupFile)
+
+        if ($orphans.Count -eq 0 -and -not $hasBackup) {
+            Write-GUI "  [OK] Registry is completely clean. Zero orphaned path references found.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Category";            Property = "Category";    Width = 145 }
+            @{ Header = "Application / Entry"; Property = "TargetName";  Width = 210 }
+            @{ Header = "Missing Disk Path";   Property = "MissingPath"; Width = 500 }
+        )
+
+        $secBtn = if ($hasBackup) { "Restore Last Backup (JSON)" } else { "" }
+
+        $res = Show-UltixGridModal -Title "WinUltix - Surgical Registry Orphan Sweeper ($($orphans.Count) Orphans)" `
+            -Description "100% path-verified registry orphans left behind by uninstalled apps/games. Click 'Restore Last Backup' at any time to undo." `
+            -Data $orphans -Columns $cols -PrimaryButtonText "Purge Selected Orphans" -SecondaryButtonText $secBtn -SecondaryAlwaysEnabled:$hasBackup
+
+        if ($null -eq $res) {
+            Write-GUI " -> Registry orphan sweep cancelled.`n"
+            return
+        }
+
+        if ($res.Action -eq "Secondary" -and (Test-Path -LiteralPath $backupFile)) {
+            try {
+                $restored = 0
+                $bData = @(Get-Content -LiteralPath $backupFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+                foreach ($entry in $bData) {
+                    if ($null -eq $entry) { continue }
+                    if ($entry.EntryType -eq "SubKey") {
+                        if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
+                        Set-Item -LiteralPath $entry.RegPath -Value ([string]$entry.RawValueData) -Force -ErrorAction SilentlyContinue
+                        $restored++
+                    } else {
+                        if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
+                        $kind = if ($entry.PSObject.Properties.Match("ValueKind").Count -gt 0 -and $entry.ValueKind) { [string]$entry.ValueKind } else { "String" }
+                        if ($kind -eq "Binary" -and -not [string]::IsNullOrWhiteSpace($entry.RawValueData)) {
+                            [byte[]]$bytes = [Convert]::FromBase64String([string]$entry.RawValueData)
+                            Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value $bytes -Type Binary -Force -ErrorAction SilentlyContinue
+                        } elseif ($kind -eq "DWord") {
+                            $dw = if ($entry.RawValueData -match '^\d+$') { [int]$entry.RawValueData } else { 1 }
+                            Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value $dw -Type DWord -Force -ErrorAction SilentlyContinue
+                        } else {
+                            Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value ([string]$entry.RawValueData) -Type String -Force -ErrorAction SilentlyContinue
+                        }
+                        $restored++
+                    }
+                }
+                Write-GUI " -> [OK] Restored $restored registry entry(s) from $backupFile.`n"
+            } catch {
+                Write-GUI " -> [!] Failed to restore registry backup: $($_.Exception.Message)`n"
+            }
+            return
+        }
+
+        if ($res.Items.Count -eq 0) { return }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($res.Items, $backupFile) -ScriptBlock {
+            param([array]$Selected, [string]$BackupPath)
+            $appDir = Split-Path -Path $BackupPath -Parent
+            if (-not (Test-Path -LiteralPath $appDir)) { New-Item -Path $appDir -ItemType Directory -Force | Out-Null }
+            @($Selected) | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $BackupPath -Encoding UTF8 -Force
+
+            $total   = $Selected.Count
+            $cur     = 0
+            $removed = 0
+
+            foreach ($item in $Selected) {
+                $cur++
+                if ($null -ne $UltixSync -and ($cur % 10 -eq 0 -or $cur -eq $total)) {
+                    $UltixSync.Progress = [int](($cur / $total) * 100)
+                }
+                try {
+                    if ($item.EntryType -eq "SubKey") {
+                        if (Test-Path -LiteralPath $item.RegPath) {
+                            Remove-Item -LiteralPath $item.RegPath -Recurse -Force -ErrorAction Stop
+                            $removed++
+                        }
+                    } else {
+                        Remove-ItemProperty -LiteralPath $item.RegPath -Name $item.ValueName -Force -ErrorAction Stop
+                        $removed++
+                    }
+                } catch { }
+            }
+            return $removed
+        } -OnComplete ({
+            param($purgedCount)
+            Update-Progress 0
+            Write-GUI " -> [OK] Purged $purgedCount orphaned registry reference(s) (Backup saved to RegOrphans_LastBackup.json).`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+# ------------------------------------------
+# Z1: GHOST SERVICES & DRIVERS SWEEPER (MOVED FROM Z4)
+# ------------------------------------------
+function Get-GhostServicesState {
+    $ghosts = [System.Collections.Generic.List[PSCustomObject]]::new()
+    
+    $runningNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.Name) }
+    Get-CimInstance -ClassName Win32_SystemDriver -Filter "State = 'Running'" -Property Name -ErrorAction SilentlyContinue | ForEach-Object { [void]$runningNames.Add($_.Name) }
+
+    $services = @(Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue)
+    $total = $services.Count
+    $current = 0
+
+    foreach ($svc in $services) {
+        $current++
+        if ($null -ne $UltixSync -and ($current % 15 -eq 0 -or $current -eq $total)) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+
+        $svcName = $svc.PSChildName
+        if ($runningNames.Contains($svcName)) { continue }
+
+        $props = Get-ItemProperty -Path $svc.PSPath -Name "ImagePath", "Type" -ErrorAction SilentlyContinue
+        if ($null -eq $props) { continue }
+
+        # Skip Per-User service templates and dynamic session instances (SERVICE_USER_SERVICE bit 0x40)
+        if ($null -ne $props.Type -and (($props.Type -band 0x40) -ne 0)) { continue }
+
+        $imagePath = $props.ImagePath
+        if ([string]::IsNullOrWhiteSpace($imagePath)) { continue }
+        if ($imagePath -match '(?i)^\\(?:Driver|FileSystem)\\') { continue }
+        
+        # Normalize kernel and relative root prefixes (\SystemRoot\, SystemRoot\, \System32\, system32\)
+        $rawPath = $imagePath.Trim()
+        $rawPath = $rawPath -replace '^\\+?\?\?\\+', ''
+        $rawPath = $rawPath -replace '(?i)^\\?SystemRoot\\', "$env:windir\"
+        $rawPath = $rawPath -replace '(?i)^\\?System32\\', "$env:windir\System32\"
+        $rawPath = $rawPath -replace '(?i)^\\?SysWOW64\\', "$env:windir\SysWOW64\"
+        $rawPath = [System.Environment]::ExpandEnvironmentVariables($rawPath).Trim()
+        
+        if ($rawPath -match '^"([^"]+)"') { 
+            $rawPath = $matches[1] 
+        } elseif ($rawPath -match '(?i)^(.+?\.(?:exe|sys|dll))(?:$|\s)') {
+            $rawPath = $matches[1]
+        } else { 
+            $rawPath = $rawPath.Split(' ')[0] 
+        }
+        
+        if (-not [System.IO.Path]::IsPathRooted($rawPath)) {
+            $candidateWinDir = Join-Path -Path $env:windir -ChildPath $rawPath
+            $candidateSys32  = Join-Path -Path "$env:windir\System32" -ChildPath $rawPath
+            $candidateDrv    = Join-Path -Path "$env:windir\System32\drivers" -ChildPath $rawPath
+            
+            if (Test-Path -LiteralPath $candidateWinDir -PathType Leaf) { $rawPath = $candidateWinDir }
+            elseif (Test-Path -LiteralPath $candidateSys32 -PathType Leaf) { $rawPath = $candidateSys32 }
+            elseif (Test-Path -LiteralPath $candidateDrv -PathType Leaf) { $rawPath = $candidateDrv }
+            else { $rawPath = $candidateWinDir }
+        }
+        
+        if (-not (Test-Path -LiteralPath $rawPath -PathType Leaf)) {
+            $ghosts.Add([PSCustomObject]@{
+                Name          = $svcName
+                Path          = $rawPath
+                UIDisplayName = "Ghost: $svcName (Missing: $rawPath)"
+                IsDetected    = $true
+            })
+        }
+    }
+    return $ghosts
+}
+
+function Remove-GhostServices {
+    param(
+        [Parameter(Mandatory=$true)][array]$SelectedItems,
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
+    )
+    if ($SelectedItems.Count -eq 0) { return }
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$SelectedItems) -ScriptBlock {
+        param([array]$Items)
+        $total   = $Items.Count
+        $current = 0
+
+        foreach ($item in $Items) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Removing Ghost Service: $($item.Name)")
+            }
+            Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($item.Name)" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } -OnComplete ({
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI " -> Ghost services purged from system registry.`n"
+    }.GetNewClosure())
+}
+
+# ------------------------------------------
+# Z1: UI INITIALIZATION (CLEANUP & ORPHAN SWEEPERS)
 # ------------------------------------------
 function Initialize-Z1UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tabClean = New-Object System.Windows.Forms.TabPage
     $tabClean.Text = "Cleanup"
-    $tabClean.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $tabClean.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
     $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-    $invokeCategory = {
+    $invokeCategory = ({
         param([string]$Cat, [switch]$Audit)
         Invoke-UltixAuditFlow `
             -ScannerFunction "Get-CleanupState" `
@@ -2125,65 +3279,99 @@ function Initialize-Z1UI {
             -ExecutorFunction "Invoke-InteractiveCleanup" `
             -ControlsToDisable $allTabButtons.ToArray() `
             -AuditOnly:$Audit.IsPresent
-    }.GetNewClosure()
+    }.GetNewClosure())
 
-    # 1. Windows Update Cache
-    $rowWU = New-UltixActionRow -Parent $tabClean -Y 20 `
-        -Text "Clean Windows Update Cache" `
+    # 1. Windows Update & CBS Cache
+    $rowWU = New-UltixActionRow -Parent $tabClean -Y 20 -MainRGB @(55, 58, 64) `
+        -Text "Clean Windows Update & CBS Cache" `
         -Description "Analyzes and interactively purges Windows Update (SoftwareDistribution), Delivery Optimization, and CBS Servicing logs safely." `
         -AuditDescription "AUDIT: Calculates the exact megabyte footprint of Windows Update, Delivery Optimization, and CBS log files." `
         -OnClick ({ & $invokeCategory "WU" }.GetNewClosure()) `
         -OnAudit ({ & $invokeCategory "WU" -Audit }.GetNewClosure())
 
-    # 2. Temp & Prefetch Buffers
-    $rowTemp = New-UltixActionRow -Parent $tabClean -Y 70 `
-        -Text "Clean Temp and Prefetch Buffers" `
+    # 2. Temp, Prefetch & Crash Dumps
+    $rowTemp = New-UltixActionRow -Parent $tabClean -Y 70 -MainRGB @(55, 58, 64) `
+        -Text "Clean Temp, Prefetch & Dumps" `
         -Description "Scans and weighs System Temp, Prefetch, Windows Error Reporting (WER), Crash Dumps, and local Temp directories across all user profiles." `
         -AuditDescription "AUDIT: Weighs orphaned temporary files, WER reports, crash dumps, and prefetch data globally." `
         -OnClick ({ & $invokeCategory "Temp" }.GetNewClosure()) `
         -OnAudit ({ & $invokeCategory "Temp" -Audit }.GetNewClosure())
 
-    # 3. Event Viewer Logs
-    $rowLogs = New-UltixActionRow -Parent $tabClean -Y 120 `
-        -Text "Clear Event Viewer Logs" `
-        -Description "Calculates the size of Event Logs (.evtx) and asynchronously clears diagnostic history using the native wevtutil engine." `
-        -AuditDescription "AUDIT: Checks the current disk space consumed by Windows Event Logs." `
-        -OnClick ({ & $invokeCategory "EventLogs" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeCategory "EventLogs" -Audit }.GetNewClosure())
-
-    # 4. Third-Party App Cache
-    $rowThirdParty = New-UltixActionRow -Parent $tabClean -Y 170 `
-        -Text "Clean Third-Party App Cache" `
+    # 3. Third-Party App & GPU Shader Cache
+    $rowThirdParty = New-UltixActionRow -Parent $tabClean -Y 120 -MainRGB @(55, 58, 64) `
+        -Text "Clean 3rd-Party & Shader Cache" `
         -Description "Locates bloated application and shader caches (Multi-profile Chrome/Edge/Brave/Vivaldi/Firefox, Discord, D3DSCache, NVIDIA/AMD DxCache) across all user profiles." `
         -AuditDescription "AUDIT: Aggregates the storage space wasted by third-party browser, launcher, and GPU shader caches." `
         -OnClick ({ & $invokeCategory "ThirdParty" }.GetNewClosure()) `
         -OnAudit ({ & $invokeCategory "ThirdParty" -Audit }.GetNewClosure())
 
-    # 5. Recycle Bin
-    $rowRecycle = New-UltixActionRow -Parent $tabClean -Y 220 `
+    # 4. Event Viewer Logs
+    $rowLogs = New-UltixActionRow -Parent $tabClean -Y 170 -MainRGB @(55, 58, 64) `
+        -Text "Clear Event Viewer Logs (wevtutil)" `
+        -Description "Calculates the size of Event Logs (.evtx) and asynchronously clears diagnostic history using the native wevtutil engine." `
+        -AuditDescription "AUDIT: Checks the current disk space consumed by Windows Event Logs." `
+        -OnClick ({ & $invokeCategory "EventLogs" }.GetNewClosure()) `
+        -OnAudit ({ & $invokeCategory "EventLogs" -Audit }.GetNewClosure())
+
+    # 5. DriverStore Orphan Sweeper (pnputil FileRepository)
+    $rowDrvStore = New-UltixActionRow -Parent $tabClean -Y 220 -MainRGB @(45, 85, 125) `
+        -Text "DriverStore Orphan Sweeper (OEM INF)" `
+        -Description "Scans C:\Windows\System32\DriverStore\FileRepository for superseded/orphaned OEM driver packages (NVIDIA, AMD, Intel, Realtek) while locking active hardware drivers." `
+        -AuditDescription "AUDIT: Calculates total gigabytes/megabytes wasted by old, superseded driver packages in DriverStore." `
+        -OnClick ({ Show-DriverStoreSweeper -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
+        -OnAudit ({ Show-DriverStoreSweeper -ControlsToDisable $allTabButtons.ToArray() -AuditOnly }.GetNewClosure())
+
+    # 6. Windows Installer (C:\Windows\Installer) Orphan Sweeper
+    $rowMsiStore = New-UltixActionRow -Parent $tabClean -Y 270 -MainRGB @(45, 85, 125) `
+        -Text "Windows Installer Orphan Sweeper (MSI)" `
+        -Description "Cross-references C:\Windows\Installer (.msi / .msp / `$PatchCache`$) against active UserData registrations. Locks active uninstallers and purges orphaned packages." `
+        -AuditDescription "AUDIT: Calculates disk space wasted by orphaned .msi/.msp packages in C:\Windows\Installer." `
+        -OnClick ({ Show-InstallerSweeper -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
+        -OnAudit ({ Show-InstallerSweeper -ControlsToDisable $allTabButtons.ToArray() -AuditOnly }.GetNewClosure())
+
+    # 7. Surgical Registry Orphan Sweeper
+    $rowRegOrphans = New-UltixActionRow -Parent $tabClean -Y 320 -MainRGB @(45, 85, 125) `
+        -Text "Surgical Registry Orphan Sweeper" `
+        -Description "Scans Firewall Rules, AppCompat Store/Layers, DirectX GPU Preferences, SharedDLLs, MSI Folders, and App Paths for dead file paths with JSON backup." `
+        -AuditDescription "AUDIT: Counts dead file/folder references left behind in the registry by uninstalled applications and games." `
+        -OnClick ({ Show-RegistryOrphanSweeper -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
+        -OnAudit ({ Show-RegistryOrphanSweeper -ControlsToDisable $allTabButtons.ToArray() -AuditOnly }.GetNewClosure())
+
+    # 8. Ghost Services & Drivers Cleanup
+    $rowGhostSvc = New-UltixActionRow -Parent $tabClean -Y 370 -MainRGB @(55, 58, 64) `
+        -Text "Cleanup Ghost Services & Drivers" `
+        -Description "Scans HKLM\...\Services for orphaned service and driver keys pointing to non-existent binaries (.exe/.sys) and removes them." `
+        -AuditDescription "AUDIT: Detects orphaned service and kernel driver registrations pointing to missing disk files." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-GhostServicesState" -AuditLabel "Ghost Services & Drivers" -ModalTitle "WinUltix - Ghost Services Cleanup" -ModalDescription "Select orphaned service/driver keys to remove." -ExecutorFunction "Remove-GhostServices" -ControlsToDisable $allTabButtons.ToArray() -SkipModalIfClean
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-GhostServicesState" -AuditLabel "Ghost Services & Drivers" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Found"
+        }.GetNewClosure())
+
+    # 9. Hard Empty Recycle Bin (NTFS)
+    $rowRecycle = New-UltixActionRow -Parent $tabClean -Y 420 -MainRGB @(135, 50, 50) `
         -Text "Hard Empty Recycle Bin (NTFS)" `
-        -MainRGB @(100, 40, 40) -AuditRGB @(100, 40, 40) `
         -Description "Scans all logical partitions for Recycle Bin contents and forcefully purges them in a background thread, bypassing standard file locks." `
         -AuditDescription "AUDIT: Reports the total size of deleted files waiting in the Recycle Bins across all partitions." `
         -OnClick ({ & $invokeCategory "RecycleBin" }.GetNewClosure()) `
         -OnAudit ({ & $invokeCategory "RecycleBin" -Audit }.GetNewClosure())
 
-    foreach ($row in @($rowWU, $rowTemp, $rowLogs, $rowThirdParty, $rowRecycle)) {
+    foreach ($row in @($rowWU, $rowTemp, $rowThirdParty, $rowLogs, $rowDrvStore, $rowMsiStore, $rowRegOrphans, $rowGhostSvc, $rowRecycle)) {
         $allTabButtons.AddRange($row.Controls)
     }
-
     $TabControl.Controls.Add($tabClean)
 }
 # <<< END INJECTED: Z1_Cleanup.ps1 <<<
 
 
-# Z2_Bloatware: Aggressive debloatifier. Incorporates CBS and Appx state verification. Enhanced OneDrive removal across profiles, FOD package management, and intelligent orphaned framework collection (Garbage Collector).
+# Z2_Bloatware: Multi-profile OneDrive amputation, 64-target UWP Bloatware & Windows Recall/Copilot AI removal, FOD Preset, Appx Framework Garbage Collector, CBS Stubs, and 4 manual package/feature inspector grids.
 # >>> INJECTED: Z2_Bloatware.ps1 <<<
 # ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE (v3.0.0)
-# Z2_Bloatware: Aggressive debloatifier. Uses Core_Helpers profile/hive discovery (Get-UltixUserProfiles), fast .NET directory sizing (Get-UltixFastSize), and asynchronous Runspace workers ($UltixSync) to amputate OneDrive, remove FOD Capabilities, clean orphaned Appx frameworks, lock down Windows Recall/AI, and purge UWP bloatware.
+# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE (v3.1.0)
+# Z2_Bloatware: Multi-profile OneDrive amputation, 64-target UWP Bloatware & Windows Recall/Copilot AI removal, FOD Preset, Appx Framework Garbage Collector, CBS Stubs, and 4 manual package/feature inspector grids.
 # ==========================================
 
 # ------------------------------------------
@@ -2934,7 +4122,7 @@ function Invoke-RemoveBloatware {
                     Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop | Out-Null
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Deprovisioned base image: $($prov.DisplayName)") }
                 } catch {
-                    if ($_.Exception.Message -notmatch "(?i)nie można odnaleźć|cannot find|0x80070002|0x80070003") {
+                    if ($_.Exception.Message -notmatch "(?i)nie mo.na odnale..|cannot find|0x80070002|0x80070003") {
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [-] Error deprovisioning $($prov.DisplayName): $($_.Exception.Message)") }
                     }
                 }
@@ -2983,21 +4171,270 @@ function Invoke-RemoveCapabilityStubs {
 }
 
 # ------------------------------------------
-# Z2: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z2: MANUAL INTERACTIVE INSPECTOR GRIDS (MOVED FROM Z5)
+# ------------------------------------------
+function Show-AppxGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Scanning installed Appx packages (Background Thread)..."
+    Update-Progress 20
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender"
+        
+        $pkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+            Where-Object { $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedPattern } |
+            Select-Object Name, PackageFullName, PackageFamilyName, IsFramework, Status |
+            Sort-Object Name)
+        return $pkgs
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$pkgs = @($output | Where-Object { $null -ne $_ })
+        if ($pkgs.Count -eq 0) {
+            Write-GUI " -> No removable Appx packages found.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Package Name";    Property = "Name";            Width = 310 }
+            @{ Header = "Framework";       Property = "IsFramework";     Width = 90  }
+            @{ Header = "Status";          Property = "Status";          Width = 95  }
+            @{ Header = "PackageFullName"; Property = "PackageFullName"; Width = 350 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Installed Appx Packages" `
+            -Description "Select Appx packages to remove across all accounts. Protected gaming/system runtimes are hidden." `
+            -Data $pkgs -Columns $cols -PrimaryButtonText "Remove Selected Appx"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Appx removal cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($app in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Removing Appx: $($app.Name)")
+                try {
+                    try {
+                        Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
+                    } catch {
+                        Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($app.PackageFamilyName)) {
+                        $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$($app.PackageFamilyName)"
+                        if (-not (Test-Path $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                    }
+                    $UltixSync.Logs.Enqueue("    [OK] $($app.Name) removed and deprovisioned.")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Error removing $($app.Name): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Selected Appx removal routine finished.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+function Show-AppxProvGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Scanning Provisioned Appx image packages (Background Thread)..."
+    Update-Progress 20
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop"
+        
+        $pkgs = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -notmatch $protectedPattern } |
+            Select-Object DisplayName, Version, PackageName |
+            Sort-Object DisplayName)
+        return $pkgs
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$pkgs = @($output | Where-Object { $null -ne $_ })
+        if ($pkgs.Count -eq 0) {
+            Write-GUI " -> No provisioned packages found in system image.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Display Name"; Property = "DisplayName"; Width = 340 }
+            @{ Header = "Version";      Property = "Version";     Width = 140 }
+            @{ Header = "Package Name"; Property = "PackageName"; Width = 365 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Provisioned Appx Image Packages" `
+            -Description "Select base-image packages to deprovision so they never install for new users." `
+            -Data $pkgs -Columns $cols -PrimaryButtonText "Deprovision Selected"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Deprovisioning cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($app in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Deprovisioning: $($app.DisplayName)")
+                try {
+                    Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
+                    $UltixSync.Logs.Enqueue("    [OK] $($app.DisplayName) deprovisioned.")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Error deprovisioning $($app.DisplayName): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Selected Provisioned packages removed from image.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+function Show-CapsGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Querying installed Windows Capabilities / FOD (Background Thread)..."
+    Update-Progress 25
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $caps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Installed' } |
+            Select-Object Name, State |
+            Sort-Object Name)
+        return $caps
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$caps = @($output | Where-Object { $null -ne $_ })
+        if ($caps.Count -eq 0) {
+            Write-GUI " -> No installed Capabilities returned.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 680 }
+            @{ Header = "State";                 Property = "State"; Width = 160 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Windows Capabilities (FOD)" `
+            -Description "Select installed Features on Demand (FOD) to uninstall from the OS image." `
+            -Data $caps -Columns $cols -PrimaryButtonText "Uninstall Selected FODs"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Capability removal cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($cap in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Removing capability: $($cap.Name)")
+                try {
+                    Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+                    $UltixSync.Logs.Enqueue("    [OK] $($cap.Name) removed.")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Failed to remove $($cap.Name): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Capability removal finished.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+function Show-OptFeaturesGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Querying enabled Windows Optional Features (Background Thread)..."
+    Update-Progress 25
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $feats = @(Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Enabled' } |
+            Select-Object FeatureName, State |
+            Sort-Object FeatureName)
+        return $feats
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$feats = @($output | Where-Object { $null -ne $_ })
+        if ($feats.Count -eq 0) {
+            Write-GUI " -> No enabled Optional Features found.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Optional Feature Name"; Property = "FeatureName"; Width = 680 }
+            @{ Header = "State";                 Property = "State";       Width = 160 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Windows Optional Features" `
+            -Description "Select enabled Optional Features to disable (e.g., Legacy Components, SMB1, Hypervisor modules)." `
+            -Data $feats -Columns $cols -PrimaryButtonText "Disable Selected Features"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Optional feature configuration cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($feat in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
+                try {
+                    Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+                    $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Failed to disable $($feat.FeatureName): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Optional Features processing completed.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+# ------------------------------------------
+# Z2: UI INITIALIZATION (DEBLOAT & PACKAGE INSPECTORS)
 # ------------------------------------------
 function Initialize-Z2UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tabApps = New-Object System.Windows.Forms.TabPage
-    $tabApps.Text = "Bloatware"
-    $tabApps.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $tabApps.Text = "Debloat"
+    $tabApps.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
     $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-    # 1. OneDrive
-    $rowOneDrive = New-UltixActionRow -Parent $tabApps -Y 20 `
+    # 1. OneDrive Amputation
+    $rowOneDrive = New-UltixActionRow -Parent $tabApps -Y 20 -MainRGB @(55, 58, 64) `
         -Text "Uninstall and Deprovision OneDrive" `
-        -MainRGB @(60, 60, 100) `
         -Description "Completely uninstalls OneDrive, burns its keys across all loaded HKEY_USERS hives, and physically deletes folders across all user profiles." `
         -AuditDescription "AUDIT: Scans for active OneDrive installers, multi-profile HKEY_USERS startup keys, and residual folders." `
         -OnClick ({
@@ -3007,10 +4444,22 @@ function Initialize-Z2UI {
             Invoke-UltixAuditFlow -ScannerFunction "Get-OneDriveState" -AuditLabel "OneDrive" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
         }.GetNewClosure())
 
-    # 2. Capabilities (FOD)
-    $rowCaps = New-UltixActionRow -Parent $tabApps -Y 70 `
-        -Text "Remove System Features (FOD)" `
-        -Description "Interactive removal of optional built-in Features on Demand (FOD) in a background CBS thread." `
+    # 2. Aggressive Bloatware & AI Removal (64 Appx + Recall/Copilot)
+    $rowBloat = New-UltixActionRow -Parent $tabApps -Y 70 -MainRGB @(135, 50, 50) `
+        -Text "Aggressive Bloatware & AI Removal" `
+        -Description "Aggressive, interactive removal of 64 UWP bloatware targets and Windows Recall/Copilot AI telemetry from the system." `
+        -AuditDescription "AUDIT: Scans the system for target Appx Bloatware, Recall payloads, and prints a detailed footprint report." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ModalTitle "WinUltix - Bloatware & AI Removal" -ModalDescription "Select components to remove. Detected items are checked by default." -ExecutorFunction "Invoke-RemoveBloatware" -ControlsToDisable $allTabButtons.ToArray()
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
+        }.GetNewClosure())
+
+    # 3. Capabilities (FOD Preset)
+    $rowCaps = New-UltixActionRow -Parent $tabApps -Y 120 -MainRGB @(55, 58, 64) `
+        -Text "Remove System Features (FOD Preset)" `
+        -Description "Interactive removal of 14 unnecessary built-in Features on Demand (Steps Recorder, Quick Assist, WordPad, Fax, Hello Face) in a background CBS thread." `
         -AuditDescription "AUDIT: Verifies installed unnecessary Capabilities (FOD)." `
         -OnClick ({
             Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ModalTitle "WinUltix - FOD Removal" -ModalDescription "Select features to remove." -ExecutorFunction "Invoke-RemoveCapabilities" -ControlsToDisable $allTabButtons.ToArray()
@@ -3019,23 +4468,10 @@ function Initialize-Z2UI {
             Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
         }.GetNewClosure())
 
-    # 3. Aggressive Bloatware (Appx)
-    $rowBloat = New-UltixActionRow -Parent $tabApps -Y 120 `
-        -Text "Aggressive Bloatware Removal (Appx)" `
-        -Description "Aggressive, interactive removal of 64 UWP bloatware targets and Windows Recall/AI telemetry from the system." `
-        -AuditDescription "AUDIT: Scans the system for target Appx Bloatware, Recall payloads, and prints a detailed footprint report." `
-        -OnClick ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ModalTitle "WinUltix - Bloatware Removal" -ModalDescription "Select components to remove. Detected items are checked by default." -ExecutorFunction "Invoke-RemoveBloatware" -ControlsToDisable $allTabButtons.ToArray()
-        }.GetNewClosure()) `
-        -OnAudit ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
-        }.GetNewClosure())
-
     # 4. Appx Garbage Collector
-    $rowGC = New-UltixActionRow -Parent $tabApps -Y 170 `
-        -Text "Run Appx Garbage Collector" `
-        -MainRGB @(100, 80, 40) `
-        -Description "Resolves transitive Appx dependency graphs and removes orphaned frameworks in a background thread." `
+    $rowGC = New-UltixActionRow -Parent $tabApps -Y 170 -MainRGB @(55, 58, 64) `
+        -Text "Run Appx Framework Garbage Collector" `
+        -Description "Resolves transitive Appx dependency graphs and removes orphaned UWP frameworks in a background thread." `
         -AuditDescription "AUDIT: Scans and lists all orphaned frameworks and base packages that can be safely removed." `
         -OnClick ({
             Invoke-UltixAuditFlow -ScannerFunction "Get-GarbageCollectorState" -AuditLabel "Garbage Collector" -ModalTitle "WinUltix - Garbage Collector" -ModalDescription "Select orphaned packages to remove." -ExecutorFunction "Invoke-GarbageCollector" -ControlsToDisable $allTabButtons.ToArray() -SkipModalIfClean
@@ -3045,9 +4481,8 @@ function Initialize-Z2UI {
         }.GetNewClosure())
 
     # 5. CBS Capability Stubs
-    $rowStubs = New-UltixActionRow -Parent $tabApps -Y 220 `
+    $rowStubs = New-UltixActionRow -Parent $tabApps -Y 220 -MainRGB @(55, 58, 64) `
         -Text "Purge Capability Stubs (CBS)" `
-        -MainRGB @(100, 60, 100) `
         -Description "Scans and eradicates underlying CBS Stub packages to permanently declutter the Windows Capabilities list." `
         -AuditDescription "AUDIT: Queries CBS registry/payload directly for active stubs." `
         -OnClick ({
@@ -3057,22 +4492,62 @@ function Initialize-Z2UI {
             Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilityStubState" -AuditLabel "CBS Stubs" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
         }.GetNewClosure())
 
-    foreach ($row in @($rowOneDrive, $rowCaps, $rowBloat, $rowGC, $rowStubs)) {
+    # 6. Manual Package & Feature Inspectors (Sortable Grids)
+    $lblInspect = New-Object System.Windows.Forms.Label
+    $lblInspect.Text = "Manual Package & Feature Inspectors (Sortable Grids)"
+    $lblInspect.Location = New-Object System.Drawing.Point(15, 272)
+    $lblInspect.Size = New-Object System.Drawing.Size(370, 18)
+    $lblInspect.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblInspect.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+
+    $lblWarnInspect = New-Object System.Windows.Forms.Label
+    $lblWarnInspect.Text = "[!] MANUAL INSPECTORS ONLY -- DO NOT SELECT ALL!`r`nFor targeted inspection of what remains after presets."
+    $lblWarnInspect.Location = New-Object System.Drawing.Point(15, 293)
+    $lblWarnInspect.Size = New-Object System.Drawing.Size(370, 40)
+    $lblWarnInspect.BackColor = [System.Drawing.Color]::FromArgb(255, 58, 35, 20)
+    $lblWarnInspect.ForeColor = [System.Drawing.Color]::Gold
+    $lblWarnInspect.BorderStyle = "FixedSingle"
+    $lblWarnInspect.TextAlign = "MiddleCenter"
+    $lblWarnInspect.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $tabApps.Controls.AddRange(@($lblInspect, $lblWarnInspect))
+
+    $btnAppxUser = New-UltixButton -Parent $tabApps -X 15 -Y 342 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Appx (User Accounts)" `
+        -Description "MANUAL INSPECTOR: Opens a table of all remaining installed Appx packages. Do NOT blindly delete all!" `
+        -OnClick ({ Show-AppxGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnAppxImg = New-UltixButton -Parent $tabApps -X 205 -Y 342 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Appx (Base Image)" `
+        -Description "MANUAL INSPECTOR: Opens a table of Provisioned Appx packages cached in the Windows image." `
+        -OnClick ({ Show-AppxProvGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnCapsGrid = New-UltixButton -Parent $tabApps -X 15 -Y 392 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Capabilities (Full FOD)" `
+        -Description "MANUAL INSPECTOR: Scans all installed Features on Demand (FOD) for selective manual removal." `
+        -OnClick ({ Show-CapsGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnOptGrid = New-UltixButton -Parent $tabApps -X 205 -Y 392 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Optional Features (DISM)" `
+        -Description "MANUAL INSPECTOR: Scans enabled Windows Optional Features (SMB1, Hypervisor, Legacy Components) for selective disabling." `
+        -OnClick ({ Show-OptFeaturesGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    foreach ($row in @($rowOneDrive, $rowBloat, $rowCaps, $rowGC, $rowStubs)) {
         $allTabButtons.AddRange($row.Controls)
     }
+    $allTabButtons.AddRange([System.Windows.Forms.Control[]]@($btnAppxUser, $btnAppxImg, $btnCapsGrid, $btnOptGrid))
 
     $TabControl.Controls.Add($tabApps)
 }
 # <<< END INJECTED: Z2_Bloatware.ps1 <<<
 
 
-# Z3_Registry: Main registry engine (Invoke-ApplyRegistry) featuring dedicated revert modals. Manages UI tweaks, telemetry blocks, gaming optimizations (VBS/HVCI, GameDVR), and implements Software Restriction Policies (SRP).
+# Z3_Registry: OS Tweaks, Taskbar (with UCPD.sys bypass), native 3-icon Start Menu compiler (with 26H2 Classic List view), File Explorer, Modern Standby S0, 7-Point Power & Display Optimizer, 1:1 Raw Mouse Input, and Extreme Gaming Registry.
 # >>> INJECTED: Z3_Registry.ps1 <<<
 # ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE (v3.0.0)
-# Z3_Registry: Main registry engine (Invoke-ApplyRegistry). Modulates UI (classic taskbar, Start menu), disables telemetry and data collection, optimizes background services (Edge, Defender), applies gaming tweaks (MMCSS, MPO, Flip Model, disabling VBS/HVCI, GameDVR), enforces Dual-Layer SRP+IFEO execution locks, and disables mouse acceleration.
+# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE (v3.1.0)
+# Z3_Registry: OS Tweaks, Taskbar (with UCPD.sys bypass), native 3-icon Start Menu compiler (with 26H2 Classic List view), File Explorer, Modern Standby S0, 7-Point Power & Display Optimizer, 1:1 Raw Mouse Input, and Extreme Gaming Registry.
 # ==========================================
 
 # ------------------------------------------
@@ -3169,6 +4644,9 @@ function Get-RegState_Taskbar {
         @{ UIDisplayName = "Start Menu: Disable Web Search (Forces local-only, faster search)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "DisableSearchBoxSuggestions"; Expected = 1; Default = 0; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Start Menu: Hide Recommended Section"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "HideRecommendedSection"; Expected = 1; Default = 0; Type = "DWord"; RestartShell = $true }
         @{ UIDisplayName = "Start Menu: Disable Recent Docs History"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "NoRecentDocsHistory"; Expected = 1; Default = 0; Type = "DWord" }
+        @{ UIDisplayName = "Start Menu: Force Classic Alphabetical List (Disables 26H2 Category Tiles)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"; Name = "AllAppsViewMode"; Expected = 2; Default = 0; Type = "DWord"; RestartShell = $true }
+        @{ UIDisplayName = "Start Menu: Hide Recently Opened Files & Jump Lists"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "Start_TrackDocs"; Expected = 0; Default = 1; Type = "DWord" }
+        @{ UIDisplayName = "Start Menu: Hide Recently Added & Most Used Apps"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "Start_TrackProgs"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Start Menu: Disable Search Highlights (Bing bloat)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "EnableSearchBoxSearchHighlights"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Start Menu: Disable Tailored Search Suggestions"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowTailoredSearch"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Widgets: Disable News & Interests (Saves RAM/Network)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"; Name = "AllowNewsAndInterests"; Expected = 0; Default = 1; AltName = "DisableWidgetsBoard"; AltExpected = 1; Type = "DWord"; RestartShell = $true }
@@ -3287,7 +4765,7 @@ function Get-RegState_Gaming {
         @{ UIDisplayName = "Kernel: Disable Paging Executive (Keeps core system in RAM)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS: System Responsiveness (Allocate 100% CPU to Games)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Expected = 0; Default = 20; Type = "DWord" }
         @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; ValidValues = @(4294967295, -1); Type = "DWord" }
-        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; Type = "DWord" }
+        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(40, 38, 42, 22, 24); Type = "DWord" }
         @{ UIDisplayName = "Power: Disable Windows Power Throttling globally"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; Name = "PowerThrottlingOff"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
@@ -3652,251 +5130,11 @@ function Invoke-ApplyRegistry {
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
     Write-GUI " -> $CategoryName registry modifications completed ($Operation)."
 }
-
 # ------------------------------------------
-# Z3: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z3: START MENU NATIVE COMPILATION & POWER/DISPLAY TUNER (MOVED FROM Z4)
 # ------------------------------------------
-function Initialize-Z3UI {
-    param([System.Windows.Forms.TabControl]$TabControl)
-
-    $tabReg = New-Object System.Windows.Forms.TabPage
-    $tabReg.Text = "Registry"
-    $tabReg.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
-
-    $invokeRegCategory = {
-        param(
-            [string]$ScannerFn,
-            [string]$CategoryName,
-            [string]$ModalTitle,
-            [string]$AuditHeader,
-            [switch]$RefreshShell,
-            [switch]$AuditOnly
-        )
-        $auditData = & $ScannerFn
-        if ($AuditOnly) {
-            Write-GUI "--- AUDIT: $AuditHeader ---"
-            $detected = @($auditData | Where-Object { $_.IsDetected })
-            if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" }
-            } else {
-                Write-GUI "  [OK] Optimized."
-            }
-            Write-GUI ""
-            return
-        }
-
-        $modalOutput = Show-ActionModal -Title $ModalTitle -Description "Select tweaks to apply or revert." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
-            Invoke-ApplyRegistry -SelectedItems $modalOutput.Items -CategoryName $CategoryName -Operation $modalOutput.Action
-            if ($RefreshShell) {
-                Update-ShellEnvironment -ModifiedItems $modalOutput.Items
-            }
-            Write-GUI ""
-        }
-    }.GetNewClosure()
-
-    # 1. Taskbar & Start Menu
-    [void](New-UltixActionRow -Parent $tabReg -Y 20 `
-        -Text "Taskbar and Start Menu" `
-        -Description "Aligns the taskbar to the left, kills Bing assistants, and hides widgets." `
-        -AuditDescription "AUDIT: Verifies taskbar alignment policy, Start Menu layouts, and Bing locks." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -RefreshShell }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -AuditOnly }.GetNewClosure()))
-
-    # 2. File Explorer
-    [void](New-UltixActionRow -Parent $tabReg -Y 70 `
-        -Text "File Explorer and Context Menu" `
-        -Description "Restores the full context menu, launches folder processes in isolation." `
-        -AuditDescription "AUDIT: Verifies the presence of classic context menu and Explorer performance flags." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -RefreshShell }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -AuditOnly }.GetNewClosure()))
-
-    # 3. OS Annoyances
-    [void](New-UltixActionRow -Parent $tabReg -Y 120 `
-        -Text "OS Annoyances (AutoRun / Sticky Keys)" `
-        -Description "Deactivates AutoPlay and Accessibility shortcuts (Sticky Keys)." `
-        -AuditDescription "AUDIT: Verifies AutoPlay and Sticky Keys blockade." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_Annoyances" "Annoyances" "WinUltix - OS Annoyances" "OS Annoyances" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Annoyances" "Annoyances" "WinUltix - OS Annoyances" "OS Annoyances" -AuditOnly }.GetNewClosure()))
-
-    # 4. Privacy
-    [void](New-UltixActionRow -Parent $tabReg -Y 170 `
-        -Text "Privacy and Background Apps (AppPrivacy)" `
-        -Description "Blocks telemetry, background UWP apps execution, and limits Edge processes." `
-        -AuditDescription "AUDIT: Checks the registry for telemetry, Edge, and background execution blocks." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_Privacy" "Privacy" "WinUltix - Privacy Policies" "Privacy Policies" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Privacy" "Privacy" "WinUltix - Privacy Policies" "Privacy Policies" -AuditOnly }.GetNewClosure()))
-
-    # 5. Boot & Security
-    [void](New-UltixActionRow -Parent $tabReg -Y 220 `
-        -Text "Boot and WPBT (BIOS/UEFI Block)" `
-        -Description "Disables Fast Boot, OneDrive, RDP, and blocks software injections from BIOS/UEFI (WPBT)." `
-        -AuditDescription "AUDIT: Verifies kernel hibernation logic (Fast Boot), WPBT, and RDP." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_SystemBoot" "SystemBoot" "WinUltix - Boot & Security" "Boot & Security" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_SystemBoot" "SystemBoot" "WinUltix - Boot & Security" "Boot & Security" -AuditOnly }.GetNewClosure()))
-
-    # 6. Mouse
-    [void](New-UltixActionRow -Parent $tabReg -Y 270 `
-        -Text "Hard Mouse Acceleration Disable (Raw Input)" `
-        -MainRGB @(60, 100, 150) -AuditRGB @(60, 100, 150) `
-        -Description "Pure 1:1 input. Hard-disables 'Enhance pointer precision' to eliminate system smoothing." `
-        -AuditDescription "AUDIT: Scans registry keys for system pointer acceleration." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_Mouse" "Mouse" "WinUltix - Raw Input Enforcer" "Mouse Acceleration" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Mouse" "Mouse" "WinUltix - Raw Input Enforcer" "Mouse Acceleration" -AuditOnly }.GetNewClosure()))
-
-    # 7. Gaming
-    [void](New-UltixActionRow -Parent $tabReg -Y 320 `
-        -Text "Hardware and Gaming (Extreme)" `
-        -MainRGB @(150, 60, 60) -AuditRGB @(150, 60, 60) `
-        -Description "Enforces MMCSS priorities, disables GameDVR, enabling maximum hardware performance." `
-        -AuditDescription "AUDIT: Verifies MMCSS limits, CPU priority, and HAGS acceleration." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" -AuditOnly }.GetNewClosure()))
-
-    # 8. SRP Execution Locks (Main + [+], [-], [?])
-    $btnRegSRP = New-UltixButton -Parent $tabReg -X 15 -Y 420 -Width 240 -Height 40 -RGB @(60, 60, 60) `
-        -Text "Execution Blocks (SRP/Legacy Pro)" `
-        -Description "NATIVE KERNEL LOCK (Pro/Enterprise Only): Generates legacy Software Restriction Policies to block execution. May not work on Home editions or future OS builds."
-
-    $btnAddSRP = New-UltixButton -Parent $tabReg -X 260 -Y 420 -Width 40 -Height 40 -RGB @(60, 100, 60) `
-        -Text "+" `
-        -Description "ADD CUSTOM TARGET: Browse for an .exe file to add to your custom SRP block list." `
-        -OnClick {
-            $dlg = New-Object System.Windows.Forms.OpenFileDialog
-            $dlg.Filter = "Executables (*.exe)|*.exe"
-            $dlg.Title = "Select Executable to Block (SRP)"
-            $dlg.InitialDirectory = "$env:ProgramFiles"
-            try {
-                if ($dlg.ShowDialog($global:form) -eq [System.Windows.Forms.DialogResult]::OK) {
-                    $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-                    if (-not (Test-Path -LiteralPath $regKey)) { New-Item -Path $regKey -Force | Out-Null }
-                    $exeName = [System.IO.Path]::GetFileName($dlg.FileName)
-                    Set-ItemProperty -LiteralPath $regKey -Name $exeName -Value $dlg.FileName -Type String -Force
-                    Write-GUI " -> Added custom SRP target: $exeName"
-                }
-            } finally {
-                $dlg.Dispose()
-            }
-        }
-
-    $btnClrSRP = New-UltixButton -Parent $tabReg -X 305 -Y 420 -Width 40 -Height 40 -RGB @(100, 60, 60) `
-        -Text "-" `
-        -Description "CLEAR CUSTOM TARGETS: Removes all custom executables from the WinUltix tracking list (does not unlock them if currently applied)." `
-        -OnClick {
-            $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-            if (Test-Path -LiteralPath $regKey) {
-                Remove-Item -LiteralPath $regKey -Force -Recurse | Out-Null
-                Write-GUI " -> Custom SRP tracking database purged."
-            } else {
-                Write-GUI " -> Custom SRP roster is already empty."
-            }
-        }
-
-    $btnAudSRP = New-UltixButton -Parent $tabReg -X 350 -Y 420 -Width 40 -Height 40 -RGB @(80, 80, 80) `
-        -Text "?" `
-        -Description "AUDIT: Verifies active Software Restriction Policies." `
-        -OnClick {
-            Write-GUI "--- AUDIT: Software Restriction Policies ---"
-            $state = Get-RegState_SRP
-            $detected = @($state | Where-Object { $_.IsDetected })
-            if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] To Block: $($d.UIDisplayName)" }
-            } else {
-                Write-GUI "  [OK] Optimized."
-            }
-            Write-GUI ""
-        }
-
-    $btnRegSRP.Add_Click({
-        $auditData = Get-RegState_SRP
-        $modalOutput = Show-ActionModal -Title "WinUltix - SRP & IFEO Lockdown" -Description "Select executables to permanently block via OS policies (Apply = Lock, Revert = Unlock)." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
-            Invoke-ApplySRP -SelectedItems $modalOutput.Items -Operation $modalOutput.Action -ControlsToDisable @($btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP)
-        }
-    }.GetNewClosure())
-
-    $TabControl.Controls.Add($tabReg)
-}
-# <<< END INJECTED: Z3_Registry.ps1 <<<
-
-
-# Z4_Services: Service state management and Task Scheduler control via centralized revert modals. Disables telemetry tasks, configures TCPNoDelay, and enforces strict service operational profiles with improved UI interactivity.
-# >>> INJECTED: Z4_Services.ps1 <<<
-# ==========================================
-# WINULTIX - ULTIMATE SYSTEM TOOLKIT
-# https://github.com/Firever-ultix/WinUltix
-# Z4_SERVICES.PS1 - SERVICES & SYSTEM MODULE (v3.0.0)
-# Z4_Services: Manages services (Set-ProtectedServiceStart with TrustedInstaller DACL escalation), Task Scheduler lockdown, locale-independent Power Plan audits, deterministic Start Menu native compilation (COM AppActivator), Ghost Service sweeping, and Light/Heavy service profiles.
-# ==========================================
-
-# ------------------------------------------
-# Z4: AUDIT HELPERS
-# ------------------------------------------
-
-function Invoke-ServicesAudit {
-    param([array]$Rules)
-    
-    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $total   = $Rules.Count
-    $current = 0
-
-    foreach ($rule in $Rules) {
-        $current++
-        if ($null -ne $UltixSync -and $total -gt 0) {
-            $UltixSync.Progress = [int](($current / $total) * 100)
-        }
-
-        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
-        
-        $isDetected = $true
-        if ($null -eq $currentStart -or $currentStart -eq $rule.ExpectedStart) {
-            $isDetected = $false
-        }
-
-        $results.Add([PSCustomObject]@{
-            UIDisplayName = $rule.UIDisplayName
-            IsDetected    = $isDetected
-            ActionData    = $rule
-        })
-    }
-    return @($results)
-}
-
-# ------------------------------------------
-# Z4: SERVICES & TASKS AUDITS (RUNSPACE-SAFE WORKERS)
-# ------------------------------------------
-function Get-TelemetryTasksState { 
-    if ($null -ne $UltixSync) { $UltixSync.Progress = 15 }
-
-    $rules = @(
-        @{ UIDisplayName = "Task: CEIP (Customer Experience Improvement Program)"; TaskPath = "\Microsoft\Windows\Customer Experience Improvement Program\*"; ExpectedState = "Disabled" }
-        @{ UIDisplayName = "Task: Windows Feedback & Diagnostics"; TaskPath = "\Microsoft\Windows\Feedback\*"; ExpectedState = "Disabled" }
-        @{ UIDisplayName = "Task: Windows Performance Trace"; TaskPath = "\Microsoft\Windows\PerformanceTrace\*"; ExpectedState = "Disabled" }
-        @{ UIDisplayName = "Task: Windows Error Reporting (WER)"; TaskPath = "\Microsoft\Windows\Windows Error Reporting\*"; ExpectedState = "Disabled" }
-        @{ UIDisplayName = "Task: Xbox Live Game Save DataSync"; TaskPath = "\Microsoft\XblGameSave\*"; ExpectedState = "Disabled" }
-    )
-    
-    # Single COM/CIM query instead of querying Get-ScheduledTask 5 times in a loop
-    $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
-    if ($null -ne $UltixSync) { $UltixSync.Progress = 70 }
-    
-    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-    foreach ($rule in $rules) {
-        $activeTasks = @($allTasks | Where-Object { $_.TaskPath -like $rule.TaskPath -and ($_.State -eq 'Ready' -or $_.State -eq 'Running') })
-        
-        $results.Add([PSCustomObject]@{
-            UIDisplayName = $rule.UIDisplayName
-            IsDetected    = ($activeTasks.Count -gt 0)
-            ActionData    = $rule
-        })
-    }
-
-    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
-    return @($results)
-}
-
 function Invoke-StartMenuAudit {
-    Write-GUI "--- AUDIT: Start Menu Pins Database ---"
+    Write-GUI "--- AUDIT: Start Menu Pins & Layout Mode ---"
     $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
     
     if ($null -eq $pkgDir) {
@@ -3919,6 +5157,14 @@ function Invoke-StartMenuAudit {
         Write-GUI "  [OK] Start Menu binary database is not present."
     }
 
+    $viewMode  = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -ErrorAction SilentlyContinue).AllAppsViewMode
+    $trackDocs = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -ErrorAction SilentlyContinue).Start_TrackDocs
+    if ($viewMode -eq 2 -and $trackDocs -eq 0) {
+        Write-GUI "  [OK] All Apps View: Classic Alphabetical List (AllAppsViewMode=2) & Recent Files hidden."
+    } else {
+        Write-GUI "  [!] All Apps View / Recent Files not yet locked to Classic List (Current ViewMode: $(if($null -ne $viewMode){$viewMode}else{'0 - Category Tiles'}))."
+    }
+
     $policyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
     $mdmLock = (Get-ItemProperty -Path $policyPath -Name "ConfigureStartPins_ProviderSet" -ErrorAction SilentlyContinue).ConfigureStartPins_ProviderSet
     if ($mdmLock -eq 1) {
@@ -3928,197 +5174,233 @@ function Invoke-StartMenuAudit {
     }
 }
 
-function Get-ServicesState_Light {
-    $rules = @(
-        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: Windows Error Reporting Service (WerSvc)"; Name = "WerSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
-    )
+function Clear-StartMenu {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 
-    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $total   = $rules.Count
-    $current = 0
+    Write-GUI " -> Initializing deterministic Start Menu reset (3-Icon + Classic List + No Recent Files)..."
+    Update-Progress 5
 
-    foreach ($rule in $rules) {
-        $current++
-        if ($null -ne $UltixSync -and $total -gt 0) {
-            $UltixSync.Progress = [int](($current / $total) * 100)
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        
+        if ($null -eq $pkgDir) {
+            if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] StartMenuExperienceHost package directory not found. Aborting.") }
+            return
         }
-        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
-        $isDetected   = ($null -ne $currentStart -and $currentStart -ne $rule.ExpectedStart)
 
-        $results.Add([PSCustomObject]@{
-            UIDisplayName = $rule.UIDisplayName
-            IsDetected    = $isDetected
-            ActionData    = $rule
-        })
-    }
-    return @($results)
+        $startStatePath   = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
+        $provGuid         = "B5292708-1619-419B-9923-E5D9F3925E71"
+        $enrollmentPath   = "HKLM:\SOFTWARE\Microsoft\Enrollments\$provGuid"
+        $providerPath     = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid\default\Device\Start"
+        $policyDevicePath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
+        $policyLegacyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\device\Start"
+        $policyUserPath   = "HKCU:\Software\Microsoft\PolicyManager\current\user\Start"
+
+        # Minimal 3-icon layout: Microsoft Edge, Windows Settings, File Explorer
+        $cleanPinsJson = '{"pinnedList":[{"desktopAppId":"MSEdge"},{"packagedAppId":"windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"},{"desktopAppId":"Microsoft.Windows.Explorer"}]}'
+
+        $createdEnrollment = $false
+
+        try {
+            # Stage 1: ContentDeliveryManager lockdown + Disable Recent Files & Force Classic List View
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 15
+                $UltixSync.Logs.Enqueue(" -> [1/7] Disabling ContentDeliveryManager, Recent Files & forcing Classic Alphabetical List...")
+            }
+            $cdmPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+            if (Test-Path $cdmPath) {
+                foreach ($cdmName in @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "SubscribedContentEnabled")) {
+                    Set-ItemProperty -Path $cdmPath -Name $cdmName -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+                if (Test-Path "$cdmPath\SuggestedApps") {
+                    Remove-Item -Path "$cdmPath\SuggestedApps" -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $advPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            if (Test-Path $advPath) {
+                Set-ItemProperty -Path $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_Layout" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+
+            $expPolPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
+            if (-not (Test-Path $expPolPath)) { New-Item -Path $expPolPath -Force -ErrorAction SilentlyContinue | Out-Null }
+            Set-ItemProperty -Path $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+            # Purge Recent JumpList AutomaticDestinations & Recent shortcuts
+            $recentDir = "$env:APPDATA\Microsoft\Windows\Recent"
+            if (Test-Path $recentDir) {
+                Get-ChildItem -LiteralPath $recentDir -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -LiteralPath "$recentDir\AutomaticDestinations" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+
+            # Stage 2: Temporary MDM Provider Registration
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 30
+                $UltixSync.Logs.Enqueue(" -> [2/7] Injecting temporary MDM PolicyManager provider context...")
+            }
+            if (-not (Test-Path $enrollmentPath)) {
+                New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
+                $createdEnrollment = $true
+            }
+            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
+            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
+            Set-ItemProperty -Path $enrollmentPath -Name "IsFederated" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $enrollmentPath -Name "ProviderID" -Value "MS DM Server" -Type String -Force
+
+            if (-not (Test-Path $providerPath)) {
+                New-Item -Path $providerPath -Force -ErrorAction Stop | Out-Null
+            }
+            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
+            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
+
+            if (-not (Test-Path $policyDevicePath)) {
+                New-Item -Path $policyDevicePath -Force -ErrorAction Stop | Out-Null
+            }
+            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
+            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
+            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
+
+            # Stage 3: Purge CloudStore caches & lock AllAppsViewMode = 2 (Classic Alphabetical List)
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 45
+                $UltixSync.Logs.Enqueue(" -> [3/7] Purging CloudStore tile grid and enforcing AllAppsViewMode=2 (List View)...")
+            }
+            $cloudStoreRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
+            if (Test-Path $cloudStoreRoot) {
+                Get-ChildItem -Path $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
+                    $_.PSChildName -match "start\.tilegrid|unifiedtile|start\.allapps|start\.properties"
+                } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            $startRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
+            if (Test-Path $startRegPath) {
+                Remove-Item -Path $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -Path $startRegPath -Force -ErrorAction SilentlyContinue | Out-Null
+            # 2 = Classic Alphabetical List View (replaces Windows 11 25H2/26H2 Category Tiles = 0)
+            Set-ItemProperty -Path $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+
+            # Stage 4: Stop shell processes and wipe start*.bin
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 60
+                $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
+            }
+            Stop-Process -Name "StartMenuExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+
+            for ($attempt = 1; $attempt -le 6; $attempt++) {
+                Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -Path $startStatePath -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                }
+                if (-not (Test-Path (Join-Path $startStatePath "start2.bin"))) { break }
+                Start-Sleep -Milliseconds 50
+            }
+
+            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+                Start-Process "explorer.exe"
+                Start-Sleep -Milliseconds 800
+            }
+
+            # Stage 5: Trigger native compilation via Core_Helpers [WinUltix.AppActivator] COM interop
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 75
+                $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
+            }
+            try {
+                $appActivator = New-Object WinUltix.AppActivator
+                [uint32]$activatedPid = 0
+                [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($appActivator)
+            } catch {}
+
+            $compiledBinPath = Join-Path $startStatePath "start2.bin"
+            $elapsed = 0
+            while ($elapsed -lt 4500) {
+                Start-Sleep -Milliseconds 250
+                $elapsed += 250
+                if (Test-Path -LiteralPath $compiledBinPath) {
+                    $fileInfo = Get-Item -LiteralPath $compiledBinPath -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $fileInfo -and $fileInfo.Length -gt 1024) {
+                        Start-Sleep -Milliseconds 600
+                        break
+                    }
+                }
+            }
+
+            if (Test-Path -LiteralPath $compiledBinPath) {
+                $newBinSize = (Get-Item -LiteralPath $compiledBinPath -Force).Length
+                if (-not (Test-Path "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
+                Set-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
+            }
+
+            if ($null -ne $UltixSync) {
+                $UltixSync.Logs.Enqueue("    [OK] Native start2.bin compiled (3-Icon + Classic Alphabetical List + No Recent Files).")
+            }
+        } catch {
+            if ($null -ne $UltixSync) {
+                $UltixSync.Logs.Enqueue("    [!] Error during Start Menu native compilation: $($_.Exception.Message)")
+            }
+        } finally {
+            # Stage 6: Deterministic MDM cleanup so pins remain unlocked
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 90
+                $UltixSync.Logs.Enqueue(" -> [6/7] Stripping temporary MDM PolicyManager locks...")
+            }
+            foreach ($polPath in @($policyDevicePath, $policyLegacyPath, $policyUserPath)) {
+                if (Test-Path -Path $polPath) {
+                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_ProviderSet" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_WinningProvider" -Force -ErrorAction SilentlyContinue
+                }
+            }
+            if (Test-Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid") {
+                Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($createdEnrollment -and (Test-Path $enrollmentPath)) {
+                Remove-Item -Path $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+                Start-Process "explorer.exe"
+            }
+        }
+
+        # Stage 7: Default User provisioning
+        if ($null -ne $UltixSync) {
+            $UltixSync.Progress = 100
+            $UltixSync.Logs.Enqueue(" -> [7/7] Provisioning Default User profile LayoutModification.json...")
+        }
+        $defaultShellPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell"
+        if (-not (Test-Path -Path $defaultShellPath)) {
+            New-Item -Path $defaultShellPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $defaultJsonPath = Join-Path -Path $defaultShellPath -ChildPath "LayoutModification.json"
+        Set-Content -Path $defaultJsonPath -Value $cleanPinsJson -Encoding UTF8 -Force -ErrorAction SilentlyContinue
+
+        $defaultPkgPath = "$env:SystemDrive\Users\Default\AppData\Local\Packages"
+        if (Test-Path -Path $defaultPkgPath) {
+            Get-ChildItem -Path $defaultPkgPath -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                Get-ChildItem -Path (Join-Path $_.FullName "LocalState") -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if ($null -ne $UltixSync) {
+            $UltixSync.Logs.Enqueue("    [OK] Default User LayoutModification.json provisioned.")
+        }
+    } -OnComplete ({
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI ""
+    }.GetNewClosure())
 }
-
-function Get-ServicesState_Heavy {
-    $rules = @(
-        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: Device Inventory Service (InventorySvc)"; Name = "InventorySvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Networking: Connected Devices Platform (CDPSvc)"; Name = "CDPSvc"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Location: Geolocation Service (lfsvc)"; Name = "lfsvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Performance: SysMain / Superfetch - Disables RAM caching (SysMain)"; Name = "SysMain"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "AI: Windows AI Fabric Service (WSAIFabricSvc)"; Name = "WSAIFabricSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Printers: Fax Service (Fax)"; Name = "Fax"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Remote: Remote Registry (RemoteRegistry)"; Name = "RemoteRegistry"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Biometrics: Windows Biometric Service (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Sensors: Sensor Data Service (SensorDataService)"; Name = "SensorDataService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Sensors: Sensor Service (SensorService)"; Name = "SensorService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Sensors: Sensor Monitoring Service (SensrSvc)"; Name = "SensrSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Mobile: Phone Service (PhoneSvc)"; Name = "PhoneSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Network: WWAN AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Search: Windows Search - Disables file indexing (WSearch)"; Name = "WSearch"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Networking: Offline Files (CscService)"; Name = "CscService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Network: Internet Connection Sharing (SharedAccess)"; Name = "SharedAccess"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: WAP Push Message Routing (dmwappushservice)"; Name = "dmwappushservice"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: Windows Error Reporting Service (WerSvc)"; Name = "WerSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Logitech: Lamp Array Service RGB (logi_lamparray_service)"; Name = "logi_lamparray_service"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Updates: Delivery Optimization (DoSvc)"; Name = "DoSvc"; ExpectedStart = 4; DefaultStart = 2 }
-
-        # Diagnostics & SRUM Disk I/O Elimination
-        @{ UIDisplayName = "Diagnostics: Diagnostic Policy Service - Stops SRUM disk logging (DPS)"; Name = "DPS"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Diagnostics: Diagnostic Service Host (WdiServiceHost)"; Name = "WdiServiceHost"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Diagnostics: Diagnostic System Host (WdiSystemHost)"; Name = "WdiSystemHost"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
-
-        # File System & Backup Overhead
-        @{ UIDisplayName = "FileSystem: Distributed Link Tracking Client (TrkWks)"; Name = "TrkWks"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Backup: Windows File History Service (fhsvc)"; Name = "fhsvc"; ExpectedStart = 4; DefaultStart = 3 }
-
-        # Mobile, NFC & Time Zone Bloat
-        @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Mobile: Cellular Time Synchronization (autotimesvc)"; Name = "autotimesvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Location: Auto Time Zone Updater (tzautoupdate)"; Name = "tzautoupdate"; ExpectedStart = 4; DefaultStart = 4 }
-
-        # Legacy Network Discovery (UPnP / SSDP / NetBIOS)
-        @{ UIDisplayName = "Network: SSDP Multicast Discovery (SSDPSRV)"; Name = "SSDPSRV"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Network: UPnP Device Host (upnphost)"; Name = "upnphost"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Network: TCP/IP NetBIOS Helper (lmhosts)"; Name = "lmhosts"; ExpectedStart = 4; DefaultStart = 3 }
-        
-        @{ UIDisplayName = "Xbox: Xbox Live Auth Manager (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Live Game Save (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Live Networking Service (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Accessory Management (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Camera: Windows Camera Frame Server (FrameServer)"; Name = "FrameServer"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 4; DefaultStart = 3 }
-    )
-
-    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $total   = $rules.Count
-    $current = 0
-
-    foreach ($rule in $rules) {
-        $current++
-        if ($null -ne $UltixSync -and $total -gt 0) {
-            $UltixSync.Progress = [int](($current / $total) * 100)
-        }
-        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
-        $isDetected   = ($null -ne $currentStart -and $currentStart -ne $rule.ExpectedStart)
-
-        $results.Add([PSCustomObject]@{
-            UIDisplayName = $rule.UIDisplayName
-            IsDetected    = $isDetected
-            ActionData    = $rule
-        })
-    }
-    return @($results)
-}
-
-function Get-GhostServicesState {
-    $ghosts = [System.Collections.Generic.List[PSCustomObject]]::new()
-    
-    $runningNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.Name) }
-    Get-CimInstance -ClassName Win32_SystemDriver -Filter "State = 'Running'" -Property Name -ErrorAction SilentlyContinue | ForEach-Object { [void]$runningNames.Add($_.Name) }
-
-    $services = @(Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue)
-    $total = $services.Count
-    $current = 0
-
-    foreach ($svc in $services) {
-        $current++
-        if ($null -ne $UltixSync -and ($current % 15 -eq 0 -or $current -eq $total)) {
-            $UltixSync.Progress = [int](($current / $total) * 100)
-        }
-
-        $svcName = $svc.PSChildName
-        if ($runningNames.Contains($svcName)) { continue }
-
-        $props = Get-ItemProperty -Path $svc.PSPath -Name "ImagePath", "Type" -ErrorAction SilentlyContinue
-        if ($null -eq $props) { continue }
-
-        # Skip Per-User service templates and dynamic session instances (SERVICE_USER_SERVICE bit 0x40)
-        if ($null -ne $props.Type -and (($props.Type -band 0x40) -ne 0)) { continue }
-
-        $imagePath = $props.ImagePath
-        if ([string]::IsNullOrWhiteSpace($imagePath)) { continue }
-        if ($imagePath -match '(?i)^\\(?:Driver|FileSystem)\\') { continue }
-        
-        # Normalize kernel and relative root prefixes (\SystemRoot\, SystemRoot\, \System32\, system32\)
-        $rawPath = $imagePath.Trim()
-        $rawPath = $rawPath -replace '^\\+?\?\?\\+', ''
-        $rawPath = $rawPath -replace '(?i)^\\?SystemRoot\\', "$env:windir\"
-        $rawPath = $rawPath -replace '(?i)^\\?System32\\', "$env:windir\System32\"
-        $rawPath = $rawPath -replace '(?i)^\\?SysWOW64\\', "$env:windir\SysWOW64\"
-        $rawPath = [System.Environment]::ExpandEnvironmentVariables($rawPath).Trim()
-        
-        if ($rawPath -match '^"([^"]+)"') { 
-            $rawPath = $matches[1] 
-        } elseif ($rawPath -match '(?i)^(.+?\.(?:exe|sys|dll))(?:$|\s)') {
-            $rawPath = $matches[1]
-        } else { 
-            $rawPath = $rawPath.Split(' ')[0] 
-        }
-        
-        if (-not [System.IO.Path]::IsPathRooted($rawPath)) {
-            $candidateWinDir = Join-Path -Path $env:windir -ChildPath $rawPath
-            $candidateSys32  = Join-Path -Path "$env:windir\System32" -ChildPath $rawPath
-            $candidateDrv    = Join-Path -Path "$env:windir\System32\drivers" -ChildPath $rawPath
-            
-            if (Test-Path -LiteralPath $candidateWinDir -PathType Leaf) { $rawPath = $candidateWinDir }
-            elseif (Test-Path -LiteralPath $candidateSys32 -PathType Leaf) { $rawPath = $candidateSys32 }
-            elseif (Test-Path -LiteralPath $candidateDrv -PathType Leaf) { $rawPath = $candidateDrv }
-            else { $rawPath = $candidateWinDir }
-        }
-        
-        if (-not (Test-Path -LiteralPath $rawPath -PathType Leaf)) {
-            $ghosts.Add([PSCustomObject]@{
-                Name          = $svcName
-                Path          = $rawPath
-                UIDisplayName = "Ghost: $svcName (Missing: $rawPath)"
-                IsDetected    = $true
-            })
-        }
-    }
-    return $ghosts
-}
-
-# ------------------------------------------
-# Z4: SERVICES & SYSTEM ENGINE
-# ------------------------------------------
 
 function Get-PowerDisplayState {
     if ($null -ne $UltixSync) { $UltixSync.Progress = 10 }
@@ -4247,12 +5529,331 @@ function Invoke-ApplyPowerDisplay {
 
         powercfg.exe /setactive SCHEME_CURRENT 2>$null
         if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
-    } -OnComplete {
+    } -OnComplete ({
         param($nullOut)
         Update-Progress 0
         Write-GUI " -> Power & Display subsystem configuration completed ($Operation).`n"
-    }.GetNewClosure()
+    }.GetNewClosure())
 }
+
+# ------------------------------------------
+# Z3: UI INITIALIZATION (TWEAKS, SHELL, POWER & GAMING)
+# ------------------------------------------
+function Initialize-Z3UI {
+    param([System.Windows.Forms.TabControl]$TabControl)
+
+    $tabReg = New-Object System.Windows.Forms.TabPage
+    $tabReg.Text = "Tweaks"
+    $tabReg.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
+
+    $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+
+    $invokeRegCategory = ({
+        param(
+            [string]$ScannerFn,
+            [string]$CategoryName,
+            [string]$ModalTitle,
+            [string]$AuditHeader,
+            [switch]$RefreshShell,
+            [switch]$AuditOnly
+        )
+        $auditData = & $ScannerFn
+        if ($AuditOnly) {
+            Write-GUI "--- AUDIT: $AuditHeader ---"
+            $detected = @($auditData | Where-Object { $_.IsDetected })
+            if ($detected.Count -gt 0) {
+                foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" }
+            } else {
+                Write-GUI "  [OK] Optimized."
+            }
+            Write-GUI ""
+            return
+        }
+
+        $modalOutput = Show-ActionModal -Title $ModalTitle -Description "Select tweaks to apply or revert." -AuditResults $auditData -EnableRevert
+        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
+            Invoke-ApplyRegistry -SelectedItems $modalOutput.Items -CategoryName $CategoryName -Operation $modalOutput.Action
+            if ($RefreshShell) {
+                Update-ShellEnvironment -ModifiedItems $modalOutput.Items
+            }
+            Write-GUI ""
+        }
+    }.GetNewClosure())
+
+    # 1. Taskbar & Start Menu
+    $rowTaskbar = New-UltixActionRow -Parent $tabReg -Y 20 -MainRGB @(55, 58, 64) `
+        -Text "Taskbar and Start Menu Tweaks" `
+        -Description "Aligns the taskbar to the left, kills Bing search assistants, disables notifications bloat, and hides Widgets (with UCPD.sys bypass)." `
+        -AuditDescription "AUDIT: Verifies taskbar alignment policy, Start Menu layouts, Widgets state, and Bing locks." `
+        -OnClick ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -RefreshShell }.GetNewClosure()) `
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -AuditOnly }.GetNewClosure())
+
+    # 2. Reset Start Menu Layout (3-Icon Clean)
+    $rowStartMenu = New-UltixActionRow -Parent $tabReg -Y 70 -MainRGB @(55, 58, 64) `
+        -Text "Reset Start Menu Layout (Clean 3-Icon)" `
+        -Description "Wipes promotional Start Menu tiles (start2.bin) and compiles a clean 3-icon layout (Edge, Settings, Explorer) with zero MDM locks left behind." `
+        -AuditDescription "AUDIT: Scans the size of the current Start Menu layout database (start2.bin) and checks for residual MDM locks." `
+        -OnClick ({
+            $msgText = "This action will permanently wipe your Start Menu pins and layout database.`n`nStartMenuExperienceHost will be restarted in the background (System Tray remains intact).`n`nDo you want to proceed?"
+            $msgResult = [System.Windows.Forms.MessageBox]::Show($msgText, "WinUltix - Reset Start Menu", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+                Clear-StartMenu -ControlsToDisable $allTabButtons.ToArray()
+            } else {
+                Write-GUI " -> Start Menu reset aborted by user.`n"
+            }
+        }.GetNewClosure()) `
+        -OnAudit ({ Invoke-StartMenuAudit; Write-GUI "" }.GetNewClosure())
+
+    # 3. File Explorer & Context Menu
+    $rowExplorer = New-UltixActionRow -Parent $tabReg -Y 120 -MainRGB @(55, 58, 64) `
+        -Text "File Explorer and Context Menu" `
+        -Description "Restores the classic Windows 10 right-click context menu, shows file extensions, unpins OneDrive, and runs folder windows in a separate process." `
+        -AuditDescription "AUDIT: Verifies classic context menu CLSID registration and File Explorer performance flags." `
+        -OnClick ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -RefreshShell }.GetNewClosure()) `
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -AuditOnly }.GetNewClosure())
+
+    # 4. OS Annoyances (Modern Standby S0 / Sticky Keys / AutoPlay)
+    $rowAnnoy = New-UltixActionRow -Parent $tabReg -Y 170 -MainRGB @(55, 58, 64) `
+        -Text "OS Annoyances (Modern Standby / Keys)" `
+        -Description "Disables Modern Standby S0 (forces hardware S3 sleep), blocks AutoPlay across all drives, and disables Sticky/Filter/Toggle Keys popups." `
+        -AuditDescription "AUDIT: Verifies Modern Standby S0 override, AutoPlay policy, and Sticky Keys blockade." `
+        -OnClick ({ & $invokeRegCategory "Get-RegState_Annoyances" "Annoyances" "WinUltix - OS Annoyances" "OS Annoyances" }.GetNewClosure()) `
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Annoyances" "Annoyances" "WinUltix - OS Annoyances" "OS Annoyances" -AuditOnly }.GetNewClosure())
+
+    # 5. Optimize Power & Display (7-Point)
+    $rowPower = New-UltixActionRow -Parent $tabReg -Y 220 -MainRGB @(55, 58, 64) `
+        -Text "Optimize Power and Display (7-Point)" `
+        -Description "7-Point Power & Display tuner: Disables Hibernation (hiberfil.sys), Sleep/SATA spin-down, USB Selective Suspend (protects DACs/8K mice), PCIe ASPM, and OLED CABC dimming." `
+        -AuditDescription "AUDIT: Verifies active Power Plan timeouts, USB Selective Suspend, PCIe ASPM, CABC, and Hibernation state." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ModalTitle "WinUltix - Power & Display Optimizer" -ModalDescription "Select power and display parameters to enforce or revert to Windows defaults." -ExecutorFunction "Invoke-ApplyPowerDisplay" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Unoptimized"
+        }.GetNewClosure())
+
+    # 6. Hard Mouse Acceleration Disable (1:1 Raw Input)
+    $rowMouse = New-UltixActionRow -Parent $tabReg -Y 270 -MainRGB @(45, 85, 125) `
+        -Text "Hard Mouse Acceleration Disable (1:1)" `
+        -Description "Enforces pure 1:1 raw pointer input by disabling 'Enhance pointer precision' and zeroing acceleration thresholds." `
+        -AuditDescription "AUDIT: Scans HKCU\Control Panel\Mouse for pointer acceleration thresholds." `
+        -OnClick ({ & $invokeRegCategory "Get-RegState_Mouse" "Mouse" "WinUltix - Raw Input Enforcer" "Mouse Acceleration" }.GetNewClosure()) `
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Mouse" "Mouse" "WinUltix - Raw Input Enforcer" "Mouse Acceleration" -AuditOnly }.GetNewClosure())
+
+    # 7. Hardware and Gaming (Extreme)
+    $rowGaming = New-UltixActionRow -Parent $tabReg -Y 320 -MainRGB @(135, 50, 50) `
+        -Text "Hardware and Gaming Registry (Extreme)" `
+        -Description "Enforces MMCSS gaming thread priorities, disables GameDVR, disables Multiplane Overlay (MPO - fixes VRR/OLED flicker), enables Flip Model, and tunes VBS/HVCI." `
+        -AuditDescription "AUDIT: Verifies MMCSS limits, MPO state, GameDVR, HAGS, and VBS/HVCI flags." `
+        -OnClick ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" }.GetNewClosure()) `
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" -AuditOnly }.GetNewClosure())
+
+    foreach ($row in @($rowTaskbar, $rowStartMenu, $rowExplorer, $rowAnnoy, $rowPower, $rowMouse, $rowGaming)) {
+        $allTabButtons.AddRange($row.Controls)
+    }
+
+    $TabControl.Controls.Add($tabReg)
+}
+# <<< END INJECTED: Z3_Registry.ps1 <<<
+
+
+# Z4_Services: Symmetrically revertible Office (Light) and Gaming (Heavy) service profiles, Telemetry Scheduled Tasks lockdown, and 3 interactive managers (System Services, Scheduled Tasks, and Deep Startup Manager).
+# >>> INJECTED: Z4_Services.ps1 <<<
+# ==========================================
+# WINULTIX - ULTIMATE SYSTEM TOOLKIT
+# https://github.com/Firever-ultix/WinUltix
+# Z4_SERVICES.PS1 - SERVICES & SYSTEM MODULE (v3.1.0)
+# Z4_Services: Symmetrically revertible Office (Light) and Gaming (Heavy) service profiles, Telemetry Scheduled Tasks lockdown, and 3 interactive managers (System Services, Scheduled Tasks, and Deep Startup Manager).
+# ==========================================
+
+# ------------------------------------------
+# Z4: AUDIT HELPERS
+# ------------------------------------------
+
+function Invoke-ServicesAudit {
+    param([array]$Rules)
+    
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $total   = $Rules.Count
+    $current = 0
+
+    foreach ($rule in $Rules) {
+        $current++
+        if ($null -ne $UltixSync -and $total -gt 0) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+
+        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
+        
+        $isDetected = $true
+        if ($null -eq $currentStart -or $currentStart -eq $rule.ExpectedStart) {
+            $isDetected = $false
+        }
+
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        })
+    }
+    return @($results)
+}
+
+# ------------------------------------------
+# Z4: SERVICES & TASKS AUDITS (RUNSPACE-SAFE WORKERS)
+# ------------------------------------------
+function Get-TelemetryTasksState { 
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 15 }
+
+    $rules = @(
+        @{ UIDisplayName = "Task: CEIP (Customer Experience Improvement Program)"; TaskPath = "\Microsoft\Windows\Customer Experience Improvement Program\*"; ExpectedState = "Disabled" }
+        @{ UIDisplayName = "Task: Windows Feedback & Diagnostics"; TaskPath = "\Microsoft\Windows\Feedback\*"; ExpectedState = "Disabled" }
+        @{ UIDisplayName = "Task: Windows Performance Trace"; TaskPath = "\Microsoft\Windows\PerformanceTrace\*"; ExpectedState = "Disabled" }
+        @{ UIDisplayName = "Task: Windows Error Reporting (WER)"; TaskPath = "\Microsoft\Windows\Windows Error Reporting\*"; ExpectedState = "Disabled" }
+        @{ UIDisplayName = "Task: Xbox Live Game Save DataSync"; TaskPath = "\Microsoft\XblGameSave\*"; ExpectedState = "Disabled" }
+    )
+    
+    # Single COM/CIM query instead of querying Get-ScheduledTask 5 times in a loop
+    $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 70 }
+    
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($rule in $rules) {
+        $activeTasks = @($allTasks | Where-Object { $_.TaskPath -like $rule.TaskPath -and ($_.State -eq 'Ready' -or $_.State -eq 'Running') })
+        
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = ($activeTasks.Count -gt 0)
+            ActionData    = $rule
+        })
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($results)
+}
+
+function Get-ServicesState_Light {
+    $rules = @(
+        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Windows Error Reporting Service (WerSvc)"; Name = "WerSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
+    )
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $total   = $rules.Count
+    $current = 0
+
+    foreach ($rule in $rules) {
+        $current++
+        if ($null -ne $UltixSync -and $total -gt 0) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
+        $isDetected   = ($null -ne $currentStart -and $currentStart -ne $rule.ExpectedStart)
+
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        })
+    }
+    return @($results)
+}
+
+function Get-ServicesState_Heavy {
+    $rules = @(
+        @{ UIDisplayName = "Telemetry: Connected User Experiences (DiagTrack)"; Name = "DiagTrack"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Device Inventory Service (InventorySvc)"; Name = "InventorySvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Networking: Connected Devices Platform (CDPSvc)"; Name = "CDPSvc"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Location: Geolocation Service (lfsvc)"; Name = "lfsvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Performance: SysMain / Superfetch - Disables RAM caching (SysMain)"; Name = "SysMain"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "AI: Windows AI Fabric Service (WSAIFabricSvc)"; Name = "WSAIFabricSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Printers: Fax Service (Fax)"; Name = "Fax"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Remote: Remote Registry (RemoteRegistry)"; Name = "RemoteRegistry"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Biometrics: Windows Biometric Service (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Sensors: Sensor Data Service (SensorDataService)"; Name = "SensorDataService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Sensors: Sensor Service (SensorService)"; Name = "SensorService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Sensors: Sensor Monitoring Service (SensrSvc)"; Name = "SensrSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Mobile: Phone Service (PhoneSvc)"; Name = "PhoneSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: WWAN AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Search: Windows Search - Disables file indexing (WSearch)"; Name = "WSearch"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Networking: Offline Files (CscService)"; Name = "CscService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: Internet Connection Sharing (SharedAccess)"; Name = "SharedAccess"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: WAP Push Message Routing (dmwappushservice)"; Name = "dmwappushservice"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Windows Error Reporting Service (WerSvc)"; Name = "WerSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Logitech: Lamp Array Service RGB (logi_lamparray_service)"; Name = "logi_lamparray_service"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Updates: Delivery Optimization (DoSvc)"; Name = "DoSvc"; ExpectedStart = 4; DefaultStart = 2 }
+
+        # Diagnostics & SRUM Disk I/O Elimination
+        @{ UIDisplayName = "Diagnostics: Diagnostic Policy Service - Stops SRUM disk logging (DPS)"; Name = "DPS"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Diagnostics: Diagnostic Service Host (WdiServiceHost)"; Name = "WdiServiceHost"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Diagnostics: Diagnostic System Host (WdiSystemHost)"; Name = "WdiSystemHost"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
+
+        # File System & Backup Overhead
+        @{ UIDisplayName = "FileSystem: Distributed Link Tracking Client (TrkWks)"; Name = "TrkWks"; ExpectedStart = 4; DefaultStart = 2 }
+        @{ UIDisplayName = "Backup: Windows File History Service (fhsvc)"; Name = "fhsvc"; ExpectedStart = 4; DefaultStart = 3 }
+
+        # Mobile, NFC & Time Zone Bloat
+        @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Mobile: Cellular Time Synchronization (autotimesvc)"; Name = "autotimesvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Location: Auto Time Zone Updater (tzautoupdate)"; Name = "tzautoupdate"; ExpectedStart = 4; DefaultStart = 3 }
+
+        # Legacy Network Discovery (UPnP / SSDP / NetBIOS)
+        @{ UIDisplayName = "Network: SSDP Multicast Discovery (SSDPSRV)"; Name = "SSDPSRV"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: UPnP Device Host (upnphost)"; Name = "upnphost"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: TCP/IP NetBIOS Helper (lmhosts)"; Name = "lmhosts"; ExpectedStart = 4; DefaultStart = 3 }
+        
+        @{ UIDisplayName = "Xbox: Xbox Live Auth Manager (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Xbox: Xbox Live Game Save (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Xbox: Xbox Live Networking Service (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Xbox: Xbox Accessory Management (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Camera: Windows Camera Frame Server (FrameServer)"; Name = "FrameServer"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 4; DefaultStart = 3 }
+    )
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $total   = $rules.Count
+    $current = 0
+
+    foreach ($rule in $rules) {
+        $current++
+        if ($null -ne $UltixSync -and $total -gt 0) {
+            $UltixSync.Progress = [int](($current / $total) * 100)
+        }
+        $currentStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($rule.Name)" -Name "Start" -ErrorAction SilentlyContinue).Start
+        $isDetected   = ($null -ne $currentStart -and $currentStart -ne $rule.ExpectedStart)
+
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = $rule.UIDisplayName
+            IsDetected    = $isDetected
+            ActionData    = $rule
+        })
+    }
+    return @($results)
+}
+
+# ------------------------------------------
+# Z4: SERVICES & TASKS ENGINE
+# ------------------------------------------
 function Invoke-ApplyTasks { 
     param(
         [Parameter(Mandatory=$true)][array]$SelectedItems,
@@ -4293,11 +5894,11 @@ function Invoke-ApplyTasks {
                 }
             }
         }
-    } -OnComplete {
+    } -OnComplete ({
         param($nullOut)
         Update-Progress 0
         Write-GUI " -> Telemetry tasks lockdown completed ($Operation).`n"
-    }.GetNewClosure()
+    }.GetNewClosure())
 }
 
 function Invoke-ApplyServices {
@@ -4343,7 +5944,6 @@ function Invoke-ApplyServices {
                 if ($Op -eq 'Apply') {
                     Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                 }
-                # Uses Set-ProtectedServiceStart pre-hydrated by Core_Helpers InitialSessionState
                 Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue
             } catch {
                 if ($null -ne $UltixSync) {
@@ -4351,593 +5951,16 @@ function Invoke-ApplyServices {
                 }
             }
         }
-    } -OnComplete {
+    } -OnComplete ({
         param($nullOut)
         Update-Progress 0
         Write-GUI " -> $ProfileName services enforcement completed ($Operation).`n"
-    }.GetNewClosure()
-}
-
-function Clear-StartMenu {
-    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
-
-    Write-GUI " -> Initializing deterministic Start Menu reset (Pinning: Edge, Settings, Explorer)..."
-    Update-Progress 5
-
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-        
-        if ($null -eq $pkgDir) {
-            if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] StartMenuExperienceHost package directory not found. Aborting.") }
-            return
-        }
-
-        $startStatePath   = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
-        $provGuid         = "B5292708-1619-419B-9923-E5D9F3925E71"
-        $enrollmentPath   = "HKLM:\SOFTWARE\Microsoft\Enrollments\$provGuid"
-        $providerPath     = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid\default\Device\Start"
-        $policyDevicePath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
-        $policyLegacyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\device\Start"
-        $policyUserPath   = "HKCU:\Software\Microsoft\PolicyManager\current\user\Start"
-
-        # Minimal 3-icon layout: Microsoft Edge, Windows Settings, File Explorer
-        $cleanPinsJson = '{"pinnedList":[{"desktopAppId":"MSEdge"},{"packagedAppId":"windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"},{"desktopAppId":"Microsoft.Windows.Explorer"}]}'
-
-        $createdEnrollment = $false
-
-        try {
-            # Stage 1: ContentDeliveryManager lockdown
-            if ($null -ne $UltixSync) {
-                $UltixSync.Progress = 15
-                $UltixSync.Logs.Enqueue(" -> [1/7] Disabling ContentDeliveryManager silent tile injection...")
-            }
-            $cdmPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-            if (Test-Path $cdmPath) {
-                foreach ($cdmName in @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "SubscribedContentEnabled")) {
-                    Set-ItemProperty -Path $cdmPath -Name $cdmName -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                }
-                if (Test-Path "$cdmPath\SuggestedApps") {
-                    Remove-Item -Path "$cdmPath\SuggestedApps" -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            }
-
-            # Stage 2: Temporary MDM Provider Registration
-            if ($null -ne $UltixSync) {
-                $UltixSync.Progress = 30
-                $UltixSync.Logs.Enqueue(" -> [2/7] Injecting temporary MDM PolicyManager provider context...")
-            }
-            if (-not (Test-Path $enrollmentPath)) {
-                New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
-                $createdEnrollment = $true
-            }
-            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
-            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
-            Set-ItemProperty -Path $enrollmentPath -Name "IsFederated" -Value 0 -Type DWord -Force
-            Set-ItemProperty -Path $enrollmentPath -Name "ProviderID" -Value "MS DM Server" -Type String -Force
-
-            if (-not (Test-Path $providerPath)) {
-                New-Item -Path $providerPath -Force -ErrorAction Stop | Out-Null
-            }
-            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
-            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
-
-            if (-not (Test-Path $policyDevicePath)) {
-                New-Item -Path $policyDevicePath -Force -ErrorAction Stop | Out-Null
-            }
-            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
-            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
-            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
-
-            # Stage 3: Purge CloudStore caches
-            if ($null -ne $UltixSync) {
-                $UltixSync.Progress = 45
-                $UltixSync.Logs.Enqueue(" -> [3/7] Purging CloudStore tile grid and Start registry caches...")
-            }
-            $cloudStoreRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
-            if (Test-Path $cloudStoreRoot) {
-                Get-ChildItem -Path $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
-                    $_.PSChildName -match "start\.tilegrid|unifiedtile|start\.allapps|start\.properties"
-                } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            }
-
-            $startRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
-            if (Test-Path $startRegPath) {
-                Remove-Item -Path $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
-            }
-
-            # Stage 4: Stop shell processes and wipe start*.bin
-            if ($null -ne $UltixSync) {
-                $UltixSync.Progress = 60
-                $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
-            }
-            Stop-Process -Name "StartMenuExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 300
-
-            for ($attempt = 1; $attempt -le 6; $attempt++) {
-                Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
-                Get-ChildItem -Path $startStatePath -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-                }
-                if (-not (Test-Path (Join-Path $startStatePath "start2.bin"))) { break }
-                Start-Sleep -Milliseconds 50
-            }
-
-            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
-                Start-Process "explorer.exe"
-                Start-Sleep -Milliseconds 800
-            }
-
-            # Stage 5: Trigger native compilation via Core_Helpers [WinUltix.AppActivator] COM interop
-            if ($null -ne $UltixSync) {
-                $UltixSync.Progress = 75
-                $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
-            }
-            try {
-                $appActivator = New-Object WinUltix.AppActivator
-                [uint32]$activatedPid = 0
-                [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
-                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($appActivator)
-            } catch {}
-
-            $compiledBinPath = Join-Path $startStatePath "start2.bin"
-            $elapsed = 0
-            while ($elapsed -lt 4500) {
-                Start-Sleep -Milliseconds 250
-                $elapsed += 250
-                if (Test-Path -LiteralPath $compiledBinPath) {
-                    $fileInfo = Get-Item -LiteralPath $compiledBinPath -Force -ErrorAction SilentlyContinue
-                    if ($null -ne $fileInfo -and $fileInfo.Length -gt 1024) {
-                        Start-Sleep -Milliseconds 600
-                        break
-                    }
-                }
-            }
-
-            if (Test-Path -LiteralPath $compiledBinPath) {
-                $newBinSize = (Get-Item -LiteralPath $compiledBinPath -Force).Length
-                if (-not (Test-Path "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
-                Set-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
-            }
-
-            if ($null -ne $UltixSync) {
-                $UltixSync.Logs.Enqueue("    [OK] Native start2.bin compiled (Pinned: Edge, Settings, File Explorer).")
-            }
-        } catch {
-            if ($null -ne $UltixSync) {
-                $UltixSync.Logs.Enqueue("    [!] Error during Start Menu native compilation: $($_.Exception.Message)")
-            }
-        } finally {
-            # Stage 6: Deterministic MDM cleanup so pins remain unlocked
-            if ($null -ne $UltixSync) {
-                $UltixSync.Progress = 90
-                $UltixSync.Logs.Enqueue(" -> [6/7] Stripping temporary MDM PolicyManager locks...")
-            }
-            foreach ($polPath in @($policyDevicePath, $policyLegacyPath, $policyUserPath)) {
-                if (Test-Path -Path $polPath) {
-                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_ProviderSet" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_WinningProvider" -Force -ErrorAction SilentlyContinue
-                }
-            }
-            if (Test-Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid") {
-                Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid" -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            if ($createdEnrollment -and (Test-Path $enrollmentPath)) {
-                Remove-Item -Path $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
-            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
-                Start-Process "explorer.exe"
-            }
-        }
-
-        # Stage 7: Default User provisioning
-        if ($null -ne $UltixSync) {
-            $UltixSync.Progress = 100
-            $UltixSync.Logs.Enqueue(" -> [7/7] Provisioning Default User profile LayoutModification.json...")
-        }
-        $defaultShellPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell"
-        if (-not (Test-Path -Path $defaultShellPath)) {
-            New-Item -Path $defaultShellPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-        }
-
-        $defaultJsonPath = Join-Path -Path $defaultShellPath -ChildPath "LayoutModification.json"
-        Set-Content -Path $defaultJsonPath -Value $cleanPinsJson -Encoding UTF8 -Force -ErrorAction SilentlyContinue
-
-        $defaultPkgPath = "$env:SystemDrive\Users\Default\AppData\Local\Packages"
-        if (Test-Path -Path $defaultPkgPath) {
-            Get-ChildItem -Path $defaultPkgPath -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                Get-ChildItem -Path (Join-Path $_.FullName "LocalState") -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-            }
-        }
-        if ($null -ne $UltixSync) {
-            $UltixSync.Logs.Enqueue("    [OK] Default User LayoutModification.json provisioned.")
-        }
-    } -OnComplete {
-        param($nullOut)
-        Update-Progress 0
-        Write-GUI ""
-    }
-}
-
-function Remove-GhostServices {
-    param([Parameter(Mandatory=$true)][array]$SelectedItems)
-    
-    $total = $SelectedItems.Count
-    if ($total -eq 0) { return }
-    $current = 0
-
-    foreach ($item in $SelectedItems) {
-        $current++
-        Update-Progress ([int](($current / $total) * 100))
-        
-        Write-GUI " -> Removing: $($item.Name)"
-        # SCM deletion might fail if driver is loaded (unlikely for ghosts) or locked. Registry brute-force is cleaner here.
-        Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($item.Name)" -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    
-    Update-Progress 0
-    Write-GUI " -> Ghost services purged from system registry.`n"
+    }.GetNewClosure())
 }
 
 # ------------------------------------------
-# Z4: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z4: INTERACTIVE SERVICES, TASKS & STARTUP MANAGERS (MOVED FROM Z5)
 # ------------------------------------------
-function Initialize-Z4UI {
-    param([System.Windows.Forms.TabControl]$TabControl)
-
-    $tabServices = New-Object System.Windows.Forms.TabPage
-    $tabServices.Text = "Services"
-    $tabServices.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
-
-    $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
-
-    # 1. Telemetry Scheduled Tasks
-    $rowTelemetry = New-UltixActionRow -Parent $tabServices -Y 20 `
-        -Text "Disable Telemetry Tasks (Scheduler)" `
-        -Description "Paralyzes the Task Scheduler. Disables analytics, error reporting, Windows AI, and feedback." `
-        -AuditDescription "AUDIT: Verifies if telemetry tasks are active in the scheduler." `
-        -OnClick ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-TelemetryTasksState" -AuditLabel "Scheduled Tasks" -ModalTitle "WinUltix - Scheduled Tasks Lockdown" -ModalDescription "Select tasks to modify (Apply = Disable, Revert = Enable)." -ExecutorFunction "Invoke-ApplyTasks" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
-        }.GetNewClosure()) `
-        -OnAudit ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-TelemetryTasksState" -AuditLabel "Scheduled Tasks" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Active"
-        }.GetNewClosure())
-
-    # 2. Start Menu Reset
-    $rowStartMenu = New-UltixActionRow -Parent $tabServices -Y 70 `
-        -Text "Reset Start Menu Layout (Unpin All)" `
-        -Description "Wipes the internal Start Menu database (start2.bin) and removes MDM locks." `
-        -AuditDescription "AUDIT: Scans the size of the current Start Menu layout database." `
-        -OnClick ({
-            $msgText = "This action will permanently wipe your Start Menu pins and layout database.`n`nStartMenuExperienceHost will be restarted in the background (System Tray remains intact).`n`nDo you want to proceed?"
-            $msgResult = [System.Windows.Forms.MessageBox]::Show($msgText, "WinUltix - Destructive Action", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
-                Clear-StartMenu -ControlsToDisable $allTabButtons.ToArray()
-            } else {
-                Write-GUI " -> Start Menu reset aborted by user.`n"
-            }
-        }.GetNewClosure()) `
-        -OnAudit ({ Invoke-StartMenuAudit; Write-GUI "" })
-
-    # 3. Power & Display
-    $rowPower = New-UltixActionRow -Parent $tabServices -Y 120 `
-        -Text "Optimize Power and Display" `
-        -Description "Interactive Power & Display tuner: Hibernation, Sleep/Monitor timeouts, SATA spin-down, USB Selective Suspend, PCIe ASPM, and OLED/CABC dimming." `
-        -AuditDescription "AUDIT: Verifies active Power Plan timeouts, USB Selective Suspend, PCIe ASPM, and Hibernation state." `
-        -OnClick ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ModalTitle "WinUltix - Power & Display Optimizer" -ModalDescription "Select power and display parameters to enforce or revert to Windows defaults." -ExecutorFunction "Invoke-ApplyPowerDisplay" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
-        }.GetNewClosure()) `
-        -OnAudit ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Unoptimized"
-        }.GetNewClosure())
-
-    # 4. Ghost Services & Drivers
-    $rowGhostSvc = New-UltixActionRow -Parent $tabServices -Y 170 `
-        -Text "Cleanup Ghost Services" `
-        -Description "Scans registry for services/drivers pointing to non-existent binaries and removes them." `
-        -AuditDescription "AUDIT: Detects orphaned service/driver registrations." `
-        -OnClick ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-GhostServicesState" -AuditLabel "Ghost Services & Drivers" -ModalTitle "WinUltix - Ghost Services Cleanup" -ModalDescription "Select orphaned items to remove." -ExecutorFunction "Remove-GhostServices" -ControlsToDisable $allTabButtons.ToArray() -SkipModalIfClean
-        }.GetNewClosure()) `
-        -OnAudit ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-GhostServicesState" -AuditLabel "Ghost Services & Drivers" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Found"
-        }.GetNewClosure())
-
-    # 5. Office Services Profile (Light)
-    $rowSvcLight = New-UltixActionRow -Parent $tabServices -Y 270 `
-        -Text "Background Services: OFFICE PROFILE" `
-        -MainRGB @(60, 100, 150) `
-        -Description "OFFICE PROFILE: Kills telemetry and tracking, leaving print and network services intact." `
-        -AuditDescription "AUDIT: Verifies standard telemetry and background bloat services." `
-        -OnClick ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Light" -AuditLabel "Services (Office Profile)" -ModalTitle "WinUltix - Office Services Profile" -ModalDescription "Select services to configure. Unoptimized services are checked by default." -ExecutorFunction "Invoke-ApplyServices" -ExecutorExtraParams @{ ProfileName = "Office Profile" } -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
-        }.GetNewClosure()) `
-        -OnAudit ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Light" -AuditLabel "Services (Office Profile)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "To Disable"
-        }.GetNewClosure())
-
-    # 6. Gaming Services Profile (Heavy)
-    $rowSvcHeavy = New-UltixActionRow -Parent $tabServices -Y 320 `
-        -Text "Background Services: GAMING PROFILE" `
-        -MainRGB @(150, 60, 60) `
-        -Description "GAMING PROFILE: Disables almost everything in the background, including print spooler and file indexing." `
-        -AuditDescription "AUDIT: Verifies heavy background services including indexer and print spooler." `
-        -OnClick ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Heavy" -AuditLabel "Services (Gaming Profile)" -ModalTitle "WinUltix - Gaming Services Profile" -ModalDescription "Select services to configure. Unoptimized services are checked by default." -ExecutorFunction "Invoke-ApplyServices" -ExecutorExtraParams @{ ProfileName = "Gaming Profile" } -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
-        }.GetNewClosure()) `
-        -OnAudit ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Heavy" -AuditLabel "Services (Gaming Profile)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "To Configure"
-        }.GetNewClosure())
-
-    foreach ($row in @($rowTelemetry, $rowStartMenu, $rowPower, $rowGhostSvc, $rowSvcLight, $rowSvcHeavy)) {
-        $allTabButtons.AddRange($row.Controls)
-    }
-
-    $TabControl.Controls.Add($tabServices)
-}
-# <<< END INJECTED: Z4_Services.ps1 <<<
-
-
-# Z5_Utilities: Interactive tools and applets via Show-UltixGridModal for selective package and service management. Includes DNS Enforcer and classic Windows applet launchers.
-# >>> INJECTED: Z5_Utilities.ps1 <<<
-# ==========================================
-# WINULTIX - ULTIMATE SYSTEM TOOLKIT
-# https://github.com/Firever-ultix/WinUltix
-# Z5_UTILITIES.PS1 - UTILITIES & APPLETS MODULE (v3.0.0)
-# Z5_Utilities: Asynchronous interactive system inspectors (Appx, Provisioned, FOD, Optional Features, Services with TrustedInstaller DACL escalation, Deep Startup Manager with StartupApproved binary decoding, Scheduled Tasks Inspector for 3rd-party/bloat/ghost tasks), Dual-Stack IPv4/IPv6 + Native DoH DNS Enforcer, and classic Windows applet launchers.
-# ==========================================
-
-# ------------------------------------------
-# Z5: ASYNC INTERACTIVE GRIDS (APPX, PROV, FOD, OPT, SERVICES)
-# ------------------------------------------
-function Show-AppxGrid {
-    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
-
-    Write-GUI " -> Scanning installed Appx packages (Background Thread)..."
-    Update-Progress 20
-
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender"
-        
-        $pkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
-            Where-Object { $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedPattern } |
-            Select-Object Name, PackageFullName, PackageFamilyName, IsFramework, Status |
-            Sort-Object Name)
-        return $pkgs
-    } -OnComplete {
-        param($output)
-        Update-Progress 0
-        [array]$pkgs = @($output | Where-Object { $null -ne $_ })
-        if ($pkgs.Count -eq 0) {
-            Write-GUI " -> No removable Appx packages found.`n"
-            return
-        }
-
-        $cols = @(
-            @{ Header = "Package Name";    Property = "Name";            Width = 310 }
-            @{ Header = "Framework";       Property = "IsFramework";     Width = 90  }
-            @{ Header = "Status";          Property = "Status";          Width = 95  }
-            @{ Header = "PackageFullName"; Property = "PackageFullName"; Width = 350 }
-        )
-
-        $res = Show-UltixGridModal -Title "WinUltix - Installed Appx Packages" `
-            -Description "Select Appx packages to remove across all accounts. Protected gaming/system runtimes are hidden." `
-            -Data $pkgs -Columns $cols -PrimaryButtonText "Remove Selected Appx"
-
-        if ($null -eq $res -or $res.Items.Count -eq 0) {
-            Write-GUI " -> Appx removal cancelled.`n"
-            return
-        }
-
-        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
-            param([array]$Selected)
-            $total = $Selected.Count
-            $current = 0
-            foreach ($app in $Selected) {
-                $current++
-                $UltixSync.Progress = [int](($current / $total) * 100)
-                $UltixSync.Logs.Enqueue(" -> Removing Appx: $($app.Name)")
-                try {
-                    try {
-                        Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
-                    } catch {
-                        Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
-                    }
-                    if (-not [string]::IsNullOrWhiteSpace($app.PackageFamilyName)) {
-                        $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$($app.PackageFamilyName)"
-                        if (-not (Test-Path $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
-                    }
-                    $UltixSync.Logs.Enqueue("    [OK] $($app.Name) removed and deprovisioned.")
-                } catch {
-                    $UltixSync.Logs.Enqueue("    [!] Error removing $($app.Name): $($_.Exception.Message)")
-                }
-            }
-        } -OnComplete {
-            param($nullOut)
-            Update-Progress 0
-            Write-GUI " -> Selected Appx removal routine finished.`n"
-        }
-    }.GetNewClosure()
-}
-
-function Show-AppxProvGrid {
-    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
-
-    Write-GUI " -> Scanning Provisioned Appx image packages (Background Thread)..."
-    Update-Progress 20
-
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop"
-        
-        $pkgs = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -notmatch $protectedPattern } |
-            Select-Object DisplayName, Version, PackageName |
-            Sort-Object DisplayName)
-        return $pkgs
-    } -OnComplete {
-        param($output)
-        Update-Progress 0
-        [array]$pkgs = @($output | Where-Object { $null -ne $_ })
-        if ($pkgs.Count -eq 0) {
-            Write-GUI " -> No provisioned packages found in system image.`n"
-            return
-        }
-
-        $cols = @(
-            @{ Header = "Display Name"; Property = "DisplayName"; Width = 340 }
-            @{ Header = "Version";      Property = "Version";     Width = 140 }
-            @{ Header = "Package Name"; Property = "PackageName"; Width = 365 }
-        )
-
-        $res = Show-UltixGridModal -Title "WinUltix - Provisioned Appx Image Packages" `
-            -Description "Select base-image packages to deprovision so they never install for new users." `
-            -Data $pkgs -Columns $cols -PrimaryButtonText "Deprovision Selected"
-
-        if ($null -eq $res -or $res.Items.Count -eq 0) {
-            Write-GUI " -> Deprovisioning cancelled.`n"
-            return
-        }
-
-        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
-            param([array]$Selected)
-            $total = $Selected.Count
-            $current = 0
-            foreach ($app in $Selected) {
-                $current++
-                $UltixSync.Progress = [int](($current / $total) * 100)
-                $UltixSync.Logs.Enqueue(" -> Deprovisioning: $($app.DisplayName)")
-                try {
-                    Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
-                    $UltixSync.Logs.Enqueue("    [OK] $($app.DisplayName) deprovisioned.")
-                } catch {
-                    $UltixSync.Logs.Enqueue("    [!] Error deprovisioning $($app.DisplayName): $($_.Exception.Message)")
-                }
-            }
-        } -OnComplete {
-            param($nullOut)
-            Update-Progress 0
-            Write-GUI " -> Selected Provisioned packages removed from image.`n"
-        }
-    }.GetNewClosure()
-}
-
-function Show-CapsGrid {
-    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
-
-    Write-GUI " -> Querying installed Windows Capabilities / FOD (Background Thread)..."
-    Update-Progress 25
-
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $caps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue |
-            Where-Object { $_.State -eq 'Installed' } |
-            Select-Object Name, State |
-            Sort-Object Name)
-        return $caps
-    } -OnComplete {
-        param($output)
-        Update-Progress 0
-        [array]$caps = @($output | Where-Object { $null -ne $_ })
-        if ($caps.Count -eq 0) {
-            Write-GUI " -> No installed Capabilities returned.`n"
-            return
-        }
-
-        $cols = @(
-            @{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 680 }
-            @{ Header = "State";                 Property = "State"; Width = 160 }
-        )
-
-        $res = Show-UltixGridModal -Title "WinUltix - Windows Capabilities (FOD)" `
-            -Description "Select installed Features on Demand (FOD) to uninstall from the OS image." `
-            -Data $caps -Columns $cols -PrimaryButtonText "Uninstall Selected FODs"
-
-        if ($null -eq $res -or $res.Items.Count -eq 0) {
-            Write-GUI " -> Capability removal cancelled.`n"
-            return
-        }
-
-        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
-            param([array]$Selected)
-            $total = $Selected.Count
-            $current = 0
-            foreach ($cap in $Selected) {
-                $current++
-                $UltixSync.Progress = [int](($current / $total) * 100)
-                $UltixSync.Logs.Enqueue(" -> Removing capability: $($cap.Name)")
-                try {
-                    Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
-                    $UltixSync.Logs.Enqueue("    [OK] $($cap.Name) removed.")
-                } catch {
-                    $UltixSync.Logs.Enqueue("    [!] Failed to remove $($cap.Name): $($_.Exception.Message)")
-                }
-            }
-        } -OnComplete {
-            param($nullOut)
-            Update-Progress 0
-            Write-GUI " -> Capability removal finished.`n"
-        }
-    }.GetNewClosure()
-}
-
-function Show-OptFeaturesGrid {
-    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
-
-    Write-GUI " -> Querying enabled Windows Optional Features (Background Thread)..."
-    Update-Progress 25
-
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $feats = @(Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue |
-            Where-Object { $_.State -eq 'Enabled' } |
-            Select-Object FeatureName, State |
-            Sort-Object FeatureName)
-        return $feats
-    } -OnComplete {
-        param($output)
-        Update-Progress 0
-        [array]$feats = @($output | Where-Object { $null -ne $_ })
-        if ($feats.Count -eq 0) {
-            Write-GUI " -> No enabled Optional Features found.`n"
-            return
-        }
-
-        $cols = @(
-            @{ Header = "Optional Feature Name"; Property = "FeatureName"; Width = 680 }
-            @{ Header = "State";                 Property = "State";       Width = 160 }
-        )
-
-        $res = Show-UltixGridModal -Title "WinUltix - Windows Optional Features" `
-            -Description "Select enabled Optional Features to disable (e.g., Legacy Components, SMB1, Hypervisor modules)." `
-            -Data $feats -Columns $cols -PrimaryButtonText "Disable Selected Features"
-
-        if ($null -eq $res -or $res.Items.Count -eq 0) {
-            Write-GUI " -> Optional feature configuration cancelled.`n"
-            return
-        }
-
-        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
-            param([array]$Selected)
-            $total = $Selected.Count
-            $current = 0
-            foreach ($feat in $Selected) {
-                $current++
-                $UltixSync.Progress = [int](($current / $total) * 100)
-                $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
-                try {
-                    Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
-                    $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
-                } catch {
-                    $UltixSync.Logs.Enqueue("    [!] Failed to disable $($feat.FeatureName): $($_.Exception.Message)")
-                }
-            }
-        } -OnComplete {
-            param($nullOut)
-            Update-Progress 0
-            Write-GUI " -> Optional Features processing completed.`n"
-        }
-    }.GetNewClosure()
-}
-
 function Show-ServicesGrid {
     param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 
@@ -4960,7 +5983,7 @@ function Show-ServicesGrid {
             }
         } | Sort-Object Status, Name)
         return $svcs
-    } -OnComplete {
+    } -OnComplete ({
         param($output)
         Update-Progress 0
         [array]$svcs = @($output | Where-Object { $null -ne $_ })
@@ -5010,17 +6033,14 @@ function Show-ServicesGrid {
                     }
                 }
             }
-        } -OnComplete {
+        } -OnComplete ({
             param($nullOut)
             Update-Progress 0
             Write-GUI " -> Service operations completed.`n"
-        }
-    }.GetNewClosure()
+        }.GetNewClosure())
+    }.GetNewClosure())
 }
 
-# ------------------------------------------
-# Z5: DEEP STARTUP INSPECTOR (RUN, RUNONCE, POLICIES, STARTUPAPPROVED)
-# ------------------------------------------
 function Get-StartupState_Worker {
     $startupItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
@@ -5132,7 +6152,7 @@ function Show-StartupGrid {
     Update-Progress 20
 
     $sb = (Get-Command -Name Get-StartupState_Worker).ScriptBlock
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete {
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete ({
         param($output)
         Update-Progress 0
         [array]$items = @($output | Where-Object { $null -ne $_ })
@@ -5168,7 +6188,6 @@ function Show-StartupGrid {
                 $UltixSync.Progress = [int](($current / $total) * 100)
 
                 if ($Action -eq "Primary") {
-                    # Permanent Removal + StartupApproved orphan cleanup
                     $UltixSync.Logs.Enqueue(" -> Deleting startup entry: $($item.Name) [$($item.Location)]")
                     try {
                         if ($item.Type -eq "Registry") {
@@ -5184,7 +6203,6 @@ function Show-StartupGrid {
                         $UltixSync.Logs.Enqueue("    [!] Failed to remove $($item.Name): $($_.Exception.Message)")
                     }
                 } else {
-                    # Non-destructive Toggle via StartupApproved binary header
                     if ([string]::IsNullOrWhiteSpace($item.ApprovedPath)) {
                         $UltixSync.Logs.Enqueue("    [!] $($item.Name) [$($item.Location)] does not support TaskMgr StartupApproved toggling.")
                         continue
@@ -5194,12 +6212,10 @@ function Show-StartupGrid {
                             New-Item -Path $item.ApprovedPath -Force | Out-Null
                         }
                         if ($item.State -match "^Disabled") {
-                            # Enable: 12-byte array starting with 0x02
                             [byte[]]$enableBytes = @(0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
                             Set-ItemProperty -Path $item.ApprovedPath -Name $item.Name -Value $enableBytes -Type Binary -Force -ErrorAction Stop
                             $UltixSync.Logs.Enqueue(" -> [ENABLED]  $($item.Name) [$($item.Location)]")
                         } else {
-                            # Disable: 0x03 header + 3 zero padding bytes + 8-byte UTC FILETIME
                             [byte[]]$headerBytes = @(0x03, 0x00, 0x00, 0x00)
                             [byte[]]$timeBytes   = [BitConverter]::GetBytes([DateTime]::UtcNow.ToFileTimeUtc())
                             [byte[]]$disableBytes = $headerBytes + $timeBytes
@@ -5211,21 +6227,17 @@ function Show-StartupGrid {
                     }
                 }
             }
-        } -OnComplete {
+        } -OnComplete ({
             param($nullOut)
             Update-Progress 0
             Write-GUI " -> Startup configuration updated.`n"
-        }
-    }.GetNewClosure()
+        }.GetNewClosure())
+    }.GetNewClosure())
 }
 
-# ------------------------------------------
-# Z5: SCHEDULED TASKS INSPECTOR (3RD-PARTY, BLOAT & GHOST TASKS)
-# ------------------------------------------
 function Get-ScheduledTasks_Worker {
     $taskItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Resolve whether an MSFT_TaskExecAction binary exists on disk
     function Test-TaskExecutableExists {
         param([string]$RawExecute)
         if ([string]::IsNullOrWhiteSpace($RawExecute)) { return $true }
@@ -5239,7 +6251,6 @@ function Get-ScheduledTasks_Worker {
             $clean = $clean.Split(' ')[0]
         }
 
-        # Ignore shell variables or custom protocol handlers
         if ($clean -match '^\$\(' -or $clean -match '^[a-zA-Z]+://') { return $true }
 
         if ([System.IO.Path]::IsPathRooted($clean)) {
@@ -5253,7 +6264,6 @@ function Get-ScheduledTasks_Worker {
         }
     }
 
-    # Format CIM triggers into concise engineering tags
     function ConvertTo-TriggerSummary {
         param([array]$Triggers)
         if ($null -eq $Triggers -or $Triggers.Count -eq 0) { return "OnDemand" }
@@ -5279,7 +6289,6 @@ function Get-ScheduledTasks_Worker {
         return ($tags -join ", ")
     }
 
-    # Shield WinUltix internal failsafe and critical OS security tasks
     $protectedTaskNames = "^(WinUltix_CPPC_Failsafe|MpIdleTask|Windows Defender.*|BitLocker.*)$"
     $msTelemetryPaths   = "(?i)^\\Microsoft\\Windows\\(Application Experience|Autochk|Customer Experience Improvement Program|DiskDiagnostic|Feedback|Location|Maps|Mobile Broadband Accounts|NetTrace|Power Efficiency Diagnostics|PushToInstall|RetailDemo|CloudExperienceHost|Windows Error Reporting|WaaSMedic)\\"
 
@@ -5299,7 +6308,6 @@ function Get-ScheduledTasks_Worker {
 
         if ($tName -match $protectedTaskNames) { continue }
 
-        # Extract execution action and verify binary presence
         $execAction = $task.Actions | Where-Object { $null -ne $_.Execute -and $_.Execute -ne "" } | Select-Object -First 1
         $cmdLine = ""
         $isGhost = $false
@@ -5320,7 +6328,6 @@ function Get-ScheduledTasks_Worker {
             }
         }
 
-        # Categorize and filter out standard non-telemetry Microsoft\Windows OS internals unless orphaned
         $category = ""
         if ($isGhost) {
             $category = "[GHOST / Missing Exe]"
@@ -5333,7 +6340,6 @@ function Get-ScheduledTasks_Worker {
         } elseif ($tPath -match $msTelemetryPaths -or $tPath -like "\Microsoft\XblGameSave\*") {
             $category = "[MS Telemetry / Bloat]"
         } else {
-            # Core healthy Windows internal task - skip to keep the grid clean and high-signal
             continue
         }
 
@@ -5359,7 +6365,7 @@ function Show-TasksGrid {
     Update-Progress 10
 
     $sb = (Get-Command -Name Get-ScheduledTasks_Worker).ScriptBlock
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete {
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete ({
         param($output)
         Update-Progress 0
         [array]$items = @($output | Where-Object { $null -ne $_ })
@@ -5420,12 +6426,239 @@ function Show-TasksGrid {
                     }
                 }
             }
-        } -OnComplete {
+        } -OnComplete ({
             param($nullOut)
             Update-Progress 0
             Write-GUI " -> Scheduled Tasks operations completed.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+# ------------------------------------------
+# Z4: UI INITIALIZATION (SERVICES, SCHEDULER & AUTORUNS)
+# ------------------------------------------
+function Initialize-Z4UI {
+    param([System.Windows.Forms.TabControl]$TabControl)
+
+    $tabServices = New-Object System.Windows.Forms.TabPage
+    $tabServices.Text = "Services"
+    $tabServices.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
+
+    $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+
+    # 1. Office Services Profile (Light)
+    $rowSvcLight = New-UltixActionRow -Parent $tabServices -Y 20 -MainRGB @(45, 85, 125) `
+        -Text "Background Services: OFFICE PROFILE" `
+        -Description "OFFICE PROFILE (Light): Disables 9 telemetry and diagnostics services while keeping Printing, Windows Search, and LAN sharing 100% intact." `
+        -AuditDescription "AUDIT: Verifies standard telemetry and background bloat services." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Light" -AuditLabel "Services (Office Profile)" -ModalTitle "WinUltix - Office Services Profile" -ModalDescription "Select services to configure. Unoptimized services are checked by default." -ExecutorFunction "Invoke-ApplyServices" -ExecutorExtraParams @{ ProfileName = "Office Profile" } -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Light" -AuditLabel "Services (Office Profile)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "To Disable"
+        }.GetNewClosure())
+
+    # 2. Gaming Services Profile (Heavy)
+    $rowSvcHeavy = New-UltixActionRow -Parent $tabServices -Y 70 -MainRGB @(135, 50, 50) `
+        -Text "Background Services: GAMING PROFILE" `
+        -Description "GAMING PROFILE (Heavy): Symmetrically disables up to 51 background services (SysMain, WSearch, Spooler, DPS/SRUM disk logging, Xbox, Diagnostics)." `
+        -AuditDescription "AUDIT: Verifies 51 heavy background services including indexer, SRUM, and print spooler." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Heavy" -AuditLabel "Services (Gaming Profile)" -ModalTitle "WinUltix - Gaming Services Profile" -ModalDescription "Select services to configure. Unoptimized services are checked by default." -ExecutorFunction "Invoke-ApplyServices" -ExecutorExtraParams @{ ProfileName = "Gaming Profile" } -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-ServicesState_Heavy" -AuditLabel "Services (Gaming Profile)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "To Configure"
+        }.GetNewClosure())
+
+    # 3. Telemetry Scheduled Tasks Preset
+    $rowTelemetry = New-UltixActionRow -Parent $tabServices -Y 120 -MainRGB @(55, 58, 64) `
+        -Text "Disable Telemetry Tasks (Scheduler)" `
+        -Description "Disables 5 core Microsoft telemetry task branches in Task Scheduler: CEIP, Feedback, PerformanceTrace, Windows Error Reporting (WER), and XblGameSave." `
+        -AuditDescription "AUDIT: Verifies if Microsoft telemetry scheduled tasks are active in Task Scheduler." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-TelemetryTasksState" -AuditLabel "Scheduled Tasks" -ModalTitle "WinUltix - Scheduled Tasks Lockdown" -ModalDescription "Select tasks to modify (Apply = Disable, Revert = Enable)." -ExecutorFunction "Invoke-ApplyTasks" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-TelemetryTasksState" -AuditLabel "Scheduled Tasks" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Active"
+        }.GetNewClosure())
+
+    # 4. Interactive Service, Task & Startup Inspectors (Sortable Grids)
+    $lblManagers = New-Object System.Windows.Forms.Label
+    $lblManagers.Text = "Interactive Service, Task & Startup Inspectors"
+    $lblManagers.Location = New-Object System.Drawing.Point(15, 172)
+    $lblManagers.Size = New-Object System.Drawing.Size(370, 18)
+    $lblManagers.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblManagers.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+
+    $lblWarnMgr = New-Object System.Windows.Forms.Label
+    $lblWarnMgr.Text = "[!] MANUAL INSPECTORS ONLY -- DO NOT SELECT ALL!`r`nUse to inspect remaining services/tasks after running profiles."
+    $lblWarnMgr.Location = New-Object System.Drawing.Point(15, 193)
+    $lblWarnMgr.Size = New-Object System.Drawing.Size(370, 40)
+    $lblWarnMgr.BackColor = [System.Drawing.Color]::FromArgb(255, 58, 35, 20)
+    $lblWarnMgr.ForeColor = [System.Drawing.Color]::Gold
+    $lblWarnMgr.BorderStyle = "FixedSingle"
+    $lblWarnMgr.TextAlign = "MiddleCenter"
+    $lblWarnMgr.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $tabServices.Controls.AddRange(@($lblManagers, $lblWarnMgr))
+
+    $btnSvcGrid = New-UltixButton -Parent $tabServices -X 15 -Y 242 -Width 370 -Height 40 -RGB @(45, 85, 125) `
+        -Text "System Services Manager (Interactive Grid)" `
+        -Description "MANUAL INSPECTOR: Sortable dark Services Manager with instant live search. Inspect remaining services (Critical OS services are locked in Red)." `
+        -OnClick ({ Show-ServicesGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnTasksGrid = New-UltixButton -Parent $tabServices -X 15 -Y 292 -Width 370 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Scheduled Tasks Inspector (3rd-Party / Ghosts)" `
+        -Description "MANUAL INSPECTOR: Exposes 3rd-party updaters, Microsoft telemetry bloat, and orphaned [GHOST] tasks pointing to missing .exe files." `
+        -OnClick ({ Show-TasksGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnStartupGrid = New-UltixButton -Parent $tabServices -X 15 -Y 342 -Width 370 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Deep Startup Manager (Run / StartupApproved)" `
+        -Description "MANUAL INSPECTOR: Audits Run, RunOnce, GPO Run, and Startup folders across x64/x86 hives, and decodes Task Manager StartupApproved binary states." `
+        -OnClick ({ Show-StartupGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    foreach ($row in @($rowSvcLight, $rowSvcHeavy, $rowTelemetry)) {
+        $allTabButtons.AddRange($row.Controls)
+    }
+    $allTabButtons.AddRange([System.Windows.Forms.Control[]]@($btnSvcGrid, $btnTasksGrid, $btnStartupGrid))
+
+    $TabControl.Controls.Add($tabServices)
+}
+# <<< END INJECTED: Z4_Services.ps1 <<<
+
+
+# Z5_Utilities: Security & Control module. Privacy & UWP AppPrivacy, Boot & UEFI WPBT block, 4-Layer USB Storage & BadUSB/DMA Perimeter Guard, Dual-Layer SRP+IFEO Execution Locks, Hardened DNS + Native DoH Enforcer, and classic Win32 applets.
+# >>> INJECTED: Z5_Utilities.ps1 <<<
+# ==========================================
+# WINULTIX - ULTIMATE SYSTEM TOOLKIT
+# https://github.com/Firever-ultix/WinUltix
+# Z5_UTILITIES.PS1 - SECURITY, PRIVACY & CONTROL MODULE (v3.1.0)
+# Z5_Utilities: Security & Control module. Privacy & UWP AppPrivacy, Boot & UEFI WPBT block, 4-Layer USB Storage & BadUSB/DMA Perimeter Guard, Dual-Layer SRP+IFEO Execution Locks, Hardened DNS + Native DoH Enforcer, and classic Win32 applets.
+# ==========================================
+
+# ------------------------------------------
+# Z5: USB MASS STORAGE & BADUSB / DMA PERIMETER GUARD
+# ------------------------------------------
+function Get-UsbSecurityState {
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 20 }
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    $remGuidKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\RemovableStorageDevices\{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}"
+
+    # 1. USB Write-Protection (Read-Only Mode for Pendrives & External Disks)
+    $wpVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\StorageDevicePolicies" -Name "WriteProtect" -ErrorAction SilentlyContinue).WriteProtect
+    $denyWritePol = (Get-ItemProperty -Path $remGuidKey -Name "Deny_Write" -ErrorAction SilentlyContinue).Deny_Write
+    $isReadOnlyActive = ($wpVal -eq 1 -and $denyWritePol -eq 1)
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "USB Read-Only Guard: Block Writing to USB Drives (Prevents Ransomware/Data Leak)"
+        IsDetected    = (-not $isReadOnlyActive)
+        ActionData    = @{ Layer = "WriteProtect" }
+    })
+
+    # 2. USB Execute-Deny Policy (Blocks launching .exe payloads from USB sticks)
+    $denyExecPol = (Get-ItemProperty -Path $remGuidKey -Name "Deny_Execute" -ErrorAction SilentlyContinue).Deny_Execute
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "USB Execution Guard: Block Running Executables (.exe) from Removable Drives"
+        IsDetected    = ($denyExecPol -ne 1)
+        ActionData    = @{ Layer = "DenyExecute" }
+    })
+
+    # 3. Hard Lock: Disable USBSTOR & UASPStor Kernel Drivers + Full Removable Storage Policy
+    $usbstorStart  = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
+    $uaspstorStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor" -Name "Start" -ErrorAction SilentlyContinue).Start
+    $denyReadPol   = (Get-ItemProperty -Path $remGuidKey -Name "Deny_Read" -ErrorAction SilentlyContinue).Deny_Read
+    $isHardLocked  = ($usbstorStart -eq 4 -and $uaspstorStart -eq 4 -and $denyReadPol -eq 1)
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "USB Total Blackout: Disable USBSTOR + UASPStor Drivers (Blocks all USB Sticks & SSDs)"
+        IsDetected    = (-not $isHardLocked)
+        ActionData    = @{ Layer = "TotalBlock" }
+    })
+
+    # 4. Anti-BadUSB / Lock-Screen Enumeration & Kernel DMA Guard
+    $dmaLock = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\FVE" -Name "DisableExternalDMAUnderLock" -ErrorAction SilentlyContinue).DisableExternalDMAUnderLock
+    $usbLock = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "DisableUsbEnumerationOnLock" -ErrorAction SilentlyContinue).DisableUsbEnumerationOnLock
+    $isBadUsbLocked = ($dmaLock -eq 1 -and $usbLock -eq 1)
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Anti-BadUSB & DMA Guard: Block New USB/PCIe Device Enumeration While Screen is Locked"
+        IsDetected    = (-not $isBadUsbLocked)
+        ActionData    = @{ Layer = "LockScreenGuard" }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($results)
+}
+
+function Invoke-ApplyUsbSecurity {
+    param(
+        [Parameter(Mandatory=$true)][array]$SelectedItems,
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
+    )
+    if ($SelectedItems.Count -eq 0) { return }
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $Operation) -ScriptBlock {
+        param([array]$Items, [string]$Op)
+        $remGuidKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\RemovableStorageDevices\{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}"
+        $storPolKey = "HKLM:\SYSTEM\CurrentControlSet\Control\StorageDevicePolicies"
+        $fveKey     = "HKLM:\SOFTWARE\Policies\Microsoft\FVE"
+        $pwrKey     = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"
+
+        $verb = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
+
+        foreach ($item in $Items) {
+            $layer = $item.ActionData.Layer
+            $UltixSync.Logs.Enqueue(" -> $verb USB Security Layer: $($item.UIDisplayName)")
+
+            if (-not (Test-Path $remGuidKey)) { New-Item -Path $remGuidKey -Force | Out-Null }
+            if (-not (Test-Path $storPolKey)) { New-Item -Path $storPolKey -Force | Out-Null }
+
+            switch ($layer) {
+                "WriteProtect" {
+                    if ($Op -eq 'Apply') {
+                        Set-ItemProperty -Path $storPolKey -Name "WriteProtect" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                    } else {
+                        Set-ItemProperty -Path $storPolKey -Name "WriteProtect" -Value 0 -Type DWord -Force
+                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                "DenyExecute" {
+                    if ($Op -eq 'Apply') {
+                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Execute" -Value 1 -Type DWord -Force
+                    } else {
+                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Execute" -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                "TotalBlock" {
+                    if ($Op -eq 'Apply') {
+                        Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 4
+                        Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 4
+                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Read" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                    } else {
+                        Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 3
+                        Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 3
+                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Read" -Force -ErrorAction SilentlyContinue
+                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                "LockScreenGuard" {
+                    if (-not (Test-Path $fveKey)) { New-Item -Path $fveKey -Force | Out-Null }
+                    if ($Op -eq 'Apply') {
+                        Set-ItemProperty -Path $fveKey -Name "DisableExternalDMAUnderLock" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -Value 1 -Type DWord -Force
+                    } else {
+                        Remove-ItemProperty -Path $fveKey -Name "DisableExternalDMAUnderLock" -Force -ErrorAction SilentlyContinue
+                        Remove-ItemProperty -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
         }
-    }.GetNewClosure()
+        $UltixSync.Progress = 100
+    } -OnComplete ({
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI " -> USB Perimeter Security configuration completed ($Operation).`n"
+    }.GetNewClosure())
 }
 
 # ------------------------------------------
@@ -5473,7 +6706,6 @@ function Set-CustomDNS {
             }
         }
 
-        # Discover active routed interfaces
         $routedIndices = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty InterfaceIndex -Unique)
 
@@ -5494,7 +6726,6 @@ function Set-CustomDNS {
             $dohV4Root = "$ifSpecBase\$ifGuid\DohInterfaceSettings\Doh"
             $dohV6Root = "$ifSpecBase\$ifGuid\DohInterfaceSettings\Doh6"
 
-            # Wipe previous per-interface DoH bindings first
             if (Test-Path $dohV4Root) { Remove-Item -Path $dohV4Root -Recurse -Force -ErrorAction SilentlyContinue }
             if (Test-Path $dohV6Root) { Remove-Item -Path $dohV6Root -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -5520,7 +6751,6 @@ function Set-CustomDNS {
             try {
                 Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($allServers) -ErrorAction Stop
                 if (-not $UseIPv6) {
-                    # Reset IPv6 DNS to DHCP if user unchecked IPv6 enforcement
                     netsh.exe interface ipv6 set dnsservers name="$($adapter.Name)" source=dhcp 2>$null | Out-Null
                 }
                 $UltixSync.Logs.Enqueue(" -> [$ifName]: Enforced servers: $($allServers -join ', ')")
@@ -5532,7 +6762,6 @@ function Set-CustomDNS {
                 if (-not (Test-Path $wellKnownBase)) { New-Item -Path $wellKnownBase -Force | Out-Null }
 
                 foreach ($ip in $allServers) {
-                    # 1. Register global DoH template in Dnscache well-known store & runtime API
                     $wkKey = "$wellKnownBase\$ip"
                     if (-not (Test-Path $wkKey)) { New-Item -Path $wkKey -Force | Out-Null }
                     Set-ItemProperty -Path $wkKey -Name "Template" -Value $cfg.Template -Type String -Force -ErrorAction SilentlyContinue
@@ -5542,7 +6771,6 @@ function Set-CustomDNS {
                         Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
                     }
 
-                    # 2. Enforce per-interface DoH encryption (DohFlags = 1 QWord)
                     $isV6 = ($ip -match ":")
                     $targetDohKey = if ($isV6) { "$dohV6Root\$ip" } else { "$dohV4Root\$ip" }
                     if (-not (Test-Path $targetDohKey)) { New-Item -Path $targetDohKey -Force | Out-Null }
@@ -5554,12 +6782,12 @@ function Set-CustomDNS {
 
         Clear-DnsClientCache -ErrorAction SilentlyContinue
         $UltixSync.Progress = 100
-    } -OnComplete {
+    } -OnComplete ({
         param($nullOut)
         Update-Progress 0
         Update-DNSLabel
         Write-GUI " -> DNS configuration completed and resolver cache flushed.`n"
-    }
+    }.GetNewClosure())
 }
 
 # ------------------------------------------
@@ -5573,107 +6801,147 @@ function Start-ClassicSysProp  { Start-Process "SystemPropertiesAdvanced.exe" }
 function Start-ClassicPower    { Start-Process "powercfg.cpl" }
 
 # ------------------------------------------
-# Z5: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z5: UI INITIALIZATION (SECURITY, PRIVACY, DNS & APPLETS)
 # ------------------------------------------
 function Initialize-Z5UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
-    $tabUtil = New-Object System.Windows.Forms.TabPage
-    $tabUtil.Text = "Utilities"
-    $tabUtil.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $tabSec = New-Object System.Windows.Forms.TabPage
+    $tabSec.Text = "Security"
+    $tabSec.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
-    # 1. Advanced System Inspectors
-    $lblInspect = New-Object System.Windows.Forms.Label
-    $lblInspect.Text = "WARNING: Advanced System Inspectors"
-    $lblInspect.Location = New-Object System.Drawing.Point(15, 15)
-    $lblInspect.Size = New-Object System.Drawing.Size(370, 20)
-    $lblInspect.ForeColor = [System.Drawing.Color]::OrangeRed
-    $lblInspect.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-    $lblInspect.TextAlign = "MiddleLeft"
+    $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 40 -Width 180 -Height 40 `
-        -Text "Appx (Accounts)" `
-        -Description "Opens a native dark table of installed Appx packages with live filtering and Deprovisioned store locking." `
-        -OnClick { Show-AppxGrid -ControlsToDisable @($this) })
+    $invokeSecReg = ({
+        param(
+            [string]$ScannerFn,
+            [string]$CategoryName,
+            [string]$ModalTitle,
+            [string]$AuditHeader,
+            [switch]$AuditOnly
+        )
+        $auditData = & $ScannerFn
+        if ($AuditOnly) {
+            Write-GUI "--- AUDIT: $AuditHeader ---"
+            $detected = @($auditData | Where-Object { $_.IsDetected })
+            if ($detected.Count -gt 0) {
+                foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" }
+            } else {
+                Write-GUI "  [OK] Optimized."
+            }
+            Write-GUI ""
+            return
+        }
 
-    [void](New-UltixButton -Parent $tabUtil -X 205 -Y 40 -Width 180 -Height 40 `
-        -Text "Appx (Image)" `
-        -Description "Opens a native dark table of Provisioned Appx packages cached in the Windows image." `
-        -OnClick { Show-AppxProvGrid -ControlsToDisable @($this) })
+        $modalOutput = Show-ActionModal -Title $ModalTitle -Description "Select security & privacy policies to apply or revert." -AuditResults $auditData -EnableRevert
+        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
+            Invoke-ApplyRegistry -SelectedItems $modalOutput.Items -CategoryName $CategoryName -Operation $modalOutput.Action
+            Write-GUI ""
+        }
+    }.GetNewClosure())
 
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 90 -Width 180 -Height 40 `
-        -Text "Capabilities (FOD)" `
-        -Description "Asynchronously scans installed Features on Demand (FOD) for selective removal." `
-        -OnClick { Show-CapsGrid -ControlsToDisable @($this) })
+    # 1. Privacy & Background Apps (AppPrivacy)
+    $rowPrivacy = New-UltixActionRow -Parent $tabSec -Y 20 -MainRGB @(55, 58, 64) `
+        -Text "Privacy & Background Apps (AppPrivacy)" `
+        -Description "Blocks OS telemetry, locks 28 UWP background permissions (Camera, Mic, Location, Contacts), disables Edge background boost, and stops ContentDeliveryManager." `
+        -AuditDescription "AUDIT: Checks the registry for telemetry, UWP AppPrivacy, Edge, and ContentDeliveryManager blocks." `
+        -OnClick ({ & $invokeSecReg "Get-RegState_Privacy" "Privacy" "WinUltix - Privacy & AppPrivacy Policies" "Privacy Policies" }.GetNewClosure()) `
+        -OnAudit ({ & $invokeSecReg "Get-RegState_Privacy" "Privacy" "WinUltix - Privacy & AppPrivacy Policies" "Privacy Policies" -AuditOnly }.GetNewClosure())
 
-    [void](New-UltixButton -Parent $tabUtil -X 205 -Y 90 -Width 180 -Height 40 `
-        -Text "Optional Features" `
-        -Description "Asynchronously scans enabled Windows Optional Features to disable unnecessary OS components." `
-        -OnClick { Show-OptFeaturesGrid -ControlsToDisable @($this) })
+    # 2. Boot, SvcHost & WPBT (BIOS/UEFI Block)
+    $rowBoot = New-UltixActionRow -Parent $tabSec -Y 70 -MainRGB @(55, 58, 64) `
+        -Text "Boot, SvcHost & WPBT (BIOS Block)" `
+        -Description "Blocks motherboard BIOS/UEFI binary injection (DisableWpbtExecution), disables Fast Startup hibernation bugs, blocks RDP, and consolidates SvcHost processes." `
+        -AuditDescription "AUDIT: Verifies WPBT BIOS block, Fast Startup, SvcHost RAM threshold, and RDP locks." `
+        -OnClick ({ & $invokeSecReg "Get-RegState_SystemBoot" "SystemBoot" "WinUltix - Boot & Kernel Security" "Boot & Kernel Security" }.GetNewClosure()) `
+        -OnAudit ({ & $invokeSecReg "Get-RegState_SystemBoot" "SystemBoot" "WinUltix - Boot & Kernel Security" "Boot & Kernel Security" -AuditOnly }.GetNewClosure())
 
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 140 -Width 370 -Height 40 `
-        -Text "System Services Inspector" `
-        -Description "Interactive Services Manager. Hard-disable unneeded services or restore them to Manual (Critical boot services are shielded)." `
-        -OnClick { Show-ServicesGrid -ControlsToDisable @($this) })
+    # 3. USB Storage & BadUSB Perimeter Guard
+    $rowUsbGuard = New-UltixActionRow -Parent $tabSec -Y 120 -MainRGB @(135, 50, 50) `
+        -Text "USB Storage & BadUSB Guard (Lockdown)" `
+        -Description "4-Layer USB perimeter defense: Read-Only Write Protection, Execute-Deny (.exe), Full USBSTOR + UASPStor driver blackout, and Lock-Screen BadUSB/DMA guard." `
+        -AuditDescription "AUDIT: Checks USB Write-Protect, USBSTOR/UASPStor driver states, and Lock-Screen DMA/BadUSB policies." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-UsbSecurityState" -AuditLabel "USB Perimeter Security" -ModalTitle "WinUltix - USB Storage & BadUSB Guard" -ModalDescription "Select USB protection layers to enforce (Apply = Lock, Revert = Unlock to Windows Defaults)." -ExecutorFunction "Invoke-ApplyUsbSecurity" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-UsbSecurityState" -AuditLabel "USB Perimeter Security" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Unlocked"
+        }.GetNewClosure())
 
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 190 -Width 370 -Height 40 -RGB @(60, 100, 150) `
-        -Text "Deep Startup Manager (Run / StartupApproved)" `
-        -Description "Audits Run, RunOnce, GPO Run, Startup folders, and decodes TaskMgr StartupApproved binary headers. Supports Toggle or Delete." `
-        -OnClick { Show-StartupGrid -ControlsToDisable @($this) })
+    # 4. Dual-Layer Execution Blocks (SRP + IFEO Kernel Lock) -- Aligned to X = 345 for [?]
+    $btnRegSRP = New-UltixButton -Parent $tabSec -X 15 -Y 170 -Width 235 -Height 40 -RGB @(135, 50, 50) `
+        -Text "Execution Blocks (SRP + IFEO)" `
+        -Description "DUAL-LAYER KERNEL LOCK: Combines Software Restriction Policies (Safer API) with Image File Execution Options (IFEO) to permanently block telemetry or custom .exe files."
 
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 240 -Width 370 -Height 40 -RGB @(100, 60, 120) `
-        -Text "Scheduled Tasks Inspector (3rd-Party / Ghosts)" `
-        -Description "Filters out core OS noise to expose 3rd-party updaters, Microsoft bloat, and orphaned [GHOST] tasks pointing to missing .exe files." `
-        -OnClick { Show-TasksGrid -ControlsToDisable @($this) })
+    $btnAddSRP = New-UltixButton -Parent $tabSec -X 255 -Y 170 -Width 40 -Height 40 -RGB @(45, 95, 60) `
+        -Text "+" `
+        -Description "ADD CUSTOM TARGET: Browse for an .exe file to add to your custom SRP+IFEO block list." `
+        -OnClick {
+            $dlg = New-Object System.Windows.Forms.OpenFileDialog
+            $dlg.Filter = "Executables (*.exe)|*.exe"
+            $dlg.Title = "Select Executable to Block (SRP+IFEO)"
+            $dlg.InitialDirectory = "$env:ProgramFiles"
+            try {
+                if ($dlg.ShowDialog($global:form) -eq [System.Windows.Forms.DialogResult]::OK) {
+                    $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
+                    if (-not (Test-Path -LiteralPath $regKey)) { New-Item -Path $regKey -Force | Out-Null }
+                    $exeName = [System.IO.Path]::GetFileName($dlg.FileName)
+                    Set-ItemProperty -LiteralPath $regKey -Name $exeName -Value $dlg.FileName -Type String -Force
+                    Write-GUI " -> Added custom SRP+IFEO target: $exeName"
+                }
+            } finally {
+                $dlg.Dispose()
+            }
+        }
 
-    # 2. Classic Windows Control Applets
-    $lblClassic = New-Object System.Windows.Forms.Label
-    $lblClassic.Text = "Classic Windows Control Applets"
-    $lblClassic.Location = New-Object System.Drawing.Point(15, 295)
-    $lblClassic.Size = New-Object System.Drawing.Size(370, 20)
-    $lblClassic.ForeColor = [System.Drawing.Color]::DarkGray
+    $btnClrSRP = New-UltixButton -Parent $tabSec -X 300 -Y 170 -Width 40 -Height 40 -RGB @(55, 58, 64) `
+        -Text "-" `
+        -Description "CLEAR CUSTOM TARGETS: Removes all custom executables from the WinUltix tracking list." `
+        -OnClick {
+            $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
+            if (Test-Path -LiteralPath $regKey) {
+                Remove-Item -LiteralPath $regKey -Force -Recurse | Out-Null
+                Write-GUI " -> Custom SRP+IFEO tracking database purged."
+            } else {
+                Write-GUI " -> Custom SRP+IFEO roster is already empty."
+            }
+        }
 
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 320 -Width 180 -Height 40 `
-        -Text "Network Adapters (ncpa)" `
-        -Description "Direct launch of the classic Win32 Network Connections applet (ncpa.cpl)." `
-        -OnClick { Start-ClassicNet })
+    $btnAudSRP = New-UltixButton -Parent $tabSec -X 345 -Y 170 -Width 40 -Height 40 -RGB @(72, 76, 82) `
+        -Text "?" `
+        -Description "AUDIT: Verifies active Software Restriction Policies (SRP) and IFEO kernel locks." `
+        -OnClick {
+            Write-GUI "--- AUDIT: Dual-Layer Execution Locks (SRP + IFEO) ---"
+            $state = Get-RegState_SRP
+            $detected = @($state | Where-Object { $_.IsDetected })
+            if ($detected.Count -gt 0) {
+                foreach ($d in $detected) { Write-GUI "  [!] To Block: $($d.UIDisplayName)" }
+            } else {
+                Write-GUI "  [OK] All target executables are locked."
+            }
+            Write-GUI ""
+        }
 
-    [void](New-UltixButton -Parent $tabUtil -X 205 -Y 320 -Width 180 -Height 40 `
-        -Text "Sound Subsystem (mmsys)" `
-        -Description "Direct launch of playback/recording devices and sample rate properties (mmsys.cpl)." `
-        -OnClick { Start-ClassicSound })
+    $btnRegSRP.Add_Click({
+        $auditData = Get-RegState_SRP
+        $modalOutput = Show-ActionModal -Title "WinUltix - SRP & IFEO Lockdown" -Description "Select executables to permanently block via OS policies (Apply = Lock, Revert = Unlock)." -AuditResults $auditData -EnableRevert
+        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
+            Invoke-ApplySRP -SelectedItems $modalOutput.Items -Operation $modalOutput.Action -ControlsToDisable $allTabButtons.ToArray()
+        }
+    }.GetNewClosure())
 
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 370 -Width 180 -Height 40 `
-        -Text "Programs & Features" `
-        -Description "Direct launch of the classic Win32 MSI/InstallShield software uninstaller (appwiz.cpl)." `
-        -OnClick { Start-ClassicApps })
-
-    [void](New-UltixButton -Parent $tabUtil -X 205 -Y 370 -Width 180 -Height 40 `
-        -Text "Devices and Printers" `
-        -Description "Bypasses Windows 11 Settings redirect to open the raw Win32 Devices and Printers shell folder." `
-        -OnClick { Start-ClassicPrinters })
-
-    [void](New-UltixButton -Parent $tabUtil -X 15 -Y 420 -Width 180 -Height 40 `
-        -Text "System Properties (Env)" `
-        -Description "Opens Advanced System Properties (Pagefile, Performance Flags, and Environment Variables)." `
-        -OnClick { Start-ClassicSysProp })
-
-    [void](New-UltixButton -Parent $tabUtil -X 205 -Y 420 -Width 180 -Height 40 `
-        -Text "Power Plans (powercfg)" `
-        -Description "Opens the classic Power Options applet to inspect unhidden CPPC parameters." `
-        -OnClick { Start-ClassicPower })
-
-    # 3. DNS Enforcer (IPv4 + IPv6 + DoH)
+    # 5. Hardened DNS & Native DoH Enforcer (IPv4 + IPv6)
     $lblDNS = New-Object System.Windows.Forms.Label
-    $lblDNS.Text = "Hardened DNS & DoH Enforcer (IPv4 / IPv6)"
-    $lblDNS.Location = New-Object System.Drawing.Point(15, 480)
+    $lblDNS.Text = "Hardened DNS & Native DoH Enforcer (IPv4 / IPv6)"
+    $lblDNS.Location = New-Object System.Drawing.Point(15, 228)
     $lblDNS.Size = New-Object System.Drawing.Size(370, 20)
     $lblDNS.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblDNS.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 
     $comboDNS = New-Object System.Windows.Forms.ComboBox
-    $comboDNS.Location = New-Object System.Drawing.Point(15, 505)
+    $comboDNS.Location = New-Object System.Drawing.Point(15, 252)
     $comboDNS.Size = New-Object System.Drawing.Size(240, 25)
-    $comboDNS.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+    $comboDNS.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
     $comboDNS.ForeColor = [System.Drawing.Color]::White
     $comboDNS.DropDownStyle = "DropDownList"
     $comboDNS.Font = New-Object System.Drawing.Font("Segoe UI", 10)
@@ -5682,47 +6950,92 @@ function Initialize-Z5UI {
 
     $chkDoH = New-Object System.Windows.Forms.CheckBox
     $chkDoH.Text = "Enforce Native DNS-over-HTTPS (DoH)"
-    $chkDoH.Location = New-Object System.Drawing.Point(15, 538)
+    $chkDoH.Location = New-Object System.Drawing.Point(15, 284)
     $chkDoH.Size = New-Object System.Drawing.Size(235, 22)
     $chkDoH.ForeColor = [System.Drawing.Color]::LightGray
     $chkDoH.Checked = $true
 
     $chkIPv6 = New-Object System.Windows.Forms.CheckBox
     $chkIPv6.Text = "Configure IPv6 DNS"
-    $chkIPv6.Location = New-Object System.Drawing.Point(255, 538)
+    $chkIPv6.Location = New-Object System.Drawing.Point(255, 284)
     $chkIPv6.Size = New-Object System.Drawing.Size(135, 22)
     $chkIPv6.ForeColor = [System.Drawing.Color]::LightGray
     $chkIPv6.Checked = $true
 
-    $btnApplyDNS = New-UltixButton -Parent $tabUtil -X 265 -Y 504 -Width 120 -Height 27 -RGB @(100, 40, 40) `
+    $btnApplyDNS = New-UltixButton -Parent $tabSec -X 265 -Y 251 -Width 120 -Height 27 -RGB @(45, 85, 125) `
         -Text "Apply DNS" `
         -Description "Enforces IPv4/IPv6 DNS servers, injects kernel Dnscache DoH encryption flags, and flushes resolver cache."
     $btnApplyDNS.Add_Click({
-        Set-CustomDNS -Provider $comboDNS.SelectedItem -EnableDoH $chkDoH.Checked -EnableIPv6 $chkIPv6.Checked -ControlsToDisable @($btnApplyDNS)
+        Set-CustomDNS -Provider $comboDNS.SelectedItem -EnableDoH $chkDoH.Checked -EnableIPv6 $chkIPv6.Checked -ControlsToDisable $allTabButtons.ToArray()
     }.GetNewClosure())
 
     $global:lblCurrentDNS = New-Object System.Windows.Forms.Label
     $global:lblCurrentDNS.Text = "Current DNS: Reading from active route..."
-    $global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 566)
+    $global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 310)
     $global:lblCurrentDNS.Size = New-Object System.Drawing.Size(370, 22)
     $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
 
-    $tabUtil.Controls.AddRange(@(
-        $lblInspect, $lblClassic, $lblDNS,
-        $comboDNS, $chkDoH, $chkIPv6, $global:lblCurrentDNS
+    # 6. Classic Windows Control Applets
+    $lblClassic = New-Object System.Windows.Forms.Label
+    $lblClassic.Text = "Classic Win32 Control Applets"
+    $lblClassic.Location = New-Object System.Drawing.Point(15, 345)
+    $lblClassic.Size = New-Object System.Drawing.Size(370, 20)
+    $lblClassic.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblClassic.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+
+    $btnNetCpl = New-UltixButton -Parent $tabSec -X 15 -Y 370 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Network Adapters (ncpa)" `
+        -Description "Direct launch of the classic Win32 Network Connections applet (ncpa.cpl)." `
+        -OnClick { Start-ClassicNet }
+
+    $btnSndCpl = New-UltixButton -Parent $tabSec -X 205 -Y 370 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Sound Subsystem (mmsys)" `
+        -Description "Direct launch of playback/recording devices and sample rate properties (mmsys.cpl)." `
+        -OnClick { Start-ClassicSound }
+
+    $btnAppCpl = New-UltixButton -Parent $tabSec -X 15 -Y 420 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Programs & Features" `
+        -Description "Direct launch of the classic Win32 MSI/InstallShield software uninstaller (appwiz.cpl)." `
+        -OnClick { Start-ClassicApps }
+
+    $btnPrnCpl = New-UltixButton -Parent $tabSec -X 205 -Y 420 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Devices and Printers" `
+        -Description "Bypasses Windows 11 Settings redirect to open the raw Win32 Devices and Printers shell folder." `
+        -OnClick { Start-ClassicPrinters }
+
+    $btnSysCpl = New-UltixButton -Parent $tabSec -X 15 -Y 470 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "System Properties (Env)" `
+        -Description "Opens Advanced System Properties (Pagefile, Performance Flags, and Environment Variables)." `
+        -OnClick { Start-ClassicSysProp }
+
+    $btnPwrCpl = New-UltixButton -Parent $tabSec -X 205 -Y 470 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Power Plans (powercfg)" `
+        -Description "Opens the classic Power Options applet to inspect unhidden CPPC parameters." `
+        -OnClick { Start-ClassicPower }
+
+    foreach ($row in @($rowPrivacy, $rowBoot, $rowUsbGuard)) {
+        $allTabButtons.AddRange($row.Controls)
+    }
+    $allTabButtons.AddRange([System.Windows.Forms.Control[]]@(
+        $btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP, $btnApplyDNS,
+        $btnNetCpl, $btnSndCpl, $btnAppCpl, $btnPrnCpl, $btnSysCpl, $btnPwrCpl
     ))
-    $TabControl.Controls.Add($tabUtil)
+
+    $tabSec.Controls.AddRange(@(
+        $lblDNS, $comboDNS, $chkDoH, $chkIPv6, $global:lblCurrentDNS, $lblClassic
+    ))
+    $TabControl.Controls.Add($tabSec)
 }
 # <<< END INJECTED: Z5_Utilities.ps1 <<<
 
 
-# Z6_Integrity: Advanced repair and reset module. Features WinSXS compression (DISM /ResetBase) with deployment auditing, full network stack refresh, Print Spooler subsystem reset, and core file repairs.
+# Z6_Integrity: System First-Aid & OS repair (ChkDisk + DISM + SFC with fast health audit, WinSxS ResetBase compression, WMI repository salvage, Windows Update & CryptSvc reset, Network Stack refresh, Print Spooler First-Aid, and Icon Cache rebuild).
 # >>> INJECTED: Z6_Integrity.ps1 <<<
 # ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE (v3.0.0)
-# Z6_Integrity: Service and repair module. Executes real-time streamed WinSxS analysis, ResetBase compression, network stack refresh, Print Spooler reset, Windows Update/Cryptographic First-Aid, WMI repository salvage, Shell Icon/Thumbnail cache purge, and core OS repairs.
+# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE (v3.1.0)
+# Z6_Integrity: System First-Aid & OS repair (ChkDisk + DISM + SFC with fast health audit, WinSxS ResetBase compression, WMI repository salvage, Windows Update & CryptSvc reset, Network Stack refresh, Print Spooler First-Aid, and Icon Cache rebuild).
 # ==========================================
 
 # ------------------------------------------
@@ -5732,13 +7045,14 @@ function Start-ExternalConsoleAsync {
     param(
         [Parameter(Mandatory=$true)][string]$Title,
         [Parameter(Mandatory=$true)][string]$CommandChain,
-        [Parameter(Mandatory=$true)][System.Windows.Forms.Control[]]$ControlsToDisable
+        [AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @()
     )
 
+    $validControls = @($ControlsToDisable | Where-Object { $null -ne $_ })
     Write-GUI " -> Launching external maintenance console: $Title..."
     Update-Progress 20
 
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+    Invoke-AsyncTask -ControlsToDisable $validControls -ScriptBlock {
         param($CmdTitle, $CmdChain)
         # /v:on enables delayed environment variable expansion (!ERRORLEVEL! / !WUX_ERR!)
         # Preserves real command exit code across 'pause >nul'
@@ -5753,7 +7067,7 @@ function Start-ExternalConsoleAsync {
             Title    = $CmdTitle
             ExitCode = $exitCode
         }
-    } -Arguments @($Title, $CommandChain) -OnComplete {
+    } -Arguments @($Title, $CommandChain) -OnComplete ({
         param($res)
         Update-Progress 0
         if ($null -ne $res) {
@@ -5767,7 +7081,7 @@ function Start-ExternalConsoleAsync {
                 Write-GUI " -> [!] [$($res.Title)] finished with non-zero Exit Code: $code ($hexCode).`n"
             }
         }
-    }
+    }.GetNewClosure())
 }
 
 # ------------------------------------------
@@ -5781,7 +7095,7 @@ function Get-WinSxSState {
     $psi.Arguments = "/Online /Cleanup-Image /AnalyzeComponentStore /English"
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
-    $psi.StandardOutputEncoding = [System.Text.Encoding]::ASCII
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.CreateNoWindow = $true
 
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -5809,9 +7123,19 @@ function Get-WinSxSState {
     if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
     $dismOutput = $sbOutput.ToString()
 
-    $recommended = ($dismOutput -match "Component Store Cleanup Recommended\s*:\s*Yes")
-    $sizeMatch   = [regex]::Match($dismOutput, "Actual Size of Component Store\s*:\s*(.+?)(\r?\n|$)")
-    $actualSize  = if ($sizeMatch.Success) { $sizeMatch.Groups[1].Value.Trim() } else { "Unknown" }
+    # 100% locale-independent positional extraction: in DISM AnalyzeComponentStore table,
+    # the 2nd colon-separated size entry (MB/GB) is always Actual Size of Component Store
+    $sizeMatches = @([regex]::Matches($dismOutput, '(?im):\s*([\d\.,]+\s*[MGK]B)\b'))
+    $actualSize  = if ($sizeMatches.Count -ge 2) {
+        $sizeMatches[1].Groups[1].Value.Trim()
+    } elseif ($sizeMatches.Count -eq 1) {
+        $sizeMatches[0].Groups[1].Value.Trim()
+    } else {
+        "Unknown"
+    }
+
+    # Match localized Yes/Tak/Ja/Oui/Si on the last boolean line of the table
+    $recommended = ($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)\b")
 
     $rebootPending = Test-Path -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
 
@@ -5840,8 +7164,83 @@ function Optimize-WinSXS {
     Start-ExternalConsoleAsync -Title "WinUltix - WinSxS ResetBase" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 
+function Invoke-SystemHealthAudit {
+    param([AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI "--- AUDIT: OS Image, CBS & NTFS Volume Health (Background Thread) ---"
+    Update-Progress 15
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $UltixSync.Progress = 35
+        $null = dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
+        $dismExit = $LASTEXITCODE
+
+        # 100% locale-independent CBS corruption registry markers + DISM exit code
+        $cbsKey     = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing"
+        $cbsProps   = Get-ItemProperty -LiteralPath $cbsKey -Name "CorruptionFlags", "StoreCorrupt", "UnavailableRepairCount" -ErrorAction SilentlyContinue
+        $hasRegCorr = ($null -ne $cbsProps) -and (
+            ($null -ne $cbsProps.CorruptionFlags -and $cbsProps.CorruptionFlags -ne 0) -or
+            ($null -ne $cbsProps.StoreCorrupt -and $cbsProps.StoreCorrupt -ne 0) -or
+            ($null -ne $cbsProps.UnavailableRepairCount -and $cbsProps.UnavailableRepairCount -gt 0)
+        )
+        $isHealthy = ($dismExit -eq 0 -and -not $hasRegCorr)
+
+        $UltixSync.Progress = 70
+        $sysDrive = $env:SystemDrive.TrimEnd('\')
+        $diskObj  = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$sysDrive'" -Property VolumeDirty -ErrorAction SilentlyContinue
+        $isDirty  = if ($null -ne $diskObj -and $null -ne $diskObj.VolumeDirty) { [bool]$diskObj.VolumeDirty } else { $false }
+
+        $UltixSync.Progress = 90
+        $cbsReboot = Test-Path -Path "$cbsKey\RebootPending"
+        $sfcPend   = Test-Path -Path "$cbsKey\PackagesPending"
+
+        $UltixSync.Progress = 100
+        return [PSCustomObject]@{
+            ImageHealthy = $isHealthy
+            NtfsDirty    = $isDirty
+            DriveName    = $sysDrive
+            CbsReboot    = $cbsReboot
+            SfcPending   = $sfcPend
+        }
+    } -OnComplete ({
+        param($res)
+        Update-Progress 0
+        if ($null -ne $res) {
+            if ($res.ImageHealthy) {
+                Write-GUI "  [OK] DISM CheckHealth: No component store corruption detected (CBS Store Clean)."
+            } else {
+                Write-GUI "  [!] WARNING: DISM flagged component store corruption! Run 'Scan System' repair."
+            }
+
+            if (-not $res.NtfsDirty) {
+                Write-GUI "  [OK] NTFS Volume ($($res.DriveName)): Clean (VolumeDirty = False)."
+            } else {
+                Write-GUI "  [!] WARNING: NTFS Volume ($($res.DriveName)) has Dirty Bit set! Run 'Scan System' repair."
+            }
+
+            if ($res.CbsReboot -or $res.SfcPending) {
+                Write-GUI "  [!] CBS Servicing Status: Pending reboot / package repair detected.`n"
+            } else {
+                Write-GUI "  [OK] CBS Servicing Queue: Clean (Zero pending repairs).`n"
+            }
+        }
+    }.GetNewClosure())
+}
+
 function Repair-SystemIntegrity {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
+
+    $msg = "This operation will open an external maintenance console and execute:`n`n" +
+           "  1. Online CheckDisk Scan (chkdsk C: /scan)`n" +
+           "  2. DISM Image Repair (DISM /Online /Cleanup-Image /RestoreHealth)`n" +
+           "  3. System File Checker (sfc /scannow)`n`n" +
+           "Full verification typically takes 5 to 15 minutes. Do you want to proceed?"
+    $ans = [System.Windows.Forms.MessageBox]::Show($msg, "WinUltix - System Integrity Repair", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-GUI " -> System Integrity Repair cancelled by user.`n"
+        return
+    }
+
     $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk C: /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
     Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
@@ -6140,26 +7539,28 @@ function Clear-ShellIconCache {
 }
 
 # ------------------------------------------
-# Z6: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z6: UI INITIALIZATION (INTEGRITY & SYSTEM FIRST-AID)
 # ------------------------------------------
 function Initialize-Z6UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tabWinSXS = New-Object System.Windows.Forms.TabPage
     $tabWinSXS.Text = "Integrity"
-    $tabWinSXS.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $tabWinSXS.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
     $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-    # 1. System Scan (ChkDisk + DISM + SFC)
-    $btnCheckSystem = New-UltixButton -Parent $tabWinSXS -X 15 -Y 20 -RGB @(60, 60, 60) `
-        -Text "Scan System (ChkDisk + SFC + RestoreHealth)" `
-        -Description "System First Aid: Scans core Windows OS files for corruption and replaces damaged components using DISM RestoreHealth and SFC without freezing the GUI." `
-        -OnClick ({ Repair-SystemIntegrity -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+    # 1. System Scan (ChkDisk + DISM + SFC) + Fast Health Audit [?]
+    $rowCheckSystem = New-UltixActionRow -Parent $tabWinSXS -Y 20 -MainRGB @(55, 58, 64) `
+        -Text "Scan System (ChkDisk + SFC + DISM)" `
+        -Description "System First-Aid: Scans core Windows OS files for corruption and replaces damaged components using ChkDisk, DISM RestoreHealth, and SFC." `
+        -AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit, and inspects CBS pending repair flags." `
+        -OnClick ({ Repair-SystemIntegrity -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
+        -OnAudit ({ Invoke-SystemHealthAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     # 2. WinSxS ResetBase + Audit [?]
-    $rowWinSxS = New-UltixActionRow -Parent $tabWinSXS -Y 70 -MainRGB @(100, 40, 40) `
-        -Text "Aggressive Cleanup (ResetBase)" `
+    $rowWinSxS = New-UltixActionRow -Parent $tabWinSXS -Y 70 -MainRGB @(135, 50, 50) `
+        -Text "WinSxS Store Compression (ResetBase)" `
         -Description "WinSxS Deep Clean: Permanently deletes superseded Windows Update backup layers (/ResetBase) to reclaim gigabytes of disk space." `
         -AuditDescription "AUDIT: Streams real-time DISM AnalyzeComponentStore progress in a background Runspace and checks for pending CBS reboots." `
         -OnClick ({ Optimize-WinSXS -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
@@ -6169,7 +7570,7 @@ function Initialize-Z6UI {
             Update-Progress 5
 
             $sb = (Get-Command -Name Get-WinSxSState).ScriptBlock
-            Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable $allTabButtons.ToArray() -OnComplete {
+            Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable $allTabButtons.ToArray() -OnComplete ({
                 param($output)
                 Update-Progress 0
                 $auditResult = $output | Select-Object -First 1
@@ -6185,63 +7586,60 @@ function Initialize-Z6UI {
                     }
                     Write-GUI ""
                 }
-            }
+            }.GetNewClosure())
         }.GetNewClosure())
 
-    # 3. Network Stack Refresh
-    $btnNetFix = New-UltixButton -Parent $tabWinSXS -X 15 -Y 120 -RGB @(0, 100, 100) `
-        -Text "Refresh Network (DNS/Winsock)" `
-        -Description "Network Fix: Flushes DNS cache, resets Winsock catalog, and resets TCP/IP stack parameters." `
-        -OnClick ({ Clear-NetworkStack -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
-
-    # 4. Print Subsystem First-Aid
-    $btnFixPrinters = New-UltixButton -Parent $tabWinSXS -X 15 -Y 170 -RGB @(120, 80, 40) `
-        -Text "Reset Print Subsystem (Spooler)" `
-        -Description "Printer First-Aid: Kills deadlocked spoolsv.exe, purges stuck .SPL/.SHD files in System32, restarts PrintWorkflowUserSvc, and resumes Spooler." `
-        -OnClick ({ Repair-PrintSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
-
-    # 5. Windows Update & Cryptographic Subsystem First-Aid
-    $btnFixWU = New-UltixButton -Parent $tabWinSXS -X 15 -Y 220 -RGB @(60, 90, 130) `
-        -Text "Reset Windows Update & CryptSvc" `
-        -Description "WU First-Aid: Stops wuauserv/bits/cryptSvc, purges corrupted qmgr*.dat queues, resets Catroot2 & DataStore, and re-registers core COM DLLs." `
-        -OnClick ({ Repair-WindowsUpdateSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
-
-    # 6. WMI / CIM Repository Salvage + Audit [?]
-    $rowWMI = New-UltixActionRow -Parent $tabWinSXS -Y 270 -MainRGB @(90, 60, 120) `
+    # 3. WMI / CIM Repository Salvage + Audit [?]
+    $rowWMI = New-UltixActionRow -Parent $tabWinSXS -Y 120 -MainRGB @(55, 58, 64) `
         -Text "Verify & Salvage WMI Repository" `
         -Description "WMI First-Aid: Verifies CIM repository consistency, runs non-destructive 'winmgmt /salvagerepository', and refreshes WMI performance counters." `
         -AuditDescription "AUDIT: Runs 'winmgmt /verifyrepository' and tests live CIM queries against root\cimv2 and root\StandardCimv2." `
         -OnClick ({ Repair-WMIRepository -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
         -OnAudit ({ Invoke-WMIAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
+    # 4. Windows Update & Cryptographic Subsystem First-Aid
+    $btnFixWU = New-UltixButton -Parent $tabWinSXS -X 15 -Y 170 -RGB @(55, 58, 64) `
+        -Text "Reset Windows Update & CryptSvc" `
+        -Description "WU First-Aid: Stops wuauserv/bits/cryptSvc, purges corrupted qmgr*.dat queues, resets Catroot2 & DataStore, and re-registers core COM DLLs." `
+        -OnClick ({ Repair-WindowsUpdateSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    # 5. Network Stack Refresh
+    $btnNetFix = New-UltixButton -Parent $tabWinSXS -X 15 -Y 220 -RGB @(55, 58, 64) `
+        -Text "Refresh Network Stack (DNS / Winsock)" `
+        -Description "Network First-Aid: Flushes DNS cache, resets Winsock catalog, and resets TCP/IP stack parameters." `
+        -OnClick ({ Clear-NetworkStack -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    # 6. Print Subsystem First-Aid
+    $btnFixPrinters = New-UltixButton -Parent $tabWinSXS -X 15 -Y 270 -RGB @(55, 58, 64) `
+        -Text "Reset Print Subsystem (Spooler)" `
+        -Description "Printer First-Aid: Kills deadlocked spoolsv.exe, purges stuck .SPL/.SHD files in System32, restarts PrintWorkflowUserSvc, and resumes Spooler." `
+        -OnClick ({ Repair-PrintSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
     # 7. Shell Icon & Thumbnail Cache First-Aid
-    $btnFixIcons = New-UltixButton -Parent $tabWinSXS -X 15 -Y 320 -RGB @(70, 100, 70) `
+    $btnFixIcons = New-UltixButton -Parent $tabWinSXS -X 15 -Y 320 -RGB @(55, 58, 64) `
         -Text "Rebuild Shell Icon & Thumbnail Cache" `
         -Description "Shell First-Aid: Gracefully cycles Explorer, purges corrupted iconcache_*.db and thumbcache_*.db files, and forces a clean rebuild via ie4uinit." `
         -OnClick ({ Clear-ShellIconCache -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
+    foreach ($row in @($rowCheckSystem, $rowWinSxS, $rowWMI)) {
+        $allTabButtons.AddRange($row.Controls)
+    }
     $allTabButtons.AddRange([System.Windows.Forms.Control[]]@(
-        $btnCheckSystem,
-        $btnNetFix,
-        $btnFixPrinters,
-        $btnFixWU,
-        $btnFixIcons
+        $btnFixWU, $btnNetFix, $btnFixPrinters, $btnFixIcons
     ))
-    $allTabButtons.AddRange($rowWinSxS.Controls)
-    $allTabButtons.AddRange($rowWMI.Controls)
 
     $TabControl.Controls.Add($tabWinSXS)
 }
 # <<< END INJECTED: Z6_Integrity.ps1 <<<
 
 
-# Z7_Hardware: Low-level hardware diagnostics and tuning with interactive modals.
+# Z7_Hardware: Low-level hardware & latency cockpit (Topology-Aware Affinity Lasso, CPPC Unhider + Dead Man's Switch, Pre-Flight Shortcut, Quantum Scheduler Matrix, MSI & Core 0 IRQ Offload, 0.5ms TSC Timer, USB XHCI Topology Mapper, NVMe/PCIe locks, NDIS/TCP Tuner, WHEA Decoder, and 1Hz DPC Monitor).
 # >>> INJECTED: Z7_Hardware.ps1 <<<
 # ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z7_HARDWARE.PS1 - HARDWARE & DIAGNOSTICS MODULE (v3.0.0)
-# Z7_Hardware: Low-level hardware diagnostics and kernel latency tuning. Uses Core_Helpers P/Invoke runtime ([WinUltix.CpuTopology], [WinUltix.NtDll], [WinUltix.NativeMethods]) and asynchronous Runspace workers ($UltixSync) for Topology-Aware Affinity Lasso, CPPC P-State Unhider & SYSTEM Dead Man's Switch, MSI & IRQ Core 0 Offload Enforcer with Live NtQuerySystemInformation DPC Telemetry, WHEA APIC XML Decoder, Symmetric NDIS/TCP Optimizer, 0.5ms TSC Timer Lock, NVMe APST / PCIe ASPM Lockdown, Profile Snapshot hooks, and Pre-Flight Game Mode macro generation.
+# Z7_HARDWARE.PS1 - HARDWARE & DIAGNOSTICS MODULE (v3.1.0)
+# Z7_Hardware: Low-level hardware & latency cockpit (Topology-Aware Affinity Lasso, CPPC Unhider + Dead Man's Switch, Pre-Flight Shortcut, Quantum Scheduler Matrix, MSI & Core 0 IRQ Offload, 0.5ms TSC Timer, USB XHCI Topology Mapper, NVMe/PCIe locks, NDIS/TCP Tuner, WHEA Decoder, and 1Hz DPC Monitor).
 # ==========================================
 
 # Cached physical core masks and CPU topology profile from kernel32!GetLogicalProcessorInformationEx
@@ -6559,7 +7957,7 @@ function Write-UltixDpcReport {
     }
 
     Write-GUI " -> [LEGEND]: Green (<30% C0) = Optimal | Yellow (30-54%) = Moderate"
-    Write-GUI "    Red (>=55% C0) = Bottleneck (Offload ★ GPU/NIC to C1 in MSI Modal)`n"
+    Write-GUI "    Red (>=55% C0) = Bottleneck (Offload $([char]0x2605) GPU/NIC to C1 in MSI Modal)`n"
 }
 
 # ------------------------------------------
@@ -6738,19 +8136,19 @@ function Get-HardwareState_IRQ {
                     if ($isOnCore0) {
                         $sortRank      = 1
                         $isRecommended = $true
-                        $adviceText    = "★ OFFLOAD TO C1 (Heavy GPU DPC)"
+                        $adviceText    = "$([char]0x2605) OFFLOAD TO C1 (Heavy GPU DPC)"
                     } else {
                         $sortRank      = 10
-                        $adviceText    = "✓ Offloaded ($affLabel)"
+                        $adviceText    = "$([char]0x2713) Offloaded ($affLabel)"
                     }
                 } elseif ($isNic) {
                     if ($isOnCore0) {
                         $sortRank      = 2
                         $isRecommended = $true
-                        $adviceText    = "★ OFFLOAD TO C1 (NDIS Network DPC)"
+                        $adviceText    = "$([char]0x2605) OFFLOAD TO C1 (NDIS Network DPC)"
                     } else {
                         $sortRank      = 11
-                        $adviceText    = "✓ Offloaded ($affLabel)"
+                        $adviceText    = "$([char]0x2713) Offloaded ($affLabel)"
                     }
                 } elseif ($isUsb) {
                     if ($isOnCore0) {
@@ -6758,7 +8156,7 @@ function Get-HardwareState_IRQ {
                         $adviceText = "Optional C1 (USB HID Polling)"
                     } else {
                         $sortRank   = 12
-                        $adviceText = "✓ Offloaded ($affLabel)"
+                        $adviceText = "$([char]0x2713) Offloaded ($affLabel)"
                     }
                 } elseif ($isStorage) {
                     $sortRank   = 40
@@ -7708,7 +9106,7 @@ function Show-MsiModal {
     $lblDpcMonitor.Anchor = 'Top, Left, Right'
 
     $lblDpcLegend = New-Object System.Windows.Forms.Label
-    $lblDpcLegend.Text = "Legend: C0..Cn = Physical Cores (SMT: C0=LP#0-1, C1=LP#2-3) | Green (<30% C0 Optimal), Yellow (30-54%), Red (>=55% C0 Bottleneck - Offload ★ items)"
+    $lblDpcLegend.Text = "Legend: C0..Cn = Physical Cores (SMT: C0=LP#0-1, C1=LP#2-3) | Green (<30% C0 Optimal), Yellow (30-54%), Red (>=55% C0 Bottleneck - Offload $([char]0x2605) items)"
     $lblDpcLegend.Location = New-Object System.Drawing.Point(15, 131)
     $lblDpcLegend.Size = New-Object System.Drawing.Size(875, 18)
     $lblDpcLegend.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Italic)
@@ -7760,7 +9158,7 @@ function Show-MsiModal {
     $chkOffloadCore0.ForeColor = [System.Drawing.Color]::LightGray
     $chkOffloadCore0.Checked = $false
 
-    $btnSelRec = New-UltixButton -Parent $modal -Text "Select ★ GPU/NIC" -X 695 -Y 152 -Width 195 -Height 27 -RGB @(50, 85, 120)
+    $btnSelRec = New-UltixButton -Parent $modal -Text "Select $([char]0x2605) GPU/NIC" -X 695 -Y 152 -Width 195 -Height 27 -RGB @(50, 85, 120)
     $btnSelRec.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
     $btnSelRec.Anchor = 'Top, Right'
 
@@ -8597,74 +9995,837 @@ if (`$res -eq "Yes") {
 }
 
 # ------------------------------------------
-# Z7: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z7: USB XHCI ROOT-HUB TOPOLOGY & HID POLLING MAPPER
+# ------------------------------------------
+if (-not ([System.Management.Automation.PSTypeName]'WinUltix.UsbProberV2').Type) {
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.Collections.Generic;
+    using System.Runtime.InteropServices;
+    using System.Text;
+
+    namespace WinUltix {
+        public class HubProbeResult {
+            public int TotalPorts;
+            public int Usb2Ports;
+            public int Usb3Ports;
+            public int SsPlusPorts;
+            public int ActivePorts;
+            public Dictionary<int, string> PortSpeeds = new Dictionary<int, string>();
+        }
+
+        public static class UsbProberV2 {
+            [StructLayout(LayoutKind.Sequential)]
+            private struct DEVPROPKEY {
+                public Guid fmtid;
+                public uint pid;
+            }
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Get_DevNode_PropertyW(
+                uint dnDevInst,
+                ref DEVPROPKEY PropertyKey,
+                out uint PropertyType,
+                IntPtr PropertyBuffer,
+                ref uint PropertyBufferSize,
+                uint ulFlags);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr CreateFileW(
+                string lpFileName,
+                uint dwDesiredAccess,
+                uint dwShareMode,
+                IntPtr lpSecurityAttributes,
+                uint dwCreationDisposition,
+                uint dwFlagsAndAttributes,
+                IntPtr hTemplateFile);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool DeviceIoControl(
+                IntPtr hDevice,
+                uint dwIoControlCode,
+                IntPtr lpInBuffer,
+                uint nInBufferSize,
+                IntPtr lpOutBuffer,
+                uint nOutBufferSize,
+                out uint lpBytesReturned,
+                IntPtr lpOverlapped);
+
+            [DllImport("kernel32.dll")]
+            private static extern bool CloseHandle(IntPtr hObject);
+
+            private const uint GENERIC_WRITE = 0x40000000;
+            private const uint FILE_SHARE_READ = 0x00000001;
+            private const uint FILE_SHARE_WRITE = 0x00000002;
+            private const uint OPEN_EXISTING = 3;
+
+            private const uint IOCTL_USB_GET_NODE_INFORMATION = 0x00220408;
+            private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX = 0x00220448;
+            private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2 = 0x0022045C;
+
+            // DEVPKEY_Device_BusReportedDeviceDesc ({540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4)
+            private static DEVPROPKEY KEY_BUS_REPORTED_DESC = new DEVPROPKEY {
+                fmtid = new Guid("540b947e-8b40-45bc-a8a2-6a0b894cbda2"),
+                pid = 4
+            };
+
+            public static string GetBusReportedDesc(string instanceId) {
+                uint devInst;
+                if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return "";
+
+                uint propType = 0;
+                uint bufSize = 512;
+                IntPtr buf = Marshal.AllocHGlobal((int)bufSize);
+                try {
+                    int cr = CM_Get_DevNode_PropertyW(devInst, ref KEY_BUS_REPORTED_DESC, out propType, buf, ref bufSize, 0);
+                    if (cr == 0 && propType == 18 && bufSize > 2) {
+                        string val = Marshal.PtrToStringUni(buf);
+                        return (val != null) ? val.Trim() : "";
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+                return "";
+            }
+
+            public static HubProbeResult ProbeHub(string hubInstanceId) {
+                var res = new HubProbeResult();
+                if (string.IsNullOrEmpty(hubInstanceId)) return res;
+
+                string symPath = @"\\?\" + hubInstanceId.Replace('\\', '#') + "#{f18a0e88-c30c-11d0-8815-00a0c906bed8}";
+                IntPtr hHub = CreateFileW(symPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) {
+                    hHub = CreateFileW(symPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                }
+                if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) return res;
+
+                IntPtr bufNode = Marshal.AllocHGlobal(128);
+                IntPtr bufV2   = Marshal.AllocHGlobal(32);
+                IntPtr bufEx   = Marshal.AllocHGlobal(64);
+
+                try {
+                    for (int i = 0; i < 128; i++) Marshal.WriteByte(bufNode, i, 0);
+                    uint ret = 0;
+                    if (!DeviceIoControl(hHub, IOCTL_USB_GET_NODE_INFORMATION, bufNode, 76, bufNode, 76, out ret, IntPtr.Zero)) {
+                        return res;
+                    }
+
+                    // Offset 6 in USB_NODE_INFORMATION is bNumberOfPorts
+                    int numPorts = Marshal.ReadByte(bufNode, 6);
+                    res.TotalPorts = numPorts;
+
+                    for (int p = 1; p <= numPorts; p++) {
+                        // 1. Query USB 2.0 vs USB 3.x protocol support & SuperSpeed/SuperSpeedPlus operating flags (V2)
+                        for (int i = 0; i < 16; i++) Marshal.WriteByte(bufV2, i, 0);
+                        Marshal.WriteInt32(bufV2, 0, p);  // ConnectionIndex
+                        Marshal.WriteInt32(bufV2, 4, 16); // Length = sizeof(USB_NODE_CONNECTION_INFORMATION_EX_V2)
+                        Marshal.WriteInt32(bufV2, 8, 7);  // SupportedUsbProtocols mask (Usb110 | Usb200 | Usb300)
+
+                        uint protocols = 0;
+                        uint v2Flags   = 0;
+                        if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, bufV2, 16, bufV2, 16, out ret, IntPtr.Zero)) {
+                            protocols = (uint)Marshal.ReadInt32(bufV2, 8);
+                            v2Flags   = (uint)Marshal.ReadInt32(bufV2, 12);
+                            if ((protocols & 0x04) != 0) {
+                                res.Usb3Ports++;
+                                if ((v2Flags & 0x08) != 0 || (v2Flags & 0x04) != 0) res.SsPlusPorts++;
+                            } else if ((protocols & 0x02) != 0) {
+                                res.Usb2Ports++;
+                            }
+                        }
+
+                        // 2. Query live connection state, bcdUSB descriptor, and negotiated link speed (EX + V2 override)
+                        for (int i = 0; i < 64; i++) Marshal.WriteByte(bufEx, i, 0);
+                        Marshal.WriteInt32(bufEx, 0, p); // ConnectionIndex
+                        if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, bufEx, 35, bufEx, 35, out ret, IntPtr.Zero)) {
+                            ushort bcdUsb   = (ushort)Marshal.ReadInt16(bufEx, 6); // Offset 4 (DeviceDescriptor) + 2 = bcdUSB
+                            byte speed      = Marshal.ReadByte(bufEx, 23);
+                            uint connStatus = (uint)Marshal.ReadInt32(bufEx, 31);
+                            if (connStatus == 1) { // DeviceConnected
+                                res.ActivePorts++;
+
+                                // USBHUB3.sys caps legacy EX Speed at 2 (HighSpeed); V2 Flags & bcdUSB hold true SS/SS+ state
+                                bool isDedicatedSsPort = ((protocols & 0x04) != 0 && (protocols & 0x02) == 0);
+                                bool isOperatingSsPlus = ((v2Flags & 0x04) != 0);
+                                bool isOperatingSs     = ((v2Flags & 0x01) != 0) || (speed >= 3) || isDedicatedSsPort || (bcdUsb >= 0x0300);
+                                bool isSsCapableDevice = ((v2Flags & 0x02) != 0) || ((v2Flags & 0x08) != 0);
+
+                                string speedStr = "USB";
+                                if (isOperatingSsPlus || (isOperatingSs && bcdUsb >= 0x0320)) {
+                                    speedStr = (bcdUsb >= 0x0320) ? "20 Gbps SS+" : "10 Gbps SS+";
+                                } else if (isOperatingSs && bcdUsb >= 0x0310) {
+                                    speedStr = ((v2Flags & 0x08) != 0 || isDedicatedSsPort) ? "10 Gbps SS+" : "5 Gbps SS";
+                                } else if (isOperatingSs) {
+                                    speedStr = "5 Gbps SS";
+                                } else if (speed == 2) {
+                                    speedStr = isSsCapableDevice ? "480 Mbps HS [Throttled USB 3.x!]" : "480 Mbps HS";
+                                } else if (speed == 1) {
+                                    speedStr = "12 Mbps FS";
+                                } else if (speed == 0) {
+                                    speedStr = "1.5 Mbps LS";
+                                }
+                                res.PortSpeeds[p] = speedStr;
+                            }
+                        }
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(bufNode);
+                    Marshal.FreeHGlobal(bufV2);
+                    Marshal.FreeHGlobal(bufEx);
+                    CloseHandle(hHub);
+                }
+                return res;
+            }
+        }
+    }
+"@ -ErrorAction SilentlyContinue
+}
+
+function Get-UsbTopologyMap {
+    param([switch]$IncludeRawHubs)
+
+    $controllers = [System.Collections.Generic.List[PSCustomObject]]::new()
+    [int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
+    [uint64]$core0Mask  = if ($coreMasks.Count -ge 1) { [uint64]$coreMasks[0] } else { 3 }
+    [uint64]$core1Mask  = if ($coreMasks.Count -ge 2) { [uint64]$coreMasks[1] } else { 12 }
+
+    $pciRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\PCI"
+    if (-not (Test-Path -LiteralPath $pciRoot)) { return @() }
+
+    foreach ($venKey in (Get-ChildItem -LiteralPath $pciRoot -ErrorAction SilentlyContinue)) {
+        foreach ($instKey in (Get-ChildItem -LiteralPath $venKey.PSPath -ErrorAction SilentlyContinue)) {
+            $props = Get-ItemProperty -LiteralPath $instKey.PSPath -Name "Service", "FriendlyName", "DeviceDesc", "LocationInformation" -ErrorAction SilentlyContinue
+            if ($null -eq $props -or $props.Service -notmatch '^(?i)(USBXHCI|USB4|usbehci)$') { continue }
+
+            $instanceId = "PCI\$($venKey.PSChildName)\$($instKey.PSChildName)"
+            $ctrlName = if ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
+            if ($ctrlName -match ';([^;]+)$') { $ctrlName = $matches[1] }
+
+            # Walk up CfgMgr32 parent chain to count PCI bridge hops and determine CPU Direct vs Chipset PCH
+            $parents = @([WinUltix.PnpTree]::GetParentChain($instanceId))
+            $pciBridgeHops = @($parents | Where-Object { $_ -like "PCI\*" }).Count
+
+            $routingBadge = if ($venKey.PSChildName -match 'DEV_43[A-F0-9]{2}' -or $ctrlName -match '(?i)Chipset') {
+                if ($pciBridgeHops -ge 3) { "[CHIPSET PCH (Daisy-Chained / $pciBridgeHops Hops)]" }
+                else { "[CHIPSET PCH ($pciBridgeHops PCIe Hops)]" }
+            } elseif ($pciBridgeHops -le 1) {
+                "[CPU DIRECT SoC LANES (1 PCIe Hop - Lowest Latency)]"
+            } else {
+                "[SECONDARY BRIDGE ($pciBridgeHops PCIe Hops)]"
+            }
+
+            # Read MSI & IRQ Affinity of this XHCI controller
+            $msiPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
+            $affPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\Affinity Policy"
+            $msiOn   = ((Get-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -ErrorAction SilentlyContinue).MSISupported -eq 1)
+            $affProps = Get-ItemProperty -LiteralPath $affPath -ErrorAction SilentlyContinue
+            $irqTag  = "Core 0 (Default)"
+            if ($null -ne $affProps -and $affProps.DevicePolicy -eq 4 -and $null -ne $affProps.AssignmentSetOverride) {
+                [uint64]$mVal = 0
+                for ($b = 0; $b -lt [math]::Min(8, $affProps.AssignmentSetOverride.Length); $b++) {
+                    $mVal = $mVal -bor ([uint64]$affProps.AssignmentSetOverride[$b] -shl ($b * 8))
+                }
+                $cHint = if ($mVal -eq $core1Mask) { " (C1 Offloaded)" } elseif (($mVal -band $core0Mask) -ne 0) { " (C0)" } else { "" }
+                $irqTag = "0x$($mVal.ToString('X'))$cHint"
+            }
+
+            # Walk CfgMgr32 descendants and group by physical USB device node (USB\VID_xxxx&PID_xxxx\<Instance>)
+            $descendants  = @([WinUltix.PnpTree]::GetDescendants($instanceId))
+            $endpoints    = [System.Collections.Generic.List[PSCustomObject]]::new()
+            $hubNames     = [System.Collections.Generic.List[string]]::new()
+            $hasMouse     = $false
+            $hasAudio     = $false
+            $hasStorage   = $false
+            $hasVr        = $false
+
+            $rootHubInfo  = $null
+            $hubSpeedMap  = @{}
+            $physDevices  = [System.Collections.Generic.List[PSCustomObject]]::new()
+            $currentPhys  = $null
+
+            foreach ($entry in $descendants) {
+                $parts = $entry -split '\|', 2
+                $depth = [int]$parts[0]
+                $devId = $parts[1]
+
+                if ($devId -match '^USB\\ROOT_HUB') {
+                    $rootHubInfo = [WinUltix.UsbProberV2]::ProbeHub($devId)
+                    $hubSpeedMap[$depth] = $rootHubInfo.PortSpeeds
+                    continue
+                }
+
+                $regNode = "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId"
+                $dProps  = Get-ItemProperty -LiteralPath $regNode -Name "FriendlyName", "DeviceDesc", "Service", "Class", "Address", "LocationInformation" -ErrorAction SilentlyContinue
+                if ($null -eq $dProps) { continue }
+
+                $dName = if ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
+                if ($dName -match ';([^;]+)$') { $dName = $matches[1] }
+                $dSvc  = [string]$dProps.Service
+                $dCls  = [string]$dProps.Class
+
+                if ($dSvc -match '^(?i)(USBHUB3|usbhub)$') {
+                    $subHub = [WinUltix.UsbProberV2]::ProbeHub($devId)
+                    $hubSpeedMap[$depth] = $subHub.PortSpeeds
+                }
+
+                # Check if this node is a physical USB device plugged into a port (USB\... without &MI_xx)
+                $isPhysicalUsbNode = ($devId -match '^USB\\(?!ROOT_HUB)[^\\]+\\[^\\]+$' -and $devId -notmatch '(?i)&MI_')
+
+                if ($isPhysicalUsbNode) {
+                    $busDesc = [WinUltix.UsbProberV2]::GetBusReportedDesc($devId)
+                    $portNum = if ($null -ne $dProps.Address -and $dProps.Address -gt 0) {
+                        [int]$dProps.Address
+                    } elseif ($dProps.LocationInformation -match 'Port_#0*(\d+)') {
+                        [int]$matches[1]
+                    } else { 0 }
+
+                    $parentHubDepth = $depth - 1
+                    $negSpeed = ""
+                    if ($portNum -gt 0 -and $hubSpeedMap.ContainsKey($parentHubDepth) -and $hubSpeedMap[$parentHubDepth].ContainsKey($portNum)) {
+                        $negSpeed = $hubSpeedMap[$parentHubDepth][$portNum]
+                    }
+
+                    $currentPhys = [PSCustomObject]@{
+                        Depth       = $depth
+                        DevId       = $devId
+                        PortNumber  = $portNum
+                        LinkSpeed   = $negSpeed
+                        BusName     = $busDesc
+                        BaseName    = $dName
+                        BaseService = $dSvc
+                        BaseClass   = $dCls
+                        Children    = [System.Collections.Generic.List[PSCustomObject]]::new()
+                    }
+                    $physDevices.Add($currentPhys)
+                } elseif ($null -ne $currentPhys -and $depth -gt $currentPhys.Depth) {
+                    $currentPhys.Children.Add([PSCustomObject]@{
+                        Depth   = $depth
+                        DevId   = $devId
+                        Name    = $dName
+                        Service = $dSvc
+                        Class   = $dCls
+                    })
+                }
+            }
+
+            foreach ($phys in $physDevices) {
+                $deviceNodes = @([PSCustomObject]@{ DevId = $phys.DevId; Name = $phys.BaseName; Service = $phys.BaseService; Class = $phys.BaseClass }) + @($phys.Children)
+
+                # Resolve best human-readable hardware name (prefer firmware BusReportedDeviceDesc)
+                $bestName = $phys.BusName
+                if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Composite Device|Generic|USB Input Device|HID-compliant)') {
+                    foreach ($n in $deviceNodes) {
+                        if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|Urz.dzenie kompozytowe|USB Input Device|Urz.dzenie wej.ciowe|HID Keyboard Device|Urz.dzenie klawiatury HID|HID-compliant|Zgodne z HID|Generic)') {
+                            $bestName = $n.Name
+                            break
+                        }
+                    }
+                }
+                if ([string]::IsNullOrWhiteSpace($bestName)) { $bestName = $phys.BaseName }
+
+                # Classify physical device role based on kernel drivers & USB HID Boot primary interface (MI_00)
+                $role      = "[USB DEVICE]"
+                $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { $phys.BaseClass }
+
+                $isStorage    = $false; $isAudio = $false; $isVr = $false; $isCam = $false; $isBt = $false; $isHub = $false
+                $isOnboardMcu = ($bestName -match '(?i)(AURA\s*LED|Mystic\s*Light|RGB\s*Fusion|Polychrome|ITE\s*Device|Nuvoton)')
+                $hasMou       = $false; $hasKbd  = $false
+                $mi00IsKbd    = $false; $mi00IsMou = $false
+
+                foreach ($n in $deviceNodes) {
+                    if ($n.Service -match '^(?i)(USBSTOR|UASPStor)$' -or $n.Class -eq "DiskDrive") { $isStorage = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Class -eq "Media" -or $n.Service -match '^(?i)(usbaudio|usbaudio2|iFiUsbAudio)' -or $n.Name -match '(?i)(DAC|iFi|Audio|Headset|Microphone|Sound)') {
+                        if ($n.Class -ne "AudioEndpoint" -and $n.Class -ne "SoftwareDevice") { $isAudio = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    }
+                    elseif ($n.Name -match '(?i)(Index|Steam Frame|VR|HMD|Watchman|Tracker|Beyond)') { $isVr = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Service -eq "usbvideo" -or $n.Class -in @("Camera", "Image")) { $isCam = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Class -eq "Bluetooth" -or $n.Service -match '(?i)BTHUSB') { $isBt = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Service -match '^(?i)(USBHUB3|usbhub)$') { $isHub = $true; $activeSvc = $n.Service }
+                    elseif ($n.Service -eq "mouhid" -or $n.Class -eq "Mouse") {
+                        $hasMou = $true
+                        if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsMou = $true }
+                    }
+                    elseif ($n.Service -eq "kbdhid" -or $n.Class -eq "Keyboard") {
+                        $hasKbd = $true
+                        if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsKbd = $true }
+                    }
+                }
+
+                if ($isHub)            { $role = "[USB HUB]" }
+                elseif ($isOnboardMcu) { $role = "[ONBOARD MCU]"; $activeSvc = "Internal PCB RGB - Idle" }
+                elseif ($isStorage)    { $role = "[STORAGE]";     $hasStorage = $true }
+                elseif ($isVr)         { $role = "[VR / HMD]";    $hasVr      = $true }
+                elseif ($isAudio)      { $role = "[AUDIO / DAC]"; $hasAudio   = $true }
+                elseif ($isCam)        { $role = "[VIDEO / CAM]"; $hasAudio   = $true }
+                elseif ($isBt)         { $role = "[BLUETOOTH]" }
+                elseif ($hasMou -and $hasKbd) {
+                    if ($mi00IsKbd -and -not $mi00IsMou) {
+                        $role      = "[KEYBOARD]"
+                        $activeSvc = "kbdhid"
+                    } else {
+                        $role      = "[MOUSE / HID]"
+                        $activeSvc = "mouhid"
+                        $hasMouse  = $true
+                    }
+                }
+                elseif ($hasMou) { $role = "[MOUSE / HID]"; $activeSvc = "mouhid"; $hasMouse = $true }
+                elseif ($hasKbd) { $role = "[KEYBOARD]";    $activeSvc = "kbdhid" }
+                elseif ($phys.Children | Where-Object { $_.Class -eq "HIDClass" -or $_.Service -eq "HidUsb" }) {
+                    $role      = "[HID / INPUT]"
+                    $activeSvc = "HidUsb"
+                }
+
+                $portBadge = if ($phys.PortNumber -gt 0) {
+                    $pPrefix = if ($phys.Depth -le 2) { "Port #$($phys.PortNumber)" } else { "Hub Port #$($phys.PortNumber)" }
+                    if ($phys.LinkSpeed) { " [$pPrefix | $($phys.LinkSpeed)]" } else { " [$pPrefix]" }
+                } else { "" }
+
+                if ($isHub) {
+                    $hubNames.Add($bestName)
+                    if (-not $IncludeRawHubs) { continue }
+                }
+
+                $endpoints.Add([PSCustomObject]@{
+                    Role       = $role
+                    Name       = "$bestName$portBadge"
+                    InstanceId = $phys.DevId
+                    Service    = $activeSvc
+                    Depth      = $phys.Depth
+                })
+            }
+
+            if (-not $IncludeRawHubs -and $hubNames.Count -gt 0) {
+                $uniqueHubs = @($hubNames | Select-Object -Unique) -join ", "
+                $endpoints.Add([PSCustomObject]@{
+                    Role       = "[ONBOARD HUBS]"
+                    Name       = "$($hubNames.Count)x Passive USB 2.0/3.x Port Splitters ($uniqueHubs)"
+                    InstanceId = "HUB_SUMMARY"
+                    Service    = "0% DMA Load"
+                    Depth      = 99
+                })
+            }
+
+            # Format Root Hub port count & speed capability summary
+            $portMapSummary = if ($venKey.PSChildName -match 'DEV_15B8') {
+                "1 Internal SoC Line (USB 2.0 480 Mbps - Unrouted on Desktop PCB)"
+            } elseif ($null -ne $rootHubInfo -and $rootHubInfo.TotalPorts -gt 0) {
+                $ssLabel = if ($ctrlName -match '(?i)(USB4|40G)' -or $venKey.PSChildName -match 'DEV_2426') {
+                    "USB4 40 Gbps"
+                } elseif ($rootHubInfo.SsPlusPorts -gt 0 -or $ctrlName -match '(?i)(3\.2|3\.1)') {
+                    "USB 3.x SuperSpeed (5/10/20 Gbps)"
+                } else {
+                    "USB 3.0 SuperSpeed (5 Gbps)"
+                }
+                "$($rootHubInfo.TotalPorts) Logical Lines ($($rootHubInfo.Usb3Ports)x $ssLabel + $($rootHubInfo.Usb2Ports)x USB 2.0 High-Speed [480 Mbps] | Active: $($rootHubInfo.ActivePorts))"
+            } else {
+                "Root Hub port descriptor unavailable"
+            }
+
+            $statusAdvice = "Optimal Isolation"
+            $severity     = "Green"
+            if ($hasMouse -and ($hasAudio -or $hasStorage)) {
+                $statusAdvice = "[!] CONTENTION: High-Polling Mouse shares XHCI bus with Audio DAC / Storage!"
+                $severity     = "Red"
+            } elseif (($hasMouse -or $hasVr) -and $routingBadge -match "CHIPSET") {
+                $statusAdvice = "[*] Notice: Latency-sensitive Mouse/VR is on Chipset PCH instead of CPU Direct lanes"
+                $severity     = "Yellow"
+            } elseif ($endpoints.Count -eq 0) {
+                if ($venKey.PSChildName -match 'DEV_15B8') {
+                    $statusAdvice = "[Internal SoC USB 2.0 Node - Unrouted on Desktop PCB]"
+                } else {
+                    $statusAdvice = "[Idle Root Hub - Free Ports Available]"
+                }
+                $severity = "Gray"
+            }
+
+            $controllers.Add([PSCustomObject]@{
+                ControllerName = $ctrlName
+                InstanceId     = $instanceId
+                RoutingBadge   = $routingBadge
+                PortSummary    = $portMapSummary
+                PciHops        = $pciBridgeHops
+                MsiEnabled     = $msiOn
+                IrqAffinity    = $irqTag
+                Endpoints      = @($endpoints)
+                Advice         = $statusAdvice
+                Severity       = $severity
+            })
+        }
+    }
+
+    return @($controllers | Sort-Object PciHops, ControllerName)
+}
+
+function Show-UsbTopologyModal {
+    $modal = New-Object System.Windows.Forms.Form
+    $modal.Text = "WinUltix - USB XHCI Root-Hub Topology & Contention Mapper"
+    $modal.Size = New-Object System.Drawing.Size(940, 680)
+    $modal.MinimumSize = New-Object System.Drawing.Size(880, 580)
+    $modal.StartPosition = "CenterParent"
+    $modal.FormBorderStyle = "Sizable"
+    $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+    $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
+
+    $lblDesc = New-Object System.Windows.Forms.Label
+    $lblDesc.Text = "Maps every physical USB XHCI controller back to the PCIe Root Complex. Keep 4K/8KHz mice and VR headsets on [CPU DIRECT SoC LANES] and isolate them from USB Audio DACs or external SSDs."
+    $lblDesc.Location = New-Object System.Drawing.Point(15, 12)
+    $lblDesc.Size = New-Object System.Drawing.Size(895, 36)
+    $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $lblDesc.Anchor = 'Top, Left, Right'
+
+    $rtbMap = New-Object System.Windows.Forms.RichTextBox
+    $rtbMap.Location = New-Object System.Drawing.Point(15, 52)
+    $rtbMap.Size = New-Object System.Drawing.Size(895, 525)
+    $rtbMap.BackColor = [System.Drawing.Color]::FromArgb(255, 18, 18, 18)
+    $rtbMap.ForeColor = [System.Drawing.Color]::LightGray
+    $rtbMap.BorderStyle = "FixedSingle"
+    $rtbMap.ReadOnly = $true
+    $rtbMap.Font = New-Object System.Drawing.Font("Consolas", 9.8)
+    $rtbMap.Anchor = 'Top, Bottom, Left, Right'
+
+    $chkShowHubs = New-Object System.Windows.Forms.CheckBox
+    $chkShowHubs.Text = "Show Raw USB Hub Nodes"
+    $chkShowHubs.Location = New-Object System.Drawing.Point(440, 595)
+    $chkShowHubs.Size = New-Object System.Drawing.Size(210, 24)
+    $chkShowHubs.ForeColor = [System.Drawing.Color]::LightGray
+    $chkShowHubs.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $chkShowHubs.Anchor = 'Bottom, Left'
+    $chkShowHubs.Checked = $false
+
+    $appendColored = {
+        param([string]$Text, [System.Drawing.Color]$Color)
+        $rtbMap.SelectionStart  = $rtbMap.TextLength
+        $rtbMap.SelectionLength = 0
+        $rtbMap.SelectionColor  = $Color
+        $rtbMap.AppendText($Text)
+    }
+
+    $renderTopology = {
+        $rtbMap.Clear()
+
+        # Render concise Engineering Mini-Guide at the top of the report
+        & $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+        & $appendColored "QUICK WIRING GUIDE & HOW TO READ THIS TOPOLOGY MAP:`r`n" ([System.Drawing.Color]::Gold)
+        & $appendColored "  1. [CPU DIRECT SoC] : Wired straight to CPU silicon (1 Hop). Best for 4K/8KHz Mice & VR.`r`n" ([System.Drawing.Color]::Cyan)
+        & $appendColored "  2. [CHIPSET PCH]    : Routed via motherboard chipset. Ideal for USB Audio DACs, Keyboards & Drives.`r`n" ([System.Drawing.Color]::LightSkyBlue)
+        & $appendColored "  3. XHCI Isolation   : NEVER share one controller between an 8KHz Mouse and an Audio DAC or USB Drive.`r`n" ([System.Drawing.Color]::LightGreen)
+        & $appendColored "  4. Logical Lines    : Every physical USB 3.x port contains 2 logical lines (1x SuperSpeed + 1x USB 2.0).`r`n" ([System.Drawing.Color]::Silver)
+        & $appendColored "  5. Onboard Hubs/MCU : Passive PCB splitters (ASM107x) & static RGB (AURA) do NOT disturb Audio DACs.`r`n" ([System.Drawing.Color]::DarkGray)
+
+        $map = Get-UsbTopologyMap -IncludeRawHubs:($chkShowHubs.Checked)
+        $idx = 0
+        foreach ($ctrl in $map) {
+            $idx++
+            $hdrColor = if ($ctrl.RoutingBadge -match "CPU DIRECT") { [System.Drawing.Color]::Cyan } else { [System.Drawing.Color]::LightSkyBlue }
+            & $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+            & $appendColored "CONTROLLER #$idx : $($ctrl.ControllerName)`r`n" $hdrColor
+            & $appendColored "  PCIe Routing : $($ctrl.RoutingBadge)`r`n" $hdrColor
+            & $appendColored "  PCI ID & IRQ : $($ctrl.InstanceId) | MSI: $(if($ctrl.MsiEnabled){'ON'}else{'OFF'}) | IRQ: $($ctrl.IrqAffinity)`r`n" ([System.Drawing.Color]::Silver)
+            & $appendColored "  Root Hub Map : $($ctrl.PortSummary)`r`n" ([System.Drawing.Color]::LightSkyBlue)
+            
+            $advColor = switch ($ctrl.Severity) {
+                "Red"    { [System.Drawing.Color]::OrangeRed; break }
+                "Yellow" { [System.Drawing.Color]::Gold;      break }
+                "Green"  { [System.Drawing.Color]::LightGreen; break }
+                default  { [System.Drawing.Color]::DarkGray;  break }
+            }
+            & $appendColored "  Assessment   : $($ctrl.Advice)`r`n" $advColor
+
+            if ($ctrl.Endpoints.Count -gt 0) {
+                & $appendColored "  Connected Endpoints:`r`n" ([System.Drawing.Color]::White)
+                foreach ($ep in $ctrl.Endpoints) {
+                    $epColor = switch -Wildcard ($ep.Role) {
+                        "*MOUSE*"   { [System.Drawing.Color]::LightGreen; break }
+                        "*AUDIO*"   { [System.Drawing.Color]::Violet;     break }
+                        "*VR*"      { [System.Drawing.Color]::Cyan;       break }
+                        "*STORAGE*" { [System.Drawing.Color]::Orange;     break }
+                        "*ONBOARD*" { [System.Drawing.Color]::DarkGray;   break }
+                        "*HUB*"     { [System.Drawing.Color]::DarkGray;   break }
+                        default     { [System.Drawing.Color]::LightGray;  break }
+                    }
+                    & $appendColored ("    +-- {0,-15} {1} ({2})`r`n" -f $ep.Role, $ep.Name, $ep.Service) $epColor
+                }
+            } else {
+                & $appendColored "    +-- (No active external USB endpoints attached)`r`n" ([System.Drawing.Color]::DarkGray)
+            }
+            & $appendColored "`r`n" ([System.Drawing.Color]::LightGray)
+        }
+        $rtbMap.SelectionStart = 0
+        $rtbMap.ScrollToCaret()
+    }
+
+    &$renderTopology
+    $chkShowHubs.Add_CheckedChanged({ &$renderTopology }.GetNewClosure())
+
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Rescan USB Tree (Live)" -X 15 -Y 590 -Width 200 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh.Anchor = 'Bottom, Left'
+    $btnRefresh.Add_Click({ &$renderTopology }.GetNewClosure())
+
+    $btnExportLog = New-UltixButton -Parent $modal -Text "Print Map to Main Log" -X 225 -Y 590 -Width 200 -Height 35 -RGB @(50, 110, 70)
+    $btnExportLog.Anchor = 'Bottom, Left'
+    $btnExportLog.Add_Click({
+        Write-GUI "=== USB XHCI ROOT-HUB & PCIE TOPOLOGY MAP ==="
+        foreach ($line in ($rtbMap.Text -split '\r?\n')) {
+            if (-not [string]::IsNullOrWhiteSpace($line) -and $line -notmatch '^===') {
+                Write-GUI "  $line"
+            }
+        }
+        Write-GUI ""
+    }.GetNewClosure())
+
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 790 -Y 590 -Width 120 -Height 35 -RGB @(60, 60, 60)
+    $btnClose.Anchor = 'Bottom, Right'
+    $btnClose.DialogResult = "Cancel"
+
+    $modal.Controls.AddRange(@($lblDesc, $rtbMap, $chkShowHubs))
+    try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
+}
+
+# ------------------------------------------
+# Z7: QUANTUM SCHEDULER MATRIX (WIN32PRIORITYSEPARATION LIVE TUNER)
+# ------------------------------------------
+function Get-QuantumSchedulerInfo {
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
+    $rawVal  = (Get-ItemProperty -LiteralPath $regPath -Name "Win32PrioritySeparation" -ErrorAction SilentlyContinue).Win32PrioritySeparation
+    if ($null -eq $rawVal) { $rawVal = 2 }
+
+    $lenBits   = ($rawVal -shr 4) -band 3
+    $varBits   = ($rawVal -shr 2) -band 3
+    $boostBits = $rawVal -band 3
+
+    $lenStr = switch ($lenBits) {
+        2 { "Short Quantum (Low Input Latency)" }
+        1 { "Long Quantum (High Throughput / Workstation)" }
+        default { "OS Default (Short on Client SKU)" }
+    }
+    $varStr = switch ($varBits) {
+        1 { "Variable (Foreground Boosted vs Background)" }
+        2 { "Fixed (Equal Determinism Across Threads)" }
+        default { "OS Default (Variable on Client SKU)" }
+    }
+    $boostStr = switch ($boostBits) {
+        2 { "3:1 Foreground Ratio (Max Gaming Boost)" }
+        1 { "2:1 Foreground Ratio (Moderate Boost)" }
+        default { "1:1 Equal Slice (No Foreground Bias)" }
+    }
+
+    $binStr = [Convert]::ToString(([int]$rawVal -band 0x3F), 2).PadLeft(6, '0')
+    $bitFormatted = "$($binStr.Substring(0,2))|$($binStr.Substring(2,2))|$($binStr.Substring(4,2))"
+
+    return [PSCustomObject]@{
+        DecimalValue = [int]$rawVal
+        HexValue     = ("0x{0:X2}" -f [int]$rawVal)
+        BitMask      = $bitFormatted
+        LengthDesc   = $lenStr
+        VarDesc      = $varStr
+        BoostDesc    = $boostStr
+    }
+}
+
+function Show-QuantumSchedulerModal {
+    $modal = New-Object System.Windows.Forms.Form
+    $modal.Text = "WinUltix - Quantum Scheduler Matrix (Win32PrioritySeparation)"
+    $modal.Size = New-Object System.Drawing.Size(760, 520)
+    $modal.MinimumSize = New-Object System.Drawing.Size(760, 520)
+    $modal.StartPosition = "CenterParent"
+    $modal.FormBorderStyle = "FixedDialog"
+    $modal.MaximizeBox = $false
+    $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+    $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
+
+    $lblDesc = New-Object System.Windows.Forms.Label
+    $lblDesc.Text = "Modifies HKLM\...\PriorityControl\Win32PrioritySeparation. The Windows kernel (PsChangeQuantumTable) applies changes INSTANTLY in real time without a reboot, allowing live A/B testing in games."
+    $lblDesc.Location = New-Object System.Drawing.Point(15, 12)
+    $lblDesc.Size = New-Object System.Drawing.Size(715, 38)
+    $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+
+    $lblTelemetry = New-Object System.Windows.Forms.Label
+    $lblTelemetry.Location = New-Object System.Drawing.Point(15, 55)
+    $lblTelemetry.Size = New-Object System.Drawing.Size(715, 72)
+    $lblTelemetry.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 20, 20)
+    $lblTelemetry.ForeColor = [System.Drawing.Color]::LightGreen
+    $lblTelemetry.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblTelemetry.BorderStyle = "FixedSingle"
+    $lblTelemetry.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 6)
+
+    $profiles = @(
+        [PSCustomObject]@{ Value = 38; Hex = "0x26"; Name = "0x26 (38 dec) | Short | Variable | 3:1 Foreground Boost [Competitive FPS]"; Desc = "Fastest context switching + 3x CPU time slice for the active game window. Best for CS2, Valorant, Overwatch, and Apex." }
+        [PSCustomObject]@{ Value = 40; Hex = "0x28"; Name = "0x28 (40 dec) | Short | Fixed    | 1:1 Equal Slice      [WinUltix Heavy Default]"; Desc = "Deterministic fixed quantum. Prevents foreground render threads from starving audio (audiodg) or worker threads in UE5/heavy titles." }
+        [PSCustomObject]@{ Value = 42; Hex = "0x2A"; Name = "0x2A (42 dec) | Short | Fixed    | 3:1 Hybrid Matrix    [Enthusiast Low-Jitter]"; Desc = "Combines Fixed quantum bitmask (10) with maximum quantum table index (10). Popular among competitive latency tuners." }
+        [PSCustomObject]@{ Value = 22; Hex = "0x16"; Name = "0x16 (22 dec) | Long  | Variable | 3:1 Foreground Boost [Cache-Heavy Simulators]"; Desc = "Longer execution slices reduce context-switch L1/L2 cache flushes. Useful in MSFS, Tarkov, or strategy sims." }
+        [PSCustomObject]@{ Value = 2;  Hex = "0x02"; Name = "0x02 (2 dec)  | OS Default       | 3:1 Standard Client  [Windows 11 Factory]"; Desc = "Standard Windows 11 out-of-the-box scheduler behavior (6:2 quantum ticks)." }
+    )
+
+    $listBox = New-Object System.Windows.Forms.ListBox
+    $listBox.Location = New-Object System.Drawing.Point(15, 140)
+    $listBox.Size = New-Object System.Drawing.Size(715, 165)
+    $listBox.BackColor = [System.Drawing.Color]::FromArgb(255, 42, 42, 42)
+    $listBox.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $listBox.Font = New-Object System.Drawing.Font("Consolas", 10.5)
+    foreach ($p in $profiles) { [void]$listBox.Items.Add($p.Name) }
+
+    $lblDetail = New-Object System.Windows.Forms.Label
+    $lblDetail.Location = New-Object System.Drawing.Point(15, 315)
+    $lblDetail.Size = New-Object System.Drawing.Size(715, 45)
+    $lblDetail.ForeColor = [System.Drawing.Color]::Silver
+    $lblDetail.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Italic)
+
+    $refreshInfo = {
+        $info = Get-QuantumSchedulerInfo
+        $lblTelemetry.Text = "ACTIVE KERNEL STATE : $($info.HexValue) ($($info.DecimalValue) dec) | 6-Bit Mask (AA|BB|CC): [$($info.BitMask)]`r`n" +
+                             "QUANTUM LENGTH      : $($info.LengthDesc)`r`n" +
+                             "SCHEDULER MODE      : $($info.VarDesc) | $($info.BoostDesc)"
+        for ($i = 0; $i -lt $profiles.Count; $i++) {
+            if ($profiles[$i].Value -eq $info.DecimalValue) {
+                $listBox.SelectedIndex = $i
+                break
+            }
+        }
+    }
+
+    $listBox.Add_SelectedIndexChanged({
+        if ($listBox.SelectedIndex -ge 0) {
+            $lblDetail.Text = "Engineering Note: " + $profiles[$listBox.SelectedIndex].Desc
+        }
+    }.GetNewClosure())
+
+    &$refreshInfo
+    if ($listBox.SelectedIndex -lt 0) { $listBox.SelectedIndex = 0 }
+
+    $btnApply = New-UltixButton -Parent $modal -Text "Apply Selected Quantum (Live - Zero Reboot)" -X 15 -Y 425 -Width 330 -Height 38 -RGB @(150, 60, 60)
+    $btnApply.Add_Click({
+        if ($listBox.SelectedIndex -lt 0) { return }
+        $sel = $profiles[$listBox.SelectedIndex]
+        Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value $sel.Value -Type DWord -Force
+        Write-GUI " -> [LIVE QUANTUM] Enforced Win32PrioritySeparation = $($sel.Hex) ($($sel.Value) dec) [$($sel.Name)]"
+        &$refreshInfo
+    }.GetNewClosure())
+
+    $btnReset = New-UltixButton -Parent $modal -Text "Restore Factory (0x02)" -X 355 -Y 425 -Width 200 -Height 38 -RGB @(60, 100, 150)
+    $btnReset.Add_Click({
+        Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 2 -Type DWord -Force
+        Write-GUI " -> [LIVE QUANTUM] Restored factory Win32PrioritySeparation = 0x02 (2 dec)."
+        &$refreshInfo
+    }.GetNewClosure())
+
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 610 -Y 425 -Width 120 -Height 38 -RGB @(60, 60, 60)
+    $btnClose.DialogResult = "Cancel"
+
+    $modal.Controls.AddRange(@($lblDesc, $lblTelemetry, $listBox, $lblDetail))
+    try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
+}
+
+# ------------------------------------------
+# Z7: UI INITIALIZATION (PRE-FLIGHT HEADER + 2-COLUMN HARDWARE COCKPIT)
 # ------------------------------------------
 function Initialize-Z7UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tab = New-Object System.Windows.Forms.TabPage
     $tab.Text = "Hardware"
-    $tab.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+    $tab.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
     $topo = Get-CPUTopologyProfile
 
+    # --- SECTION 1: PRE-FLIGHT CPU TOPOLOGY & P-STATE CONTROL ---
+    $lblPreFlight = New-Object System.Windows.Forms.Label
+    $lblPreFlight.Text = "Pre-Flight CPU Affinity & CPPC P-State Control"
+    $lblPreFlight.Location = New-Object System.Drawing.Point(15, 14)
+    $lblPreFlight.Size = New-Object System.Drawing.Size(370, 18)
+    $lblPreFlight.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblPreFlight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
     if ($topo.IsSupported) {
-        [void](New-UltixButton -Parent $tab -X 15 -Y 20 -Width 240 -Height 40 -RGB @(150, 60, 60) `
+        [void](New-UltixButton -Parent $tab -X 15 -Y 36 -Width 240 -Height 40 -RGB @(135, 50, 50) `
             -Text "Affinity Lasso (CPU Core Lock)" `
             -Description "Lock background apps to specific cores ($($topo.CoreDesc)) to free up prime gaming cores." `
             -OnClick ({ Show-AffinityModal "Affinity Lasso - $($topo.Label)" "Lock background processes to $($topo.CoreDesc) with BelowNormal priority." }.GetNewClosure()))
     } else {
-        $btnAffinity = New-UltixButton -Parent $tab -X 15 -Y 20 -Width 240 -Height 40 -RGB @(45, 45, 45) `
+        $btnAffinity = New-UltixButton -Parent $tab -X 15 -Y 36 -Width 240 -Height 40 -RGB @(45, 45, 48) `
             -ForeColor ([System.Drawing.Color]::DarkGray) `
             -Text "Affinity Lasso (Unsupported CPU)"
         $btnAffinity.Enabled = $false
     }
 
-    [void](New-UltixButton -Parent $tab -X 265 -Y 20 -Width 120 -Height 90 -RGB @(60, 100, 150) `
-        -Text "Generate Pre-Flight Shortcut" `
-        -Description "Create a desktop shortcut to instantly apply Affinity and CPPC rules." `
-        -OnClick { New-PreFlightShortcut })
-
-    [void](New-UltixButton -Parent $tab -X 15 -Y 70 -Width 240 -Height 40 -RGB @(100, 60, 150) `
+    [void](New-UltixButton -Parent $tab -X 15 -Y 86 -Width 240 -Height 40 -RGB @(55, 58, 64) `
         -Text "CPPC P-State Unhider" `
-        -Description "Unhide and manage advanced AMD/Intel CPPC power states." `
+        -Description "Unhide and manage advanced AMD/Intel CPPC power states with an automatic SYSTEM Dead Man's Switch." `
         -OnClick { Show-CPPCModal "CPPC Management" "Unhide advanced power plan settings (EPP, Demote, Promote)." })
 
-    [void](New-UltixButton -Parent $tab -X 15 -Y 120 -Width 370 -Height 40 -RGB @(100, 100, 100) `
+    [void](New-UltixButton -Parent $tab -X 265 -Y 36 -Width 120 -Height 90 -RGB @(45, 85, 125) `
+        -Text "Generate Pre-Flight Shortcut" `
+        -Description "Create a desktop shortcut to instantly toggle CPU Affinity Lasso and Max CPPC rules right before launching a game." `
+        -OnClick { New-PreFlightShortcut })
+
+    # --- SECTION 2: 2-COLUMN LOW-LATENCY HARDWARE & BUS TUNING ---
+    $lblColLeft = New-Object System.Windows.Forms.Label
+    $lblColLeft.Text = "Scheduler, Timer & Bus"
+    $lblColLeft.Location = New-Object System.Drawing.Point(15, 138)
+    $lblColLeft.Size = New-Object System.Drawing.Size(180, 18)
+    $lblColLeft.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblColLeft.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+    $lblColRight = New-Object System.Windows.Forms.Label
+    $lblColRight.Text = "IRQ, USB & OC Diagnostics"
+    $lblColRight.Location = New-Object System.Drawing.Point(205, 138)
+    $lblColRight.Size = New-Object System.Drawing.Size(180, 18)
+    $lblColRight.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblColRight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+    # Row 1 (Y = 160)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Quantum Scheduler Matrix" `
+        -Description "Live Win32PrioritySeparation quantum tuner (0x26, 0x28, 0x2A, 0x16, 0x02). Changes apply in real time without rebooting." `
+        -OnClick { Show-QuantumSchedulerModal })
+
+    [void](New-UltixButton -Parent $tab -X 205 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
         -Text "MSI & IRQ Affinity Enforcer" `
         -Description "Force Message Signaled Interrupts (MSI), set Interrupt Priority, offload IRQs from Core 0, and monitor live kernel DPCs." `
         -OnClick { Show-MsiModal "MSI & IRQ Affinity Enforcer" "Force PCI devices into MSI mode, adjust interrupt priority, and offload high-DPC drivers (GPU/NIC) from Core 0." })
 
-    [void](New-UltixButton -Parent $tab -X 15 -Y 170 -Width 370 -Height 40 -RGB @(150, 100, 60) `
-        -Text "WHEA Hardware Error Logger" `
-        -Description "Scan system logs for hardware instability (Curve Optimizer / RAM)." `
-        -OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores or RAM." })
-
-    [void](New-UltixButton -Parent $tab -X 15 -Y 220 -Width 370 -Height 40 -RGB @(60, 100, 150) `
-        -Text "Network NDIS & TCP Optimizer" `
-        -Description "Configure low-latency NDIS parameters, TCP properties, and offloads with full symmetric revert." `
-        -OnClick { Show-NetworkModal "Network Optimizer" "Disable flow control, power saving, interrupt moderation, and enforce TCPNoDelay." })
-
-    [void](New-UltixButton -Parent $tab -X 15 -Y 270 -Width 370 -Height 40 -RGB @(100, 100, 100) `
-        -Text "System Timer & TSC Fix (0.5ms)" `
+    # Row 2 (Y = 210)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 210 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "System Timer & TSC (0.5ms)" `
         -Description "Fix Windows 11 API to allow global 0.5ms High Resolution Timers and force CPU TSC." `
         -OnClick { Show-TimerModal "Timer Resolution Subsystem" "Enable legacy 0.5ms requests globally and stabilize DPC latency." })
 
-    [void](New-UltixButton -Parent $tab -X 15 -Y 320 -Width 370 -Height 40 -RGB @(100, 60, 150) `
-        -Text "I/O & Memory Latency Optimizer" `
+    [void](New-UltixButton -Parent $tab -X 205 -Y 210 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "USB XHCI Topology Map" `
+        -Description "Maps physical USB XHCI controllers to CPU Direct PCIe lanes vs Chipset PCH bridges, and spots Mouse/DAC/VR bus contention." `
+        -OnClick { Show-UsbTopologyModal })
+
+    # Row 3 (Y = 260)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "I/O & Memory Optimizer" `
         -Description "Disable NVMe APST, PCIe ASPM, and System Memory Compression to reduce CPU overhead and micro-stuttering." `
         -OnClick { Show-NVMeModal "I/O & Memory Optimizer" "Prevent NVMe and PCIe bus from entering low-power states (D3hot/L1.2) and disable RAM compression." })
 
-    # Dedicated 3-Line Live Kernel Interrupt / DPC Telemetry Panel on Hardware Tab
+    [void](New-UltixButton -Parent $tab -X 205 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Network NDIS & TCP Tuner" `
+        -Description "Configure low-latency NDIS parameters, TCP properties, and offloads with full symmetric revert." `
+        -OnClick { Show-NetworkModal "Network Optimizer" "Disable flow control, power saving, interrupt moderation, and enforce TCPNoDelay." })
+
+    # Row 4 (Y = 310 - Full Width)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 310 -Width 370 -Height 40 -RGB @(45, 85, 125) `
+        -Text "WHEA Hardware Error Logger & OC Decoder" `
+        -Description "Scan system logs for hardware instability (Curve Optimizer / FCLK / DDR5 timings) and decode APIC IDs to physical CPU cores." `
+        -OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores or RAM." })
+
+    # --- SECTION 3: LIVE KERNEL INTERRUPT / DPC TELEMETRY PANEL (Y = 365) ---
     $lblDpcHeader = New-Object System.Windows.Forms.Label
     $lblDpcHeader.Text = "Live Kernel Interrupt / DPC Distribution Monitor (ntdll.dll)"
-    $lblDpcHeader.Location = New-Object System.Drawing.Point(15, 374)
+    $lblDpcHeader.Location = New-Object System.Drawing.Point(15, 365)
     $lblDpcHeader.Size = New-Object System.Drawing.Size(370, 20)
     $lblDpcHeader.ForeColor = [System.Drawing.Color]::DarkGray
     $lblDpcHeader.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 
     $lblTabDpc = New-Object System.Windows.Forms.Label
-    $lblTabDpc.Location = New-Object System.Drawing.Point(15, 396)
+    $lblTabDpc.Location = New-Object System.Drawing.Point(15, 387)
     $lblTabDpc.Size = New-Object System.Drawing.Size(370, 68)
     $lblTabDpc.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 20, 20)
     $lblTabDpc.ForeColor = [System.Drawing.Color]::LightSkyBlue
@@ -8675,7 +10836,7 @@ function Initialize-Z7UI {
 
     $lblTabLegend = New-Object System.Windows.Forms.Label
     $lblTabLegend.Text = "C0..Cn = Physical Cores (SMT: 2 LP#/Core) | LP# = Logical Thread`r`nColor = Core 0 Load: Green (<30%) | Yellow (30-54%) | Red (>=55%)"
-    $lblTabLegend.Location = New-Object System.Drawing.Point(15, 468)
+    $lblTabLegend.Location = New-Object System.Drawing.Point(15, 459)
     $lblTabLegend.Size = New-Object System.Drawing.Size(370, 30)
     $lblTabLegend.ForeColor = [System.Drawing.Color]::DarkGray
     $lblTabLegend.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Italic)
@@ -8702,11 +10863,11 @@ function Initialize-Z7UI {
         }
     })
 
-    $btnToggleDpc = New-UltixButton -Parent $tab -X 15 -Y 502 -Width 320 -Height 34 -RGB @(50, 75, 100) `
+    $btnToggleDpc = New-UltixButton -Parent $tab -X 15 -Y 495 -Width 320 -Height 36 -RGB @(45, 85, 125) `
         -Text "Start Live DPC Monitor (1Hz Stream)" `
         -Description "Toggles real-time 1Hz polling of ntdll!NtQuerySystemInformation (SystemInterruptInformation). Automatically pauses if you switch tabs."
 
-    $btnHelpDpc = New-UltixButton -Parent $tab -X 345 -Y 502 -Width 40 -Height 34 -RGB @(80, 80, 80) `
+    $btnHelpDpc = New-UltixButton -Parent $tab -X 345 -Y 495 -Width 40 -Height 36 -RGB @(72, 76, 82) `
         -Text "?" `
         -Description "DPC LEGEND & REPORT: Samples per-core DPC distribution over 1s and prints a compact breakdown of all physical cores (C0..Cn) and logical threads (LP#) to the log."
 
@@ -8728,7 +10889,7 @@ function Initialize-Z7UI {
             $state.IsRunning  = $true
             $state.PrevCounts = $null
             $this.Text        = "Stop Live DPC Monitor [ACTIVE - 1Hz]"
-            $this.BackColor   = [System.Drawing.Color]::FromArgb(255, 45, 110, 65)
+            $this.BackColor   = [System.Drawing.Color]::FromArgb(255, 45, 95, 60)
             Update-UltixDpcMonitorUI -TargetLabel $lbl -State $state -CompactMode
             $timer.Start()
             Write-GUI " -> Live Kernel DPC Monitor started (1Hz polling)."
@@ -8736,7 +10897,7 @@ function Initialize-Z7UI {
             $timer.Stop()
             $state.IsRunning = $false
             $this.Text       = "Start Live DPC Monitor (1Hz Stream)"
-            $this.BackColor  = [System.Drawing.Color]::FromArgb(255, 50, 75, 100)
+            $this.BackColor  = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
             if ($null -ne $state.LastSnap -and $state.LastSnap.HasLiveDelta) {
                 Write-UltixDpcReport -Snapshot $state.LastSnap
             } else {
@@ -8763,7 +10924,7 @@ function Initialize-Z7UI {
         }
     })
 
-    $tab.Controls.AddRange(@($lblDpcHeader, $lblTabDpc, $lblTabLegend))
+    $tab.Controls.AddRange(@($lblPreFlight, $lblColLeft, $lblColRight, $lblDpcHeader, $lblTabDpc, $lblTabLegend))
     $TabControl.Controls.Add($tab)
 }
 # <<< END INJECTED: Z7_Hardware.ps1 <<<
@@ -8847,7 +11008,7 @@ $btnExportLog = New-Object System.Windows.Forms.Button
 $btnExportLog.Text = "Export Log to Desktop"
 $btnExportLog.Location = New-Object System.Drawing.Point(890, 725)
 $btnExportLog.Size = New-Object System.Drawing.Size(150, 25)
-$btnExportLog.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+$btnExportLog.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
 $btnExportLog.ForeColor = [System.Drawing.Color]::White
 $btnExportLog.FlatStyle = "Flat"
 $btnExportLog.Anchor = 'Bottom, Right'
@@ -8866,7 +11027,7 @@ $btnClearLog = New-Object System.Windows.Forms.Button
 $btnClearLog.Text = "[ Clear Log ]"
 $btnClearLog.Location = New-Object System.Drawing.Point(1050, 725)
 $btnClearLog.Size = New-Object System.Drawing.Size(110, 25)
-$btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+$btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnClearLog.ForeColor = [System.Drawing.Color]::LightGray
 $btnClearLog.FlatStyle = "Flat"
 $btnClearLog.Anchor = 'Bottom, Right'
@@ -8882,31 +11043,61 @@ $btnCredits = New-Object System.Windows.Forms.Button
 $btnCredits.Text = "[ About / GitHub ]"
 $btnCredits.Location = New-Object System.Drawing.Point(10, 725)
 $btnCredits.Size = New-Object System.Drawing.Size(130, 25)
-$btnCredits.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 40)
+$btnCredits.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnCredits.ForeColor = [System.Drawing.Color]::LightGray
 $btnCredits.FlatStyle = "Flat"
 $btnCredits.Anchor = 'Bottom, Left'
+
 $btnCredits.Add_Click({ 
     $aboutForm = New-Object System.Windows.Forms.Form
     $aboutForm.Text = "About WinUltix"
-    $aboutForm.Size = New-Object System.Drawing.Size(380, 265)
+    $aboutForm.Size = New-Object System.Drawing.Size(420, 270)
     $aboutForm.StartPosition = "CenterParent"
     $aboutForm.FormBorderStyle = "FixedDialog"
     $aboutForm.MaximizeBox = $false
     $aboutForm.MinimizeBox = $false
     $aboutForm.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
     $aboutForm.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
-    
+
+    $picLogo = New-Object System.Windows.Forms.PictureBox
+    $picLogo.Location = New-Object System.Drawing.Point(20, 22)
+    $picLogo.Size = New-Object System.Drawing.Size(64, 64)
+    $picLogo.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+
+    $srcLogo = if ($null -ne $global:UltixHighResLogo) {
+        $global:UltixHighResLogo
+    } elseif ($null -ne $global:UltixAppIcon) {
+        $global:UltixAppIcon.ToBitmap()
+    } else { $null }
+
+    if ($null -ne $srcLogo) {
+        $bmpLogo = New-Object System.Drawing.Bitmap(64, 64, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $gLogo   = [System.Drawing.Graphics]::FromImage($bmpLogo)
+        $gLogo.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $gLogo.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $gLogo.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $gLogo.DrawImage($srcLogo, 0, 0, 64, 64)
+        $gLogo.Dispose()
+        $picLogo.Image = $bmpLogo
+    }
+
+    $lblTitle = New-Object System.Windows.Forms.Label
+    $lblTitle.Location = New-Object System.Drawing.Point(98, 20)
+    $lblTitle.Size = New-Object System.Drawing.Size(295, 24)
+    $lblTitle.ForeColor = [System.Drawing.Color]::Cyan
+    $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+    $lblTitle.Text = "WinUltix Pro $AppVersion"
+
     $lblAbout = New-Object System.Windows.Forms.Label
-    $lblAbout.Location = New-Object System.Drawing.Point(20, 20)
-    $lblAbout.Size = New-Object System.Drawing.Size(340, 80)
+    $lblAbout.Location = New-Object System.Drawing.Point(98, 46)
+    $lblAbout.Size = New-Object System.Drawing.Size(295, 65)
     $lblAbout.ForeColor = [System.Drawing.Color]::LightGray
-    $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lblAbout.Text = "WinUltix - Ultimate System Toolkit $AppVersion`n`nConcept, architecture and combat tests: Firever`nCoding assistance: Gemini AI`n`nLet your hardware breathe!"
+    $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $lblAbout.Text = "Ultimate Windows System & Hardware Toolkit`nConcept, architecture & combat tests: Firever`nCoding assistance: Gemini AI"
     
     $linkGit = New-Object System.Windows.Forms.LinkLabel
-    $linkGit.Location = New-Object System.Drawing.Point(20, 115)
-    $linkGit.Size = New-Object System.Drawing.Size(340, 20)
+    $linkGit.Location = New-Object System.Drawing.Point(20, 120)
+    $linkGit.Size = New-Object System.Drawing.Size(370, 20)
     $linkGit.LinkColor = [System.Drawing.Color]::LightSkyBlue
     $linkGit.ActiveLinkColor = [System.Drawing.Color]::Cyan
     $linkGit.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -8914,8 +11105,8 @@ $btnCredits.Add_Click({
     $linkGit.Add_LinkClicked({ Start-Process "https://github.com/Firever-ultix/WinUltix" -ErrorAction SilentlyContinue })
     
     $linkcoffee = New-Object System.Windows.Forms.LinkLabel
-    $linkcoffee.Location = New-Object System.Drawing.Point(20, 140)
-    $linkcoffee.Size = New-Object System.Drawing.Size(340, 20)
+    $linkcoffee.Location = New-Object System.Drawing.Point(20, 145)
+    $linkcoffee.Size = New-Object System.Drawing.Size(370, 20)
     $linkcoffee.LinkColor = [System.Drawing.Color]::LightSkyBlue
     $linkcoffee.ActiveLinkColor = [System.Drawing.Color]::Cyan
     $linkcoffee.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -8924,17 +11115,18 @@ $btnCredits.Add_Click({
     
     $btnAboutOK = New-Object System.Windows.Forms.Button
     $btnAboutOK.Text = "Close"
-    $btnAboutOK.Location = New-Object System.Drawing.Point(140, 185)
-    $btnAboutOK.Size = New-Object System.Drawing.Size(80, 25)
+    $btnAboutOK.Location = New-Object System.Drawing.Point(160, 185)
+    $btnAboutOK.Size = New-Object System.Drawing.Size(90, 28)
     $btnAboutOK.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnAboutOK.ForeColor = [System.Drawing.Color]::White
     $btnAboutOK.FlatStyle = "Flat"
     $btnAboutOK.Add_Click({ $aboutForm.Close() })
     
-    $aboutForm.Controls.AddRange(@($lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
+    $aboutForm.Controls.AddRange(@($picLogo, $lblTitle, $lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
     try {
         [void]$aboutForm.ShowDialog($global:form)
     } finally {
+        if ($null -ne $picLogo.Image) { $picLogo.Image.Dispose() }
         $aboutForm.Dispose()
     }
 })
@@ -8943,7 +11135,7 @@ $btnExportProfile = New-Object System.Windows.Forms.Button
 $btnExportProfile.Text = "[ Export Profile ]"
 $btnExportProfile.Location = New-Object System.Drawing.Point(150, 725)
 $btnExportProfile.Size = New-Object System.Drawing.Size(130, 25)
-$btnExportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 65, 85)
+$btnExportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
 $btnExportProfile.ForeColor = [System.Drawing.Color]::White
 $btnExportProfile.FlatStyle = "Flat"
 $btnExportProfile.Anchor = 'Bottom, Left'
@@ -8955,7 +11147,7 @@ $btnImportProfile = New-Object System.Windows.Forms.Button
 $btnImportProfile.Text = "[ Import Profile ]"
 $btnImportProfile.Location = New-Object System.Drawing.Point(290, 725)
 $btnImportProfile.Size = New-Object System.Drawing.Size(130, 25)
-$btnImportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 85, 50, 50)
+$btnImportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 135, 50, 50)
 $btnImportProfile.ForeColor = [System.Drawing.Color]::White
 $btnImportProfile.FlatStyle = "Flat"
 $btnImportProfile.Anchor = 'Bottom, Left'

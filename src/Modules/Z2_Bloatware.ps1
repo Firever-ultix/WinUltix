@@ -1,8 +1,8 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE (v3.0.0)
-# Z2_Bloatware: Aggressive debloatifier. Uses Core_Helpers profile/hive discovery (Get-UltixUserProfiles), fast .NET directory sizing (Get-UltixFastSize), and asynchronous Runspace workers ($UltixSync) to amputate OneDrive, remove FOD Capabilities, clean orphaned Appx frameworks, lock down Windows Recall/AI, and purge UWP bloatware.
+# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE (v3.1.0)
+# Z2_Bloatware: Multi-profile OneDrive amputation, 64-target UWP Bloatware & Windows Recall/Copilot AI removal, FOD Preset, Appx Framework Garbage Collector, CBS Stubs, and 4 manual package/feature inspector grids.
 # ==========================================
 
 # ------------------------------------------
@@ -802,21 +802,270 @@ function Invoke-RemoveCapabilityStubs {
 }
 
 # ------------------------------------------
-# Z2: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z2: MANUAL INTERACTIVE INSPECTOR GRIDS (MOVED FROM Z5)
+# ------------------------------------------
+function Show-AppxGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Scanning installed Appx packages (Background Thread)..."
+    Update-Progress 20
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender"
+        
+        $pkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+            Where-Object { $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedPattern } |
+            Select-Object Name, PackageFullName, PackageFamilyName, IsFramework, Status |
+            Sort-Object Name)
+        return $pkgs
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$pkgs = @($output | Where-Object { $null -ne $_ })
+        if ($pkgs.Count -eq 0) {
+            Write-GUI " -> No removable Appx packages found.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Package Name";    Property = "Name";            Width = 310 }
+            @{ Header = "Framework";       Property = "IsFramework";     Width = 90  }
+            @{ Header = "Status";          Property = "Status";          Width = 95  }
+            @{ Header = "PackageFullName"; Property = "PackageFullName"; Width = 350 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Installed Appx Packages" `
+            -Description "Select Appx packages to remove across all accounts. Protected gaming/system runtimes are hidden." `
+            -Data $pkgs -Columns $cols -PrimaryButtonText "Remove Selected Appx"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Appx removal cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($app in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Removing Appx: $($app.Name)")
+                try {
+                    try {
+                        Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
+                    } catch {
+                        Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($app.PackageFamilyName)) {
+                        $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$($app.PackageFamilyName)"
+                        if (-not (Test-Path $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                    }
+                    $UltixSync.Logs.Enqueue("    [OK] $($app.Name) removed and deprovisioned.")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Error removing $($app.Name): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Selected Appx removal routine finished.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+function Show-AppxProvGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Scanning Provisioned Appx image packages (Background Thread)..."
+    Update-Progress 20
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop"
+        
+        $pkgs = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -notmatch $protectedPattern } |
+            Select-Object DisplayName, Version, PackageName |
+            Sort-Object DisplayName)
+        return $pkgs
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$pkgs = @($output | Where-Object { $null -ne $_ })
+        if ($pkgs.Count -eq 0) {
+            Write-GUI " -> No provisioned packages found in system image.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Display Name"; Property = "DisplayName"; Width = 340 }
+            @{ Header = "Version";      Property = "Version";     Width = 140 }
+            @{ Header = "Package Name"; Property = "PackageName"; Width = 365 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Provisioned Appx Image Packages" `
+            -Description "Select base-image packages to deprovision so they never install for new users." `
+            -Data $pkgs -Columns $cols -PrimaryButtonText "Deprovision Selected"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Deprovisioning cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($app in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Deprovisioning: $($app.DisplayName)")
+                try {
+                    Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
+                    $UltixSync.Logs.Enqueue("    [OK] $($app.DisplayName) deprovisioned.")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Error deprovisioning $($app.DisplayName): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Selected Provisioned packages removed from image.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+function Show-CapsGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Querying installed Windows Capabilities / FOD (Background Thread)..."
+    Update-Progress 25
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $caps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Installed' } |
+            Select-Object Name, State |
+            Sort-Object Name)
+        return $caps
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$caps = @($output | Where-Object { $null -ne $_ })
+        if ($caps.Count -eq 0) {
+            Write-GUI " -> No installed Capabilities returned.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 680 }
+            @{ Header = "State";                 Property = "State"; Width = 160 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Windows Capabilities (FOD)" `
+            -Description "Select installed Features on Demand (FOD) to uninstall from the OS image." `
+            -Data $caps -Columns $cols -PrimaryButtonText "Uninstall Selected FODs"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Capability removal cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($cap in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Removing capability: $($cap.Name)")
+                try {
+                    Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+                    $UltixSync.Logs.Enqueue("    [OK] $($cap.Name) removed.")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Failed to remove $($cap.Name): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Capability removal finished.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+function Show-OptFeaturesGrid {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Querying enabled Windows Optional Features (Background Thread)..."
+    Update-Progress 25
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $feats = @(Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Enabled' } |
+            Select-Object FeatureName, State |
+            Sort-Object FeatureName)
+        return $feats
+    } -OnComplete ({
+        param($output)
+        Update-Progress 0
+        [array]$feats = @($output | Where-Object { $null -ne $_ })
+        if ($feats.Count -eq 0) {
+            Write-GUI " -> No enabled Optional Features found.`n"
+            return
+        }
+
+        $cols = @(
+            @{ Header = "Optional Feature Name"; Property = "FeatureName"; Width = 680 }
+            @{ Header = "State";                 Property = "State";       Width = 160 }
+        )
+
+        $res = Show-UltixGridModal -Title "WinUltix - Windows Optional Features" `
+            -Description "Select enabled Optional Features to disable (e.g., Legacy Components, SMB1, Hypervisor modules)." `
+            -Data $feats -Columns $cols -PrimaryButtonText "Disable Selected Features"
+
+        if ($null -eq $res -or $res.Items.Count -eq 0) {
+            Write-GUI " -> Optional feature configuration cancelled.`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
+            param([array]$Selected)
+            $total = $Selected.Count
+            $current = 0
+            foreach ($feat in $Selected) {
+                $current++
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
+                try {
+                    Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+                    $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] Failed to disable $($feat.FeatureName): $($_.Exception.Message)")
+                }
+            }
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Optional Features processing completed.`n"
+        }.GetNewClosure())
+    }.GetNewClosure())
+}
+
+# ------------------------------------------
+# Z2: UI INITIALIZATION (DEBLOAT & PACKAGE INSPECTORS)
 # ------------------------------------------
 function Initialize-Z2UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tabApps = New-Object System.Windows.Forms.TabPage
-    $tabApps.Text = "Bloatware"
-    $tabApps.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $tabApps.Text = "Debloat"
+    $tabApps.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
     $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-    # 1. OneDrive
-    $rowOneDrive = New-UltixActionRow -Parent $tabApps -Y 20 `
+    # 1. OneDrive Amputation
+    $rowOneDrive = New-UltixActionRow -Parent $tabApps -Y 20 -MainRGB @(55, 58, 64) `
         -Text "Uninstall and Deprovision OneDrive" `
-        -MainRGB @(60, 60, 100) `
         -Description "Completely uninstalls OneDrive, burns its keys across all loaded HKEY_USERS hives, and physically deletes folders across all user profiles." `
         -AuditDescription "AUDIT: Scans for active OneDrive installers, multi-profile HKEY_USERS startup keys, and residual folders." `
         -OnClick ({
@@ -826,10 +1075,22 @@ function Initialize-Z2UI {
             Invoke-UltixAuditFlow -ScannerFunction "Get-OneDriveState" -AuditLabel "OneDrive" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
         }.GetNewClosure())
 
-    # 2. Capabilities (FOD)
-    $rowCaps = New-UltixActionRow -Parent $tabApps -Y 70 `
-        -Text "Remove System Features (FOD)" `
-        -Description "Interactive removal of optional built-in Features on Demand (FOD) in a background CBS thread." `
+    # 2. Aggressive Bloatware & AI Removal (64 Appx + Recall/Copilot)
+    $rowBloat = New-UltixActionRow -Parent $tabApps -Y 70 -MainRGB @(135, 50, 50) `
+        -Text "Aggressive Bloatware & AI Removal" `
+        -Description "Aggressive, interactive removal of 64 UWP bloatware targets and Windows Recall/Copilot AI telemetry from the system." `
+        -AuditDescription "AUDIT: Scans the system for target Appx Bloatware, Recall payloads, and prints a detailed footprint report." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ModalTitle "WinUltix - Bloatware & AI Removal" -ModalDescription "Select components to remove. Detected items are checked by default." -ExecutorFunction "Invoke-RemoveBloatware" -ControlsToDisable $allTabButtons.ToArray()
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
+        }.GetNewClosure())
+
+    # 3. Capabilities (FOD Preset)
+    $rowCaps = New-UltixActionRow -Parent $tabApps -Y 120 -MainRGB @(55, 58, 64) `
+        -Text "Remove System Features (FOD Preset)" `
+        -Description "Interactive removal of 14 unnecessary built-in Features on Demand (Steps Recorder, Quick Assist, WordPad, Fax, Hello Face) in a background CBS thread." `
         -AuditDescription "AUDIT: Verifies installed unnecessary Capabilities (FOD)." `
         -OnClick ({
             Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ModalTitle "WinUltix - FOD Removal" -ModalDescription "Select features to remove." -ExecutorFunction "Invoke-RemoveCapabilities" -ControlsToDisable $allTabButtons.ToArray()
@@ -838,23 +1099,10 @@ function Initialize-Z2UI {
             Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
         }.GetNewClosure())
 
-    # 3. Aggressive Bloatware (Appx)
-    $rowBloat = New-UltixActionRow -Parent $tabApps -Y 120 `
-        -Text "Aggressive Bloatware Removal (Appx)" `
-        -Description "Aggressive, interactive removal of 64 UWP bloatware targets and Windows Recall/AI telemetry from the system." `
-        -AuditDescription "AUDIT: Scans the system for target Appx Bloatware, Recall payloads, and prints a detailed footprint report." `
-        -OnClick ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ModalTitle "WinUltix - Bloatware Removal" -ModalDescription "Select components to remove. Detected items are checked by default." -ExecutorFunction "Invoke-RemoveBloatware" -ControlsToDisable $allTabButtons.ToArray()
-        }.GetNewClosure()) `
-        -OnAudit ({
-            Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatware (Appx)" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
-        }.GetNewClosure())
-
     # 4. Appx Garbage Collector
-    $rowGC = New-UltixActionRow -Parent $tabApps -Y 170 `
-        -Text "Run Appx Garbage Collector" `
-        -MainRGB @(100, 80, 40) `
-        -Description "Resolves transitive Appx dependency graphs and removes orphaned frameworks in a background thread." `
+    $rowGC = New-UltixActionRow -Parent $tabApps -Y 170 -MainRGB @(55, 58, 64) `
+        -Text "Run Appx Framework Garbage Collector" `
+        -Description "Resolves transitive Appx dependency graphs and removes orphaned UWP frameworks in a background thread." `
         -AuditDescription "AUDIT: Scans and lists all orphaned frameworks and base packages that can be safely removed." `
         -OnClick ({
             Invoke-UltixAuditFlow -ScannerFunction "Get-GarbageCollectorState" -AuditLabel "Garbage Collector" -ModalTitle "WinUltix - Garbage Collector" -ModalDescription "Select orphaned packages to remove." -ExecutorFunction "Invoke-GarbageCollector" -ControlsToDisable $allTabButtons.ToArray() -SkipModalIfClean
@@ -864,9 +1112,8 @@ function Initialize-Z2UI {
         }.GetNewClosure())
 
     # 5. CBS Capability Stubs
-    $rowStubs = New-UltixActionRow -Parent $tabApps -Y 220 `
+    $rowStubs = New-UltixActionRow -Parent $tabApps -Y 220 -MainRGB @(55, 58, 64) `
         -Text "Purge Capability Stubs (CBS)" `
-        -MainRGB @(100, 60, 100) `
         -Description "Scans and eradicates underlying CBS Stub packages to permanently declutter the Windows Capabilities list." `
         -AuditDescription "AUDIT: Queries CBS registry/payload directly for active stubs." `
         -OnClick ({
@@ -876,9 +1123,49 @@ function Initialize-Z2UI {
             Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilityStubState" -AuditLabel "CBS Stubs" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly
         }.GetNewClosure())
 
-    foreach ($row in @($rowOneDrive, $rowCaps, $rowBloat, $rowGC, $rowStubs)) {
+    # 6. Manual Package & Feature Inspectors (Sortable Grids)
+    $lblInspect = New-Object System.Windows.Forms.Label
+    $lblInspect.Text = "Manual Package & Feature Inspectors (Sortable Grids)"
+    $lblInspect.Location = New-Object System.Drawing.Point(15, 272)
+    $lblInspect.Size = New-Object System.Drawing.Size(370, 18)
+    $lblInspect.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblInspect.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+
+    $lblWarnInspect = New-Object System.Windows.Forms.Label
+    $lblWarnInspect.Text = "[!] MANUAL INSPECTORS ONLY — DO NOT SELECT ALL!`r`nFor targeted inspection of what remains after presets."
+    $lblWarnInspect.Location = New-Object System.Drawing.Point(15, 293)
+    $lblWarnInspect.Size = New-Object System.Drawing.Size(370, 40)
+    $lblWarnInspect.BackColor = [System.Drawing.Color]::FromArgb(255, 58, 35, 20)
+    $lblWarnInspect.ForeColor = [System.Drawing.Color]::Gold
+    $lblWarnInspect.BorderStyle = "FixedSingle"
+    $lblWarnInspect.TextAlign = "MiddleCenter"
+    $lblWarnInspect.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $tabApps.Controls.AddRange(@($lblInspect, $lblWarnInspect))
+
+    $btnAppxUser = New-UltixButton -Parent $tabApps -X 15 -Y 342 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Appx (User Accounts)" `
+        -Description "MANUAL INSPECTOR: Opens a table of all remaining installed Appx packages. Do NOT blindly delete all!" `
+        -OnClick ({ Show-AppxGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnAppxImg = New-UltixButton -Parent $tabApps -X 205 -Y 342 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Appx (Base Image)" `
+        -Description "MANUAL INSPECTOR: Opens a table of Provisioned Appx packages cached in the Windows image." `
+        -OnClick ({ Show-AppxProvGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnCapsGrid = New-UltixButton -Parent $tabApps -X 15 -Y 392 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Capabilities (Full FOD)" `
+        -Description "MANUAL INSPECTOR: Scans all installed Features on Demand (FOD) for selective manual removal." `
+        -OnClick ({ Show-CapsGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    $btnOptGrid = New-UltixButton -Parent $tabApps -X 205 -Y 392 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Optional Features (DISM)" `
+        -Description "MANUAL INSPECTOR: Scans enabled Windows Optional Features (SMB1, Hypervisor, Legacy Components) for selective disabling." `
+        -OnClick ({ Show-OptFeaturesGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    foreach ($row in @($rowOneDrive, $rowBloat, $rowCaps, $rowGC, $rowStubs)) {
         $allTabButtons.AddRange($row.Controls)
     }
+    $allTabButtons.AddRange([System.Windows.Forms.Control[]]@($btnAppxUser, $btnAppxImg, $btnCapsGrid, $btnOptGrid))
 
     $TabControl.Controls.Add($tabApps)
 }

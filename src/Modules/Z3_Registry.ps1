@@ -1,8 +1,8 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE (v3.0.0)
-# Z3_Registry: Main registry engine (Invoke-ApplyRegistry). Modulates UI (classic taskbar, Start menu), disables telemetry and data collection, optimizes background services (Edge, Defender), applies gaming tweaks (MMCSS, MPO, Flip Model, disabling VBS/HVCI, GameDVR), enforces Dual-Layer SRP+IFEO execution locks, and disables mouse acceleration.
+# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE (v3.1.0)
+# Z3_Registry: OS Tweaks, Taskbar (with UCPD.sys bypass), native 3-icon Start Menu compiler (with 26H2 Classic List view), File Explorer, Modern Standby S0, 7-Point Power & Display Optimizer, 1:1 Raw Mouse Input, and Extreme Gaming Registry.
 # ==========================================
 
 # ------------------------------------------
@@ -99,6 +99,9 @@ function Get-RegState_Taskbar {
         @{ UIDisplayName = "Start Menu: Disable Web Search (Forces local-only, faster search)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "DisableSearchBoxSuggestions"; Expected = 1; Default = 0; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Start Menu: Hide Recommended Section"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "HideRecommendedSection"; Expected = 1; Default = 0; Type = "DWord"; RestartShell = $true }
         @{ UIDisplayName = "Start Menu: Disable Recent Docs History"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Name = "NoRecentDocsHistory"; Expected = 1; Default = 0; Type = "DWord" }
+        @{ UIDisplayName = "Start Menu: Force Classic Alphabetical List (Disables 26H2 Category Tiles)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"; Name = "AllAppsViewMode"; Expected = 2; Default = 0; Type = "DWord"; RestartShell = $true }
+        @{ UIDisplayName = "Start Menu: Hide Recently Opened Files & Jump Lists"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "Start_TrackDocs"; Expected = 0; Default = 1; Type = "DWord" }
+        @{ UIDisplayName = "Start Menu: Hide Recently Added & Most Used Apps"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Name = "Start_TrackProgs"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Start Menu: Disable Search Highlights (Bing bloat)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "EnableSearchBoxSearchHighlights"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Start Menu: Disable Tailored Search Suggestions"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowTailoredSearch"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Widgets: Disable News & Interests (Saves RAM/Network)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"; Name = "AllowNewsAndInterests"; Expected = 0; Default = 1; AltName = "DisableWidgetsBoard"; AltExpected = 1; Type = "DWord"; RestartShell = $true }
@@ -217,7 +220,7 @@ function Get-RegState_Gaming {
         @{ UIDisplayName = "Kernel: Disable Paging Executive (Keeps core system in RAM)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS: System Responsiveness (Allocate 100% CPU to Games)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Expected = 0; Default = 20; Type = "DWord" }
         @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; ValidValues = @(4294967295, -1); Type = "DWord" }
-        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; Type = "DWord" }
+        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(40, 38, 42, 22, 24); Type = "DWord" }
         @{ UIDisplayName = "Power: Disable Windows Power Throttling globally"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; Name = "PowerThrottlingOff"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
@@ -582,18 +585,425 @@ function Invoke-ApplyRegistry {
     if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
     Write-GUI " -> $CategoryName registry modifications completed ($Operation)."
 }
+# ------------------------------------------
+# Z3: START MENU NATIVE COMPILATION & POWER/DISPLAY TUNER (MOVED FROM Z4)
+# ------------------------------------------
+function Invoke-StartMenuAudit {
+    Write-GUI "--- AUDIT: Start Menu Pins & Layout Mode ---"
+    $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+    
+    if ($null -eq $pkgDir) {
+        Write-GUI "  [OK] StartMenuExperienceHost package not found in current user profile."
+        return
+    }
+
+    $localState = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
+    $binFile    = Get-Item -Path (Join-Path $localState "start2.bin") -Force -ErrorAction SilentlyContinue
+    $clearedSz  = (Get-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -ErrorAction SilentlyContinue).StartMenuClearedSize
+
+    if ($null -ne $binFile) {
+        $szKB = [math]::Round($binFile.Length / 1KB, 2)
+        if ($null -ne $clearedSz -and [math]::Abs($binFile.Length - $clearedSz) -le 512) {
+            Write-GUI "  [OK] Clean minimal layout active: start2.bin ($szKB KB - Edge, Settings, Explorer)."
+        } else {
+            Write-GUI "  [!] Active layout database detected: $($binFile.Name) ($szKB KB)."
+        }
+    } else {
+        Write-GUI "  [OK] Start Menu binary database is not present."
+    }
+
+    $viewMode  = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -ErrorAction SilentlyContinue).AllAppsViewMode
+    $trackDocs = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -ErrorAction SilentlyContinue).Start_TrackDocs
+    if ($viewMode -eq 2 -and $trackDocs -eq 0) {
+        Write-GUI "  [OK] All Apps View: Classic Alphabetical List (AllAppsViewMode=2) & Recent Files hidden."
+    } else {
+        Write-GUI "  [!] All Apps View / Recent Files not yet locked to Classic List (Current ViewMode: $(if($null -ne $viewMode){$viewMode}else{'0 - Category Tiles'}))."
+    }
+
+    $policyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
+    $mdmLock = (Get-ItemProperty -Path $policyPath -Name "ConfigureStartPins_ProviderSet" -ErrorAction SilentlyContinue).ConfigureStartPins_ProviderSet
+    if ($mdmLock -eq 1) {
+        Write-GUI "  [!] Residual MDM Start Menu lock detected in PolicyManager."
+    } else {
+        Write-GUI "  [OK] No residual MDM Start Menu locks found."
+    }
+}
+
+function Clear-StartMenu {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI " -> Initializing deterministic Start Menu reset (3-Icon + Classic List + No Recent Files)..."
+    Update-Progress 5
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        
+        if ($null -eq $pkgDir) {
+            if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] StartMenuExperienceHost package directory not found. Aborting.") }
+            return
+        }
+
+        $startStatePath   = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
+        $provGuid         = "B5292708-1619-419B-9923-E5D9F3925E71"
+        $enrollmentPath   = "HKLM:\SOFTWARE\Microsoft\Enrollments\$provGuid"
+        $providerPath     = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid\default\Device\Start"
+        $policyDevicePath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
+        $policyLegacyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\device\Start"
+        $policyUserPath   = "HKCU:\Software\Microsoft\PolicyManager\current\user\Start"
+
+        # Minimal 3-icon layout: Microsoft Edge, Windows Settings, File Explorer
+        $cleanPinsJson = '{"pinnedList":[{"desktopAppId":"MSEdge"},{"packagedAppId":"windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"},{"desktopAppId":"Microsoft.Windows.Explorer"}]}'
+
+        $createdEnrollment = $false
+
+        try {
+            # Stage 1: ContentDeliveryManager lockdown + Disable Recent Files & Force Classic List View
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 15
+                $UltixSync.Logs.Enqueue(" -> [1/7] Disabling ContentDeliveryManager, Recent Files & forcing Classic Alphabetical List...")
+            }
+            $cdmPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+            if (Test-Path $cdmPath) {
+                foreach ($cdmName in @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "SubscribedContentEnabled")) {
+                    Set-ItemProperty -Path $cdmPath -Name $cdmName -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+                if (Test-Path "$cdmPath\SuggestedApps") {
+                    Remove-Item -Path "$cdmPath\SuggestedApps" -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $advPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            if (Test-Path $advPath) {
+                Set-ItemProperty -Path $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name "Start_Layout" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+
+            $expPolPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
+            if (-not (Test-Path $expPolPath)) { New-Item -Path $expPolPath -Force -ErrorAction SilentlyContinue | Out-Null }
+            Set-ItemProperty -Path $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+            # Purge Recent JumpList AutomaticDestinations & Recent shortcuts
+            $recentDir = "$env:APPDATA\Microsoft\Windows\Recent"
+            if (Test-Path $recentDir) {
+                Get-ChildItem -LiteralPath $recentDir -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -LiteralPath "$recentDir\AutomaticDestinations" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+
+            # Stage 2: Temporary MDM Provider Registration
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 30
+                $UltixSync.Logs.Enqueue(" -> [2/7] Injecting temporary MDM PolicyManager provider context...")
+            }
+            if (-not (Test-Path $enrollmentPath)) {
+                New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
+                $createdEnrollment = $true
+            }
+            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
+            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
+            Set-ItemProperty -Path $enrollmentPath -Name "IsFederated" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $enrollmentPath -Name "ProviderID" -Value "MS DM Server" -Type String -Force
+
+            if (-not (Test-Path $providerPath)) {
+                New-Item -Path $providerPath -Force -ErrorAction Stop | Out-Null
+            }
+            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
+            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
+
+            if (-not (Test-Path $policyDevicePath)) {
+                New-Item -Path $policyDevicePath -Force -ErrorAction Stop | Out-Null
+            }
+            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
+            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
+            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
+
+            # Stage 3: Purge CloudStore caches & lock AllAppsViewMode = 2 (Classic Alphabetical List)
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 45
+                $UltixSync.Logs.Enqueue(" -> [3/7] Purging CloudStore tile grid and enforcing AllAppsViewMode=2 (List View)...")
+            }
+            $cloudStoreRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
+            if (Test-Path $cloudStoreRoot) {
+                Get-ChildItem -Path $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
+                    $_.PSChildName -match "start\.tilegrid|unifiedtile|start\.allapps|start\.properties"
+                } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            $startRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
+            if (Test-Path $startRegPath) {
+                Remove-Item -Path $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -Path $startRegPath -Force -ErrorAction SilentlyContinue | Out-Null
+            # 2 = Classic Alphabetical List View (replaces Windows 11 25H2/26H2 Category Tiles = 0)
+            Set-ItemProperty -Path $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+
+            # Stage 4: Stop shell processes and wipe start*.bin
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 60
+                $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
+            }
+            Stop-Process -Name "StartMenuExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+
+            for ($attempt = 1; $attempt -le 6; $attempt++) {
+                Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -Path $startStatePath -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                }
+                if (-not (Test-Path (Join-Path $startStatePath "start2.bin"))) { break }
+                Start-Sleep -Milliseconds 50
+            }
+
+            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+                Start-Process "explorer.exe"
+                Start-Sleep -Milliseconds 800
+            }
+
+            # Stage 5: Trigger native compilation via Core_Helpers [WinUltix.AppActivator] COM interop
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 75
+                $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
+            }
+            try {
+                $appActivator = New-Object WinUltix.AppActivator
+                [uint32]$activatedPid = 0
+                [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($appActivator)
+            } catch {}
+
+            $compiledBinPath = Join-Path $startStatePath "start2.bin"
+            $elapsed = 0
+            while ($elapsed -lt 4500) {
+                Start-Sleep -Milliseconds 250
+                $elapsed += 250
+                if (Test-Path -LiteralPath $compiledBinPath) {
+                    $fileInfo = Get-Item -LiteralPath $compiledBinPath -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $fileInfo -and $fileInfo.Length -gt 1024) {
+                        Start-Sleep -Milliseconds 600
+                        break
+                    }
+                }
+            }
+
+            if (Test-Path -LiteralPath $compiledBinPath) {
+                $newBinSize = (Get-Item -LiteralPath $compiledBinPath -Force).Length
+                if (-not (Test-Path "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
+                Set-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
+            }
+
+            if ($null -ne $UltixSync) {
+                $UltixSync.Logs.Enqueue("    [OK] Native start2.bin compiled (3-Icon + Classic Alphabetical List + No Recent Files).")
+            }
+        } catch {
+            if ($null -ne $UltixSync) {
+                $UltixSync.Logs.Enqueue("    [!] Error during Start Menu native compilation: $($_.Exception.Message)")
+            }
+        } finally {
+            # Stage 6: Deterministic MDM cleanup so pins remain unlocked
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 90
+                $UltixSync.Logs.Enqueue(" -> [6/7] Stripping temporary MDM PolicyManager locks...")
+            }
+            foreach ($polPath in @($policyDevicePath, $policyLegacyPath, $policyUserPath)) {
+                if (Test-Path -Path $polPath) {
+                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_ProviderSet" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_WinningProvider" -Force -ErrorAction SilentlyContinue
+                }
+            }
+            if (Test-Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid") {
+                Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($createdEnrollment -and (Test-Path $enrollmentPath)) {
+                Remove-Item -Path $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+                Start-Process "explorer.exe"
+            }
+        }
+
+        # Stage 7: Default User provisioning
+        if ($null -ne $UltixSync) {
+            $UltixSync.Progress = 100
+            $UltixSync.Logs.Enqueue(" -> [7/7] Provisioning Default User profile LayoutModification.json...")
+        }
+        $defaultShellPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell"
+        if (-not (Test-Path -Path $defaultShellPath)) {
+            New-Item -Path $defaultShellPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $defaultJsonPath = Join-Path -Path $defaultShellPath -ChildPath "LayoutModification.json"
+        Set-Content -Path $defaultJsonPath -Value $cleanPinsJson -Encoding UTF8 -Force -ErrorAction SilentlyContinue
+
+        $defaultPkgPath = "$env:SystemDrive\Users\Default\AppData\Local\Packages"
+        if (Test-Path -Path $defaultPkgPath) {
+            Get-ChildItem -Path $defaultPkgPath -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                Get-ChildItem -Path (Join-Path $_.FullName "LocalState") -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if ($null -ne $UltixSync) {
+            $UltixSync.Logs.Enqueue("    [OK] Default User LayoutModification.json provisioned.")
+        }
+    } -OnComplete ({
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI ""
+    }.GetNewClosure())
+}
+
+function Get-PowerDisplayState {
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 10 }
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # 1. System Hibernation (hiberfil.sys)
+    $hiberVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue).HibernateEnabled
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Power: Disable Hibernation & Purge hiberfil.sys"
+        IsDetected    = ($null -eq $hiberVal -or $hiberVal -ne 0)
+        ActionData    = @{ Type = "Hiber" }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 25 }
+
+    # 2. System Standby / Sleep Timeout (SUB_SLEEP -> STANDBYIDLE)
+    $standbySec = Get-UltixPowerAcIndex -SubGroupGuid "238c9fa8-0aad-41ed-83f4-97be242c8f20" -SettingGuid "29f6c1db-86da-48c5-9fdb-f2b67b1f44da" -IncludeHidden
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Power: Disable System Sleep / Standby Timeout (Current AC: $(if ($null -ne $standbySec) { "$standbySec s" } else { 'N/A' }))"
+        IsDetected    = ($null -eq $standbySec -or $standbySec -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "238c9fa8-0aad-41ed-83f4-97be242c8f20"; Guid = "29f6c1db-86da-48c5-9fdb-f2b67b1f44da"; OptAC = 0; OptDC = 0; DefAC = 1800; DefDC = 900 }
+    })
+
+    # 3. Display Turn-Off Timeout (SUB_VIDEO -> VIDEOIDLE >= 3600s or 0)
+    $videoSec = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e" -IncludeHidden
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Display: Set Monitor Turn-Off Timeout to 60 Min (Current AC: $(if ($null -ne $videoSec) { "$([math]::Round($videoSec / 60)) min" } else { 'N/A' }))"
+        IsDetected    = ($null -eq $videoSec -or ($videoSec -ne 0 -and $videoSec -lt 3600))
+        ActionData    = @{ Type = "PowerCfg"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e"; OptAC = 3600; OptDC = 3600; DefAC = 900; DefDC = 300 }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 50 }
+
+    # 4. Hard Disk / SATA AHCI Spin-Down Timeout (SUB_DISK -> DISKIDLE = 0)
+    $diskSec = Get-UltixPowerAcIndex -SubGroupGuid "0012ee47-9041-4b5d-9b77-535fba8b1442" -SettingGuid "6738e2c4-e8a5-4a42-b16a-e040e769756e" -IncludeHidden
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Storage: Disable HDD / SATA Controller Spin-Down (Current AC: $(if ($null -ne $diskSec) { "$diskSec s" } else { 'N/A' }))"
+        IsDetected    = ($null -eq $diskSec -or $diskSec -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "0012ee47-9041-4b5d-9b77-535fba8b1442"; Guid = "6738e2c4-e8a5-4a42-b16a-e040e769756e"; OptAC = 0; OptDC = 0; DefAC = 1200; DefDC = 600 }
+    })
+
+    # 5. USB Selective Suspend (SUB_USB -> USBSELECTIVESUSPEND = 0)
+    $usbVal = Get-UltixPowerAcIndex -SubGroupGuid "2a737441-1930-4402-8d77-b2bebba308a3" -SettingGuid "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" -IncludeHidden
+    $usbLabel = if ($usbVal -eq 0) { "Disabled" } elseif ($usbVal -eq 1) { "Enabled" } else { "N/A" }
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "USB: Disable USB Selective Suspend - Protects DACs/VR/Dongles (Current: $usbLabel)"
+        IsDetected    = ($null -eq $usbVal -or $usbVal -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "2a737441-1930-4402-8d77-b2bebba308a3"; Guid = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 1 }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 75 }
+
+    # 6. Power Plan PCIe Link State Power Management (SUB_PCIEXPRESS -> ASPM = 0)
+    $pcieVal = Get-UltixPowerAcIndex -SubGroupGuid "501a4d13-42af-4429-9fd1-a8218c268e20" -SettingGuid "ee12f906-d277-404b-b6da-e5fa1a576df5" -IncludeHidden
+    $pcieLabel = switch ($pcieVal) { 0 { "Off" } 1 { "Moderate" } 2 { "Max Saving" } default { "N/A" } }
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "PCIe: Disable Plan Link State Power Management (Current AC: $pcieLabel)"
+        IsDetected    = ($null -eq $pcieVal -or $pcieVal -ne 0)
+        ActionData    = @{ Type = "PowerCfg"; Sub = "501a4d13-42af-4429-9fd1-a8218c268e20"; Guid = "ee12f906-d277-404b-b6da-e5fa1a576df5"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 2 }
+    })
+
+    # 7. Display Content Adaptive Brightness Control (CABC / Adaptive Dimming = 0)
+    $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
+    $cabcReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
+    $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming)"
+        IsDetected    = (-not $isCabcOpt)
+        ActionData    = @{ Type = "CABC"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "aded5e82-b909-4619-9949-f5d71dac0bcb" }
+    })
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @($results)
+}
+
+function Invoke-ApplyPowerDisplay {
+    param(
+        [Parameter(Mandatory=$true)][array]$SelectedItems,
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
+    )
+    if ($SelectedItems.Count -eq 0) { Write-GUI " -> No power/display items selected."; return }
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $Operation) -ScriptBlock {
+        param([array]$Items, [string]$Op)
+        $total   = $Items.Count
+        $current = 0
+        $verb    = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
+
+        foreach ($item in $Items) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 90)
+                $UltixSync.Logs.Enqueue(" -> $($verb): $($item.UIDisplayName)")
+            }
+
+            $d = $item.ActionData
+            try {
+                if ($d.Type -eq "Hiber") {
+                    if ($Op -eq 'Apply') {
+                        powercfg.exe /hibernate off 2>$null
+                    } else {
+                        powercfg.exe /hibernate on 2>$null
+                    }
+                } elseif ($d.Type -eq "PowerCfg") {
+                    $acVal = if ($Op -eq 'Apply') { $d.OptAC } else { $d.DefAC }
+                    $dcVal = if ($Op -eq 'Apply') { $d.OptDC } else { $d.DefDC }
+                    powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $acVal 2>$null
+                    powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $dcVal 2>$null
+                } elseif ($d.Type -eq "CABC") {
+                    $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+                    if ($Op -eq 'Apply') {
+                        powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid 0 2>$null
+                        powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid 0 2>$null
+                        Set-ItemProperty -Path $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    } else {
+                        Remove-ItemProperty -Path $gfxKey -Name "DisableCABC" -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch {
+                if ($null -ne $UltixSync) {
+                    $UltixSync.Logs.Enqueue("    [!] Failed on $($item.UIDisplayName): $($_.Exception.Message)")
+                }
+            }
+        }
+
+        powercfg.exe /setactive SCHEME_CURRENT 2>$null
+        if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    } -OnComplete ({
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI " -> Power & Display subsystem configuration completed ($Operation).`n"
+    }.GetNewClosure())
+}
 
 # ------------------------------------------
-# Z3: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z3: UI INITIALIZATION (TWEAKS, SHELL, POWER & GAMING)
 # ------------------------------------------
 function Initialize-Z3UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tabReg = New-Object System.Windows.Forms.TabPage
-    $tabReg.Text = "Registry"
-    $tabReg.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $tabReg.Text = "Tweaks"
+    $tabReg.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
-    $invokeRegCategory = {
+    $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+
+    $invokeRegCategory = ({
         param(
             [string]$ScannerFn,
             [string]$CategoryName,
@@ -623,127 +1033,79 @@ function Initialize-Z3UI {
             }
             Write-GUI ""
         }
-    }.GetNewClosure()
+    }.GetNewClosure())
 
     # 1. Taskbar & Start Menu
-    [void](New-UltixActionRow -Parent $tabReg -Y 20 `
-        -Text "Taskbar and Start Menu" `
-        -Description "Aligns the taskbar to the left, kills Bing assistants, and hides widgets." `
-        -AuditDescription "AUDIT: Verifies taskbar alignment policy, Start Menu layouts, and Bing locks." `
+    $rowTaskbar = New-UltixActionRow -Parent $tabReg -Y 20 -MainRGB @(55, 58, 64) `
+        -Text "Taskbar and Start Menu Tweaks" `
+        -Description "Aligns the taskbar to the left, kills Bing search assistants, disables notifications bloat, and hides Widgets (with UCPD.sys bypass)." `
+        -AuditDescription "AUDIT: Verifies taskbar alignment policy, Start Menu layouts, Widgets state, and Bing locks." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -RefreshShell }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -AuditOnly }.GetNewClosure()))
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -AuditOnly }.GetNewClosure())
 
-    # 2. File Explorer
-    [void](New-UltixActionRow -Parent $tabReg -Y 70 `
+    # 2. Reset Start Menu Layout (3-Icon Clean)
+    $rowStartMenu = New-UltixActionRow -Parent $tabReg -Y 70 -MainRGB @(55, 58, 64) `
+        -Text "Reset Start Menu Layout (Clean 3-Icon)" `
+        -Description "Wipes promotional Start Menu tiles (start2.bin) and compiles a clean 3-icon layout (Edge, Settings, Explorer) with zero MDM locks left behind." `
+        -AuditDescription "AUDIT: Scans the size of the current Start Menu layout database (start2.bin) and checks for residual MDM locks." `
+        -OnClick ({
+            $msgText = "This action will permanently wipe your Start Menu pins and layout database.`n`nStartMenuExperienceHost will be restarted in the background (System Tray remains intact).`n`nDo you want to proceed?"
+            $msgResult = [System.Windows.Forms.MessageBox]::Show($msgText, "WinUltix - Reset Start Menu", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+                Clear-StartMenu -ControlsToDisable $allTabButtons.ToArray()
+            } else {
+                Write-GUI " -> Start Menu reset aborted by user.`n"
+            }
+        }.GetNewClosure()) `
+        -OnAudit ({ Invoke-StartMenuAudit; Write-GUI "" }.GetNewClosure())
+
+    # 3. File Explorer & Context Menu
+    $rowExplorer = New-UltixActionRow -Parent $tabReg -Y 120 -MainRGB @(55, 58, 64) `
         -Text "File Explorer and Context Menu" `
-        -Description "Restores the full context menu, launches folder processes in isolation." `
-        -AuditDescription "AUDIT: Verifies the presence of classic context menu and Explorer performance flags." `
+        -Description "Restores the classic Windows 10 right-click context menu, shows file extensions, unpins OneDrive, and runs folder windows in a separate process." `
+        -AuditDescription "AUDIT: Verifies classic context menu CLSID registration and File Explorer performance flags." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -RefreshShell }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -AuditOnly }.GetNewClosure()))
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -AuditOnly }.GetNewClosure())
 
-    # 3. OS Annoyances
-    [void](New-UltixActionRow -Parent $tabReg -Y 120 `
-        -Text "OS Annoyances (AutoRun / Sticky Keys)" `
-        -Description "Deactivates AutoPlay and Accessibility shortcuts (Sticky Keys)." `
-        -AuditDescription "AUDIT: Verifies AutoPlay and Sticky Keys blockade." `
+    # 4. OS Annoyances (Modern Standby S0 / Sticky Keys / AutoPlay)
+    $rowAnnoy = New-UltixActionRow -Parent $tabReg -Y 170 -MainRGB @(55, 58, 64) `
+        -Text "OS Annoyances (Modern Standby / Keys)" `
+        -Description "Disables Modern Standby S0 (forces hardware S3 sleep), blocks AutoPlay across all drives, and disables Sticky/Filter/Toggle Keys popups." `
+        -AuditDescription "AUDIT: Verifies Modern Standby S0 override, AutoPlay policy, and Sticky Keys blockade." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Annoyances" "Annoyances" "WinUltix - OS Annoyances" "OS Annoyances" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Annoyances" "Annoyances" "WinUltix - OS Annoyances" "OS Annoyances" -AuditOnly }.GetNewClosure()))
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Annoyances" "Annoyances" "WinUltix - OS Annoyances" "OS Annoyances" -AuditOnly }.GetNewClosure())
 
-    # 4. Privacy
-    [void](New-UltixActionRow -Parent $tabReg -Y 170 `
-        -Text "Privacy and Background Apps (AppPrivacy)" `
-        -Description "Blocks telemetry, background UWP apps execution, and limits Edge processes." `
-        -AuditDescription "AUDIT: Checks the registry for telemetry, Edge, and background execution blocks." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_Privacy" "Privacy" "WinUltix - Privacy Policies" "Privacy Policies" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Privacy" "Privacy" "WinUltix - Privacy Policies" "Privacy Policies" -AuditOnly }.GetNewClosure()))
+    # 5. Optimize Power & Display (7-Point)
+    $rowPower = New-UltixActionRow -Parent $tabReg -Y 220 -MainRGB @(55, 58, 64) `
+        -Text "Optimize Power and Display (7-Point)" `
+        -Description "7-Point Power & Display tuner: Disables Hibernation (hiberfil.sys), Sleep/SATA spin-down, USB Selective Suspend (protects DACs/8K mice), PCIe ASPM, and OLED CABC dimming." `
+        -AuditDescription "AUDIT: Verifies active Power Plan timeouts, USB Selective Suspend, PCIe ASPM, CABC, and Hibernation state." `
+        -OnClick ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ModalTitle "WinUltix - Power & Display Optimizer" -ModalDescription "Select power and display parameters to enforce or revert to Windows defaults." -ExecutorFunction "Invoke-ApplyPowerDisplay" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
+        }.GetNewClosure()) `
+        -OnAudit ({
+            Invoke-UltixAuditFlow -ScannerFunction "Get-PowerDisplayState" -AuditLabel "Power & Display Subsystem" -ControlsToDisable $allTabButtons.ToArray() -AuditOnly -AuditPrefix "Unoptimized"
+        }.GetNewClosure())
 
-    # 5. Boot & Security
-    [void](New-UltixActionRow -Parent $tabReg -Y 220 `
-        -Text "Boot and WPBT (BIOS/UEFI Block)" `
-        -Description "Disables Fast Boot, OneDrive, RDP, and blocks software injections from BIOS/UEFI (WPBT)." `
-        -AuditDescription "AUDIT: Verifies kernel hibernation logic (Fast Boot), WPBT, and RDP." `
-        -OnClick ({ & $invokeRegCategory "Get-RegState_SystemBoot" "SystemBoot" "WinUltix - Boot & Security" "Boot & Security" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_SystemBoot" "SystemBoot" "WinUltix - Boot & Security" "Boot & Security" -AuditOnly }.GetNewClosure()))
-
-    # 6. Mouse
-    [void](New-UltixActionRow -Parent $tabReg -Y 270 `
-        -Text "Hard Mouse Acceleration Disable (Raw Input)" `
-        -MainRGB @(60, 100, 150) -AuditRGB @(60, 100, 150) `
-        -Description "Pure 1:1 input. Hard-disables 'Enhance pointer precision' to eliminate system smoothing." `
-        -AuditDescription "AUDIT: Scans registry keys for system pointer acceleration." `
+    # 6. Hard Mouse Acceleration Disable (1:1 Raw Input)
+    $rowMouse = New-UltixActionRow -Parent $tabReg -Y 270 -MainRGB @(45, 85, 125) `
+        -Text "Hard Mouse Acceleration Disable (1:1)" `
+        -Description "Enforces pure 1:1 raw pointer input by disabling 'Enhance pointer precision' and zeroing acceleration thresholds." `
+        -AuditDescription "AUDIT: Scans HKCU\Control Panel\Mouse for pointer acceleration thresholds." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Mouse" "Mouse" "WinUltix - Raw Input Enforcer" "Mouse Acceleration" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Mouse" "Mouse" "WinUltix - Raw Input Enforcer" "Mouse Acceleration" -AuditOnly }.GetNewClosure()))
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Mouse" "Mouse" "WinUltix - Raw Input Enforcer" "Mouse Acceleration" -AuditOnly }.GetNewClosure())
 
-    # 7. Gaming
-    [void](New-UltixActionRow -Parent $tabReg -Y 320 `
-        -Text "Hardware and Gaming (Extreme)" `
-        -MainRGB @(150, 60, 60) -AuditRGB @(150, 60, 60) `
-        -Description "Enforces MMCSS priorities, disables GameDVR, enabling maximum hardware performance." `
-        -AuditDescription "AUDIT: Verifies MMCSS limits, CPU priority, and HAGS acceleration." `
+    # 7. Hardware and Gaming (Extreme)
+    $rowGaming = New-UltixActionRow -Parent $tabReg -Y 320 -MainRGB @(135, 50, 50) `
+        -Text "Hardware and Gaming Registry (Extreme)" `
+        -Description "Enforces MMCSS gaming thread priorities, disables GameDVR, disables Multiplane Overlay (MPO - fixes VRR/OLED flicker), enables Flip Model, and tunes VBS/HVCI." `
+        -AuditDescription "AUDIT: Verifies MMCSS limits, MPO state, GameDVR, HAGS, and VBS/HVCI flags." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" }.GetNewClosure()) `
-        -OnAudit ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" -AuditOnly }.GetNewClosure()))
+        -OnAudit ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" -AuditOnly }.GetNewClosure())
 
-    # 8. SRP Execution Locks (Main + [+], [-], [?])
-    $btnRegSRP = New-UltixButton -Parent $tabReg -X 15 -Y 420 -Width 240 -Height 40 -RGB @(60, 60, 60) `
-        -Text "Execution Blocks (SRP/Legacy Pro)" `
-        -Description "NATIVE KERNEL LOCK (Pro/Enterprise Only): Generates legacy Software Restriction Policies to block execution. May not work on Home editions or future OS builds."
-
-    $btnAddSRP = New-UltixButton -Parent $tabReg -X 260 -Y 420 -Width 40 -Height 40 -RGB @(60, 100, 60) `
-        -Text "+" `
-        -Description "ADD CUSTOM TARGET: Browse for an .exe file to add to your custom SRP block list." `
-        -OnClick {
-            $dlg = New-Object System.Windows.Forms.OpenFileDialog
-            $dlg.Filter = "Executables (*.exe)|*.exe"
-            $dlg.Title = "Select Executable to Block (SRP)"
-            $dlg.InitialDirectory = "$env:ProgramFiles"
-            try {
-                if ($dlg.ShowDialog($global:form) -eq [System.Windows.Forms.DialogResult]::OK) {
-                    $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-                    if (-not (Test-Path -LiteralPath $regKey)) { New-Item -Path $regKey -Force | Out-Null }
-                    $exeName = [System.IO.Path]::GetFileName($dlg.FileName)
-                    Set-ItemProperty -LiteralPath $regKey -Name $exeName -Value $dlg.FileName -Type String -Force
-                    Write-GUI " -> Added custom SRP target: $exeName"
-                }
-            } finally {
-                $dlg.Dispose()
-            }
-        }
-
-    $btnClrSRP = New-UltixButton -Parent $tabReg -X 305 -Y 420 -Width 40 -Height 40 -RGB @(100, 60, 60) `
-        -Text "-" `
-        -Description "CLEAR CUSTOM TARGETS: Removes all custom executables from the WinUltix tracking list (does not unlock them if currently applied)." `
-        -OnClick {
-            $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-            if (Test-Path -LiteralPath $regKey) {
-                Remove-Item -LiteralPath $regKey -Force -Recurse | Out-Null
-                Write-GUI " -> Custom SRP tracking database purged."
-            } else {
-                Write-GUI " -> Custom SRP roster is already empty."
-            }
-        }
-
-    $btnAudSRP = New-UltixButton -Parent $tabReg -X 350 -Y 420 -Width 40 -Height 40 -RGB @(80, 80, 80) `
-        -Text "?" `
-        -Description "AUDIT: Verifies active Software Restriction Policies." `
-        -OnClick {
-            Write-GUI "--- AUDIT: Software Restriction Policies ---"
-            $state = Get-RegState_SRP
-            $detected = @($state | Where-Object { $_.IsDetected })
-            if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] To Block: $($d.UIDisplayName)" }
-            } else {
-                Write-GUI "  [OK] Optimized."
-            }
-            Write-GUI ""
-        }
-
-    $btnRegSRP.Add_Click({
-        $auditData = Get-RegState_SRP
-        $modalOutput = Show-ActionModal -Title "WinUltix - SRP & IFEO Lockdown" -Description "Select executables to permanently block via OS policies (Apply = Lock, Revert = Unlock)." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
-            Invoke-ApplySRP -SelectedItems $modalOutput.Items -Operation $modalOutput.Action -ControlsToDisable @($btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP)
-        }
-    }.GetNewClosure())
+    foreach ($row in @($rowTaskbar, $rowStartMenu, $rowExplorer, $rowAnnoy, $rowPower, $rowMouse, $rowGaming)) {
+        $allTabButtons.AddRange($row.Controls)
+    }
 
     $TabControl.Controls.Add($tabReg)
 }

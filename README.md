@@ -1,14 +1,16 @@
+<div align="center">
+  <img src="assets/logo.png" alt="WinUltix Logo" width="128" height="128" />
+  <h1>WinUltix 3.1</h1>
+  <p><b>The Ultimate ~500KB Windows 11 & 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
+</div>
 
 > 🔗 **Part of the Ultix Ecosystem:**
 > Looking for a clean, pre-debloated Windows 11 ISO deployment? Check out **[AutoUltixed](https://github.com/Firever-ultix/AutoUltixed)**.
 > Looking for live post-install hardware, kernel & OS tuning? You are at **[WinUltix](https://github.com/Firever-ultix/WinUltix)**.
 
-# WinUltix 3.0 🚀
-**The Ultimate ~500 KB Windows 11 & 10 Hardware Tuner, Debloater, and System First-Aid Toolkit**
+Most Windows utilities force a bad compromise: they are either bloated 150 MB background apps that eat your RAM, or reckless "black-box" scripts that blindly delete system files, break Windows Update, and ruin your Xbox/Steam logins.
 
-Most Windows "optimizers" fall into two traps: they are either bloated 150 MB apps that eat your RAM in the background, or reckless "black-box" scripts that nuke core system files, break Windows Update, and ruin your Xbox/Steam logins.
-
-I built **WinUltix** to be the exact opposite: **a fast, 100% transparent, zero-dependency toolkit (~500 KB)** that gives you surgical control over Windows 11 (24H2 / 25H2 / 26H2) and Windows 10. Every single tweak is explained on hover, runs asynchronously without freezing the interface, and features a built-in **Revert (Undo)** engine so you can restore factory defaults at any time.
+I built **WinUltix** to be the exact opposite: **a fast, 100% transparent, zero-dependency engineering toolkit (~500 KB)** for Windows 11 (25H2 / 26H2) and Windows 10. It replaces **10 separate standalone programs** (*DriverStore Explorer, PatchCleaner, MSI Utility, Process Lasso, LatencyMon, USB Tree Viewer, TimerResolution, Autoruns, TCP Optimizer, and Debloaters*) inside one native dark interface. Every tweak is explained on hover, runs asynchronously without freezing the GUI, and includes a **Symmetric Revert (Undo)** engine so you can restore factory defaults anytime.
 
 ![WinUltix Main Interface](assets/1.png)
 
@@ -20,86 +22,131 @@ Launch WinUltix directly in memory from an **Administrator** PowerShell / Termin
 irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix_Monolith.ps1 | iex
 ```
 
-*(Prefer a traditional `.exe`? Grab the standalone executable from the **[Releases](https://github.com/Firever-ultix/WinUltix/releases)** tab).*
-WinUltix.exe SHA-256: C878FE4A6BA2A2A79BCAE06663A23B51BF3A8E5B425736704D6B8AB9884E87AC
+*(Prefer a standalone `.exe`? Grab the compiled executable from the **[Releases](https://github.com/Firever-ultix/WinUltix/releases)** page).*
+SHA-256: 2C7F4225881DD1AC7411E9E5AFC1A97BE036172BE42919074452DAFA8E5BA739
 
 ---
 
-### 🔥 Why WinUltix Stands Out
+### 🔥 Spotlight: Features You Won't Find Anywhere Else
 
-Normally, you need 6 or 7 separate utilities (*MSI Utility, Process Lasso, LatencyMon, TimerResolution, Autoruns, DDU/Cleaners*) to properly tune a gaming or workstation PC. WinUltix unifies all of them into a single, native dark interface:
+#### 1. Break Open the Windows USB Black Box (`USB XHCI Topology & Contention Mapper`)
+On modern AMD and Intel motherboards, **not all USB ports are created equal**. Some ports wire **directly into your CPU's silicon (SoC lanes)** with ultra-low latency, while others travel through **Chipset (PCH) PCIe bridges** and onboard hub splitters shared with SATA drives, RGB controllers, and Wi-Fi. Windows completely hides this physical wiring from you.
 
-#### 1. Eliminate Micro-Stutters & DPC Latency (`Hardware` Tab)
+* **Instant PCIe-to-USB Hardware Tree (`<5 ms`):** Using a native `cfgmgr32.dll` kernel device-tree walker, I map every physical `USBXHCI` and `USB4` controller back to the PCIe Root Complex and count the exact PCI bridge hops.
+* **CPU Direct vs. Chipset PCH Classification:** Instantly see which USB ports run on **`[CPU DIRECT SoC LANES]`** (1 PCIe hop—ideal for 4K/8KHz gaming mice and VR headsets) and which sit behind **`[CHIPSET PCH]`** or **`[SECONDARY BRIDGE]`** controllers.
+* **Live Root-Hub Line & Link-Speed Probing (`DeviceIoControl`):** Sends low-level `IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2` queries directly to `USBHUB3.sys` to reveal how many SuperSpeed (`5/10/20 Gbps`), `USB4 (40 Gbps)`, and `USB 2.0 (480 Mbps)` logical lines each controller exposes, which exact `Port #` each device is using, and its live negotiated speed (`12 Mbps FS`, `480 Mbps HS`, `5 Gbps SS`, `10/20 Gbps SS+`—even warning you if a USB 3.x drive is throttled inside a USB 2.0 port).
+* **True Silicon Names & Smart Hub/MCU De-Cluttering:** Reads real hardware descriptors (`DEVPKEY_Device_BusReportedDeviceDesc`), strips duplicate composite macro interfaces from QMK/VIA keyboards and gaming mice, and cleanly separates passive motherboard port expanders (`[ONBOARD HUBS]`) and static RGB controllers (`[ONBOARD MCU]`) from your active peripherals.
+* **Bus Contention Alerts & Built-In Wiring Guide:** Automatically flags red **`[!] CONTENTION`** warnings if a high-polling mouse shares an XHCI ring with an Isochronous Audio DAC or bulk USB storage drive, and includes a built-in engineering guide on how to wire your setup for zero jitter.
+
+![WinUltix USB](assets/usb.png)
+
+#### 2. Eliminate Micro-Stutters, Core 0 Bottlenecks & Scheduler Jitter (`Hardware` Tab)
 
 ![WinUltix Z7](assets/3.png)
 
-By default, Windows piles your graphics card, network adapter, and system timers onto **CPU Core 0**. When they collide, you get audio crackles, input lag, and 1% low FPS drops.
+By default, Windows piles your GPU, network card, and system timers onto **CPU Core 0**. When they collide, you get audio crackles, input lag, and 1% low FPS drops.
 
-* **Live 1Hz Kernel DPC Monitor:** Watch real-time interrupt load across every physical CPU core (`C0..Cn`) and spot bottlenecks instantly.
-* **Smart Core 0 IRQ Offload & MSI Enforcer:** A sortable 6-column PCI table that automatically highlights heavy GPU and Network drivers choking Core 0 (`★ OFFLOAD TO C1`). Switch devices to MSI mode and move their interrupts to a secondary core in one click—with full backup and restore.
-* **0.5ms Hardware Timer + Live Test Button:** Unlocks global `0.5ms` timer precision in Windows 11, forces the low-latency CPU TSC clock, and includes a live **`Test 0.5ms Lock`** button so you can watch your system clock drop to `0.5000 ms` in real time.
+* **Live 1Hz Kernel DPC Monitor:** Watch real-time interrupt load across every physical CPU core (`C0..Cn`) and logical thread (`LP#`) via native `ntdll.dll` telemetry.
+* **MSI & Core 0 IRQ Offload Enforcer:** A sortable 6-column PCI table that highlights heavy GPU and Network drivers choking Core 0 (`★ OFFLOAD TO C1`). Switch devices to MSI mode, set interrupt priority, and pin their interrupts to a secondary core in one click—with full backup and restore.
+* **Live Quantum Scheduler Matrix (`Win32PrioritySeparation`):** Decode the kernel's 6-bit scheduler bitmask and switch between competitive presets (**`0x26`** *Short/Variable 3:1 Boost*, **`0x28`** *Short/Fixed 1:1 Deterministic*, **`0x2A`** *Short/Fixed 3:1 Hybrid*, **`0x16`** *Long/Variable*, and **`0x02`** *Factory*) **live in real time without rebooting**—perfect for A/B testing frametimes in-game.
+* **0.5ms Hardware Timer + Live Test:** Unlocks global `0.5ms` timer precision in Windows 11, forces the low-latency CPU TSC clock, and includes a live **`Test 0.5ms Lock`** button.
 
-#### 2. Smart CPU Affinity & Overclocking Diagnostics (`Hardware` Tab)
-
-* **Topology-Aware Affinity Lasso:** Automatically detects **AMD 3D V-Cache** chips (e.g., 7800X3D, 9800X3D, 7950X3D, 9950X3D) and **Intel Hybrid P+E Core** CPUs. Locks background resource hogs (Discord, Spotify, Browsers, Game Launchers) to secondary cores or E-Cores so your prime gaming cores stay 100% free.
-* **WHEA Overclocking / Undervolt Decoder:** Tuning PBO Curve Optimizer or DDR5 timings? WinUltix scans Windows hardware error logs and translates cryptic `APIC IDs` into exact **physical CPU core numbers**—telling you immediately whether a crash was caused by an aggressive Curve Optimizer core (ID 18), unstable FCLK/SoC (ID 19), or tight RAM timings (ID 47).
-* **CPPC Power Unhider with "Dead Man's Switch":** Unlocks hidden CPU power settings (`EPP`, `Idle Demote/Promote`). If you engage maximum performance (`EPP 0%`) and your PC crashes from an unstable undervolt, a built-in failsafe automatically restores safe settings on the next boot.
-* **Desktop "Pre-Flight" Game Mode Shortcut:** Generate a lightweight desktop toggle to arm or disarm your CPU Affinity and CPPC rules right before launching a game.
-
-#### 3. The Admin Tools Microsoft Forgot to Build (`Utilities` Tab)
-
-* **A Services Manager With an Actual Search Bar:** Microsoft's `services.msc` hasn't changed in 25 years. WinUltix gives you a fast, dark, sortable Services Manager with **instant live search**. Critical boot and security services are highlighted in red (`[CRITICAL - LOCKED]`) so you can inspect everything without ever accidentally bricking your OS.
-* **High-Signal Scheduled Tasks Inspector:** Hides ~180 noisy internal Windows tasks to immediately expose **3rd-Party Updaters**, **Microsoft Telemetry**, and broken **`[GHOST / Missing Exe]`** tasks left behind by uninstalled software.
-* **Deep Startup Manager:** Scans every hidden autorun location (`Run`, `RunOnce`, Group Policies, Startup folders) and decodes Task Manager's binary states—letting you toggle or permanently delete entries.
-* **1-Click Encrypted DNS (IPv4 + IPv6 + Native DoH):** Switch between Quad9, Cloudflare, AdGuard, Google, or OpenDNS with native Windows 11 **DNS-over-HTTPS (DoH)** encryption enabled automatically.
+![WinUltix DPC](assets/dpc.png)
 
 ---
 
-### 🧰 Complete Feature Overview
+### 🧰 The 7-Tab Swiss Army Knife — Complete Feature Tour
 
-* **🧹 Deep System & Shader Cleanup (`Cleanup` Tab):**
-Weighs and purges gigabytes of junk in seconds: Windows Update & Delivery Optimization caches, DirectX / NVIDIA / AMD GPU shader caches (great for fixing shader stutter after driver updates), multi-profile browser caches (Chrome, Edge, Brave, Vivaldi, Firefox, Opera), crash dumps, and Event Viewer logs.
-* **🗑️ Safe Debloater, Recall Killer & OneDrive Amputation (`Bloatware` Tab):**
-Selectively remove **64 pre-installed bloatware apps**, disable **Windows Recall & Copilot AI**, purge orphaned UWP frameworks (Garbage Collector), and completely eradicate OneDrive across all user accounts—while strictly protecting Xbox Game Bar/Identity, Microsoft Store, and `sfc /scannow` system integrity.
-* **🛡️ Registry, Privacy & Raw Input Tuning (`Registry` Tab):**
-Restore the classic Windows 10 right-click menu, align the taskbar left, kill Bing search in the Start Menu, enforce **1:1 Raw Mouse Input** (zero acceleration), disable Multiplane Overlay (**MPO**—fixes VRR/OLED screen flickering), boost gaming thread priorities (`MMCSS`), and block stubborn telemetry `.exe` files (`CompatTelRunner.exe`, `Widgets.exe`) from ever running again.
-* **⚙️ Service Profiles, Clean Start Menu & OLED/Power Tuner (`Services` Tab):**
-* **Office & Gaming Service Profiles:** Symmetrically disable up to 51 background services (including disk-thrashing diagnostics and telemetry) and revert them anytime.
-* **7-Point Power & Display Optimizer:** Disable Hibernation (`hiberfil.sys`), stop SATA HDD spin-down lag, disable **USB Selective Suspend** (prevents disconnects on external audio DACs, VR headsets, and 4K/8KHz wireless mice), and turn off **Content Adaptive Brightness (CABC)** to stop annoying auto-dimming on OLED/IPS monitors.
-* **1-Click Clean Start Menu:** Wipes pre-installed promotional tiles (TikTok, Instagram, Candy Crush) and compiles a clean, native 3-icon Start Menu (*Edge, Settings, File Explorer*) with zero MDM policy locks left behind.
+All **60 tools** are organized into 7 thematic tabs with a clean 4-color engineering palette (**Slate** = Standard Action, **Steel Blue** = Interactive Inspector/Analyzer, **Crimson** = Aggressive/Lockdown, **Neutral Gray** = Audits):
 
+#### 🧹 1. `Cleanup` — Disk Hygiene & Deep Orphan Sweepers (9 Tools)
+Go far beyond basic temp cleaners by reclaiming every GB wasted from hidden Windows package repositories:
+* **DriverStore Orphan Sweeper (`oemXX.inf`):** Built-in replacement for *DriverStore Explorer*. Scans `System32\DriverStore\FileRepository`, locks currently active hardware and DCH extension drivers in red (`[ACTIVE - LOCKED]`), and purges old, superseded NVIDIA, AMD, Intel, and Realtek driver packages.
+* **Windows Installer Orphan Sweeper (`MSI/MSP`):** Built-in replacement for *PatchCleaner*. Audits `C:\Windows\Installer` and `$PatchCache$`, reads native COM `SummaryInformation` streams to reveal real product names behind hex filenames, locks active uninstallers, and deletes orphaned `.msi`/`.msp` payloads.
+* **Surgical Registry Orphan Sweeper (with JSON Undo):** Zero-risk, 100% path-verified scanner that purges dead file references left behind by uninstalled games/apps across **Firewall Rules**, **AppCompat Store/Layers**, **DirectX GPU Preferences**, **SharedDLLs**, **MSI Folders**, and **App Paths** (while shielding unplugged USB drives). Includes 1-click **`Restore Last Backup (JSON)`**.
+* **Ghost Services & Drivers Sweeper:** Removes dead service and kernel driver registrations pointing to missing `.exe`/`.sys` files.
+* **Windows Update & CBS Cache Cleaner:** Safely purges `SoftwareDistribution`, Delivery Optimization, and `Logs\CBS`.
+* **Temp, Prefetch & Crash Dump Cleaner:** Purges System/User Temp across all profiles, Prefetch, WER reports, and memory dumps.
+* **3rd-Party App & GPU Shader Cache Cleaner:** Clears multi-profile browser caches (Chrome, Edge, Brave, Vivaldi, Firefox, Opera), Discord/Steam/Spotify caches, and **DirectX / NVIDIA / AMD GPU shader caches** (fixes post-update shader stutter).
+* **Event Viewer Log Cleaner & Hard NTFS Recycle Bin Purge:** Asynchronously clears `.evtx` diagnostic channels via `wevtutil` and force-empties corrupted Recycle Bins across all drives.
 
-* **🔧 One-Click System First-Aid (`Integrity` Tab):**
-* **Print Spooler First-Aid:** Fixes stuck printers by killing deadlocked spooler processes and clearing corrupted `.SPL`/`.SHD` queue files.
-* **Windows Update & Cryptographic Repair:** Fixes stuck updates by flushing corrupted BITS queues, resetting `catroot2` / `SoftwareDistribution`, and re-registering 31 core DLLs.
-* **WMI Repository Salvage & Icon Cache Rebuild:** Repairs broken system monitoring (`winmgmt`) and fixes blank white desktop/Explorer icons in seconds.
-* **WinSxS ResetBase Compression:** Safely compresses superseded Windows Update backups to reclaim 5–15 GB of SSD space.
+#### 🗑️ 2. `Debloat` — Bloatware, Recall AI & Component Removal (9 Tools)
+* **Uninstall & Deprovision OneDrive:** Multi-profile OneDrive amputation across all loaded `HKEY_USERS` hives while keeping dormant `%SystemRoot%` stubs so `sfc /scannow` stays 100% healthy.
+* **Aggressive Bloatware & AI Removal (64 Targets):** Selectively remove 64 UWP bloatware apps, strip **Windows Recall** payloads, and lock down **Copilot AI**—while strictly protecting Xbox Identity, Steam, and Microsoft Store.
+* **System Features (FOD Preset) & CBS Capability Stubs:** Strip 14 unneeded Features on Demand (WordPad, Steps Recorder, Quick Assist, Fax, Hello Face) and purge underlying CBS `*stub*` packages.
+* **Appx Framework Garbage Collector:** Resolves transitive dependency graphs to remove orphaned UWP runtime frameworks.
+* **4 Manual Package & Feature Inspector Grids:** Sortable tables with live search for granular control over remaining **User Appx**, **Base Image Provisioned Appx**, **Full FOD Capabilities**, and **Windows Optional Features (DISM)**.
 
-![WinUltix Main tabs](assets/9.png)
+#### ⚡ 3. `Tweaks` — Shell, 26H2 Start Menu, Power & Gaming Registry (7 Tools)
+* **Taskbar & Start Menu Tweaks:** Align the taskbar left, show clock seconds, kill Bing web search, and disable Widgets (includes a kernel-level bypass for Microsoft's **`UCPD.sys`** protection driver on Windows 11 24H2/25H2/26H2).
+* **1-Click Clean Start Menu (3-Icon + Classic List):** Wipes promotional Start Menu tiles (`start2.bin`), hides recently opened file shortcuts, forces the **Classic Alphabetical All-Apps List (`AllAppsViewMode=2`)** instead of Windows 11 26H2 category tiles, and compiles a clean 3-icon Start Menu (*Edge, Settings, Explorer*) with zero MDM locks left behind.
+* **File Explorer & Classic Context Menu:** Restore the classic Windows 10 right-click menu, show file extensions, unpin OneDrive, and run Explorer windows in separate processes.
+* **OS Annoyances:** Disable Modern Standby S0 (restore hardware S3 sleep), block AutoPlay, and kill Sticky/Filter Keys popups.
+* **7-Point Power & Display Optimizer:** Disable Hibernation (`hiberfil.sys`), stop SATA HDD spin-down lag, disable **USB Selective Suspend** (prevents drops on USB DACs and 8KHz mice), disable plan PCIe ASPM, and turn off **Content Adaptive Brightness (CABC)** to stop auto-dimming on OLED/IPS monitors.
+* **1:1 Raw Mouse Input & Extreme Gaming Registry:** Zero out mouse acceleration curves, disable GameDVR, enable HAGS & Flip Model, disable Multiplane Overlay (**MPO**—fixes VRR/G-Sync OLED flicker), uncap MMCSS `NetworkThrottlingIndex`, and tune VBS/HVCI.
+
+#### ⚙️ 4. `Services` — Background Profiles & Interactive Managers (6 Tools)
+* **Office (Light) & Gaming (Heavy) Service Profiles:** Symmetrically disable 9 (Office) or up to 51 (Gaming) background services—including `SysMain`, `WSearch`, `Spooler`, and disk-thrashing `DPS`/SRUM logging—with 1-click revert.
+* **Telemetry Scheduled Tasks Lockdown:** Disable Microsoft CEIP, Feedback, PerformanceTrace, WER, and XblGameSave task branches.
+* **System Services Manager (Interactive Grid):** What `services.msc` should have been—a dark, sortable table with instant search and red safety locks (`[CRITICAL - LOCKED]`) on core boot/RPC/Defender services.
+* **Scheduled Tasks Inspector & Deep Startup Manager:** Expose 3rd-party updaters and broken **`[GHOST / Missing Exe]`** tasks, and audit every `Run`, `RunOnce`, GPO, and Startup folder entry while decoding Task Manager's binary `StartupApproved` states.
+
+#### 🛡️ 5. `Security` — Privacy, USB Guard, Kernel Locks & Encrypted DNS (11 Tools)
+* **4-Layer USB Storage & BadUSB Perimeter Guard:** Symmetrically lock down your USB ports with selectable layers:
+  1. **USB Read-Only Guard:** Block writing to pendrives (`WriteProtect = 1`) to prevent data leaks or ransomware infection while allowing file reads.
+  2. **USB Execution Guard:** Block launching `.exe` files from removable drives.
+  3. **USB Total Blackout:** Disable both **`USBSTOR`** and modern **`UASPStor`** (USB NVMe enclosure) kernel drivers.
+  4. **Anti-BadUSB & DMA Lock-Screen Guard:** Block new USB/PCIe/Thunderbolt device enumeration while the screen is locked (`Win+L`).
+* **Privacy & UWP AppPrivacy (52 Rules):** Block OS telemetry, lock 28 background UWP permissions (Camera, Mic, Location), and stop silent app installations (`ContentDeliveryManager`).
+* **Boot, SvcHost & UEFI WPBT Block:** Block motherboard BIOS/UEFI binary injection (`DisableWpbtExecution`), disable Fast Startup kernel bugs, block RDP, and consolidate `SvcHost` processes.
+* **Dual-Layer Execution Blocks (`SRP + IFEO`):** Permanently block telemetry executables (`CompatTelRunner.exe`, `Widgets.exe`, `MicrosoftEdgeUpdate.exe`) or add your own custom `.exe` targets (`+` / `-`) using both Safer API policies and Kernel Image File Execution Options.
+* **Hardened DNS & Native DoH Enforcer + 6 Classic Win32 Applets:** Apply Quad9, Cloudflare, AdGuard, Google, or OpenDNS across IPv4 & IPv6 with native Windows 11 **DNS-over-HTTPS (DoH)** encryption, plus 1-click access to classic `ncpa.cpl`, `mmsys.cpl`, `appwiz.cpl`, `Devices & Printers`, `SystemPropertiesAdvanced`, and `powercfg.cpl`.
+
+#### 🚑 6. `Integrity` — 1-Click System First-Aid & OS Repair (7 Tools)
+When Windows breaks, fix the exact subsystem without reinstalling the OS:
+* **Scan & Repair System (`ChkDisk + DISM + SFC`):** Automated maintenance console that repairs filesystem errors, restores corrupted component store payloads, and verifies system files.
+* **WinSxS Component Store Compression (`DISM /ResetBase`):** Safely compresses superseded Windows Update backup layers to reclaim even 5–15 GB of SSD space (with pending-reboot protection).
+* **Verify & Salvage WMI Repository:** Repairs broken system monitoring and hardware queries via `winmgmt /salvagerepository` and `wmiadap /f`.
+* **Reset Windows Update & Cryptographic Subsystem:** Fixes stuck updates by stopping `wuauserv`/`bits`/`cryptSvc`, purging corrupted `qmgr*.dat` queues, flushing `catroot2` & `DataStore`, and re-registering 31 core DLLs.
+* **Refresh Network Stack:** Flushes DNS, resets the Winsock catalog, and resets the TCP/IP stack.
+* **Reset Print Subsystem (Spooler First-Aid):** Fixes stuck printers by terminating deadlocked `spoolsv.exe`, deleting `.SHD`/`.SPL` queue files, and restarting `PrintWorkflowUserSvc` & `Spooler`.
+* **Rebuild Shell Icon & Thumbnail Cache:** Gracefully cycles Explorer, deletes corrupted `iconcache_*.db` / `thumbcache_*.db` databases, and forces a clean rebuild via `ie4uinit.exe`.
+
+![WinUltix all](assets/all.png)
+
+#### 🔧 7. `Hardware` — Low-Level Silicon, Bus & Overclocking Cockpit (11 Tools)
+* **Topology-Aware Affinity Lasso:** Automatically detects **AMD 3D V-Cache** (7800X3D, 9800X3D, 7950X3D, 9950X3D) and **Intel Hybrid P+E** CPUs, locking background apps (Discord, Spotify, Browsers) to secondary cores or E-Cores so prime gaming cores stay 100% free.
+* **CPPC P-State Unhider & Dead Man's Switch:** Unlocks hidden CPU power controls (`EPP`, `Idle Demote/Promote`) and arms a `SYSTEM` scheduled task failsafe that automatically restores factory settings on the next boot if an aggressive undervolt crashes.
+* **Desktop Pre-Flight Game Mode Shortcut:** Generates a lightweight desktop toggle to arm or disarm CPU Affinity and Max CPPC rules right before launching a game.
+* **I/O & Memory Latency Optimizer:** Disables PCIe ASPM (`DisableASPM=1`), NVMe APST (`IdlePowerMode=0` in `stornvme.sys`) to eliminate SSD wake-up stutters, and disables RAM compression (`MMAgent`).
+* **Network NDIS & TCP Tuner:** Symmetrically tunes physical NIC driver properties (Interrupt Moderation, Flow Control, EEE/Green Ethernet, RSS/RSC/LSO) and enforces `TCPNoDelay` / `TcpAckFrequency = 1`.
+* **WHEA Hardware Error Logger & OC Decoder:** Translates cryptic `Microsoft-Windows-WHEA-Logger` `APIC IDs` into **physical CPU core numbers**—pinpointing unstable Curve Optimizer cores (ID 18), FCLK/SoC errors (ID 19), or tight DDR4/DDR5 memory timings (ID 47).
+
+![WinUltix 7](assets/7.png)
 
 * **💾 Portable JSON Profiles:**
-Configuring a new PC or helping a friend? Click **`[ Export Profile ]`** to save all your active tweaks, service states, and hardware locks into a single `.json` file, and apply them on any machine via **`[ Import Profile ]`**.
+Configuring a new PC or helping a friend? Click **`[ Export Profile ]`** in the footer to save your active registry tweaks, service states, SRP locks, and hardware settings into a portable `.json` file, and apply them on any machine via **`[ Import Profile ]`**.
 
 ---
 
 ### 🛡️ Antivirus Detections & Transparency (False Positives)
 
-Because WinUltix modifies low-level kernel registry keys, adjusts hardware power states, and disables OS telemetry services, some overzealous antivirus heuristics may flag the compiled `.exe`:
+Because WinUltix modifies low-level kernel registry keys, adjusts hardware power states, and disables OS telemetry services, some heuristic antivirus scanners may flag the compiled `.exe`:
 
 * **Why?** The standalone executable is unsigned and requests Administrator privileges to configure hardware and system services.
-* **100% Open Source:** Every line of code is readable right here in the repository. You can audit the `/Modules` folder yourself, run the raw PowerShell script directly in memory (`irm ... | iex`), or compile your own `.exe` using `Compile-WinUltix.ps1`.
+* **100% Open Source:** Every single line of code is readable right here in the repository. You can audit the `/Modules` folder yourself, run the raw PowerShell script directly in memory (`irm ... | iex`), or compile your own `.exe` from source using `Compile-WinUltix.ps1`.
 
 ---
 
 ### ⚖️ License & Disclaimer
 
 * Licensed under the **MIT License**.
-* *Provided "AS IS". While WinUltix is engineered with strict safety checks, critical service locks, and a symmetric Revert engine, low-level OS and hardware tuning always carries inherent risk. Creating a System Restore Point before applying heavy modifications is recommended.*
+* *Provided "AS IS". While WinUltix is engineered with strict safety checks, critical service/driver locks, and a symmetric Revert engine, low-level OS and hardware tuning always carries inherent risk. Creating a System Restore Point before applying heavy modifications is recommended.*
 
 ### ☕ Support the Project
 
-WinUltix is—and will always be—100% free, open-source, and ad-free. If this toolkit saved you time, fixed a stubborn Windows bug, or smoothed out your frametimes, you can buy me a coffee:
+WinUltix is—and will always be—100% free, open-source, and ad-free. If this toolkit saved you time, fixed a stubborn Windows bug, mapped your USB ports, or smoothed out your frametimes, you can buy me a coffee:
 
-👉 ** https://buymeacoffee.com/firever
+👉 **[https://buymeacoffee.com/firever](https://buymeacoffee.com/firever)**
 
-Thank you.
+Thank you!

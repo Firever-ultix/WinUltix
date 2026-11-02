@@ -1,8 +1,8 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# CORE_HELPERS.PS1 - UNIFIED CORE ENGINE (v3.0.0)
-# Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer, ListView Sorter), O(1) UI logger, InitialSessionState async Runspace engine ($UltixSync), UI control factories, shared modals, and JSON profile snapshotter.
+# CORE_HELPERS.PS1 - UNIFIED CORE ENGINE (v3.1.0)
+# Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer/DPC, CfgMgr32 PnpTree), async Runspace engine ($UltixSync), 4-color UI factories, and JSON profile snapshotter.
 # ==========================================
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -22,13 +22,24 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
     using System.Windows.Forms;
 
     namespace WinUltix {
-        // DWM Dark Title Bar & High-DPI GDI Scaling
+        // DWM Dark Title Bar, High-DPI GDI Scaling & High-Res PE Icon Extractor
         public static class NativeMethods {
             [DllImport("dwmapi.dll", PreserveSig = true)]
             private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
             [DllImport("user32.dll", SetLastError = true)]
             private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+            [DllImport("shell32.dll", SetLastError = true)]
+            private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+
+            [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+            private static extern uint PrivateExtractIconsW(
+                string szFileName, int nIconIndex, int cxIcon, int cyIcon,
+                IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool DestroyIcon(IntPtr hIcon);
 
             public static void EnableDarkTitleBar(IntPtr handle) {
                 if (handle == IntPtr.Zero) return;
@@ -39,9 +50,26 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             }
 
             public static void EnableGdiDpiScaling() {
-                try {
-                    SetProcessDpiAwarenessContext(new IntPtr(-5));
-                } catch { }
+                try { SetCurrentProcessExplicitAppUserModelID("Firever.WinUltix"); } catch { }
+                try { SetProcessDpiAwarenessContext(new IntPtr(-5)); } catch { }
+            }
+
+            public static Bitmap ExtractHighResExeIcon(string exePath, int size) {
+                IntPtr[] hIcons = new IntPtr[1];
+                uint[] ids = new uint[1];
+                uint count = PrivateExtractIconsW(exePath, 0, size, size, hIcons, ids, 1, 0);
+                if (count > 0 && hIcons[0] != IntPtr.Zero) {
+                    try {
+                        using (Icon ico = Icon.FromHandle(hIcons[0])) {
+                            return ico.ToBitmap();
+                        }
+                    } catch {
+                        try { return Bitmap.FromHicon(hIcons[0]); } catch { }
+                    } finally {
+                        DestroyIcon(hIcons[0]);
+                    }
+                }
+                return null;
             }
         }
 
@@ -277,6 +305,72 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 }
             }
         }
+        
+        // Native CfgMgr32 PnP Device Tree Walker for USB XHCI & PCIe Topology Mapping (<5ms)
+        public static class PnpTree {
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Get_Device_IDW(uint dnDevInst, System.Text.StringBuilder Buffer, int BufferLen, uint ulFlags);
+
+            public static string GetDeviceId(uint devInst) {
+                var sb = new System.Text.StringBuilder(512);
+                if (CM_Get_Device_IDW(devInst, sb, sb.Capacity, 0) == 0) return sb.ToString();
+                return "";
+            }
+
+            public static List<string> GetParentChain(string instanceId) {
+                var chain = new List<string>();
+                uint cur;
+                if (CM_Locate_DevNodeW(out cur, instanceId, 0) != 0) return chain;
+                uint parent;
+                int guard = 0;
+                while (guard++ < 32 && CM_Get_Parent(out parent, cur, 0) == 0) {
+                    string pid = GetDeviceId(parent);
+                    if (string.IsNullOrEmpty(pid)) break;
+                    chain.Add(pid);
+                    cur = parent;
+                }
+                return chain;
+            }
+
+            private static void CollectDescendants(uint devInst, int depth, List<string> output) {
+                if (depth > 16) return;
+                uint child;
+                if (CM_Get_Child(out child, devInst, 0) != 0) return;
+
+                uint cur = child;
+                int guard = 0;
+                while (guard++ < 256) {
+                    string id = GetDeviceId(cur);
+                    if (!string.IsNullOrEmpty(id)) {
+                        output.Add(depth.ToString() + "|" + id);
+                        CollectDescendants(cur, depth + 1, output);
+                    }
+                    uint sibling;
+                    if (CM_Get_Sibling(out sibling, cur, 0) != 0) break;
+                    cur = sibling;
+                }
+            }
+
+            public static List<string> GetDescendants(string instanceId) {
+                var list = new List<string>();
+                uint root;
+                if (CM_Locate_DevNodeW(out root, instanceId, 0) != 0) return list;
+                CollectDescendants(root, 1, list);
+                return list;
+            }
+        }
 
         // Owner-Drawn Dark TabControl (Eliminates Win32 white 3D borders & gray headers)
         public class DarkTabControl : TabControl {
@@ -354,8 +448,8 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     bool isHovered  = (i == _hoverIndex);
 
                     Color backColor = isSelected
-                        ? Color.FromArgb(45, 45, 45)
-                        : (isHovered ? Color.FromArgb(38, 38, 38) : Color.FromArgb(22, 22, 22));
+                        ? Color.FromArgb(40, 40, 42)
+                        : (isHovered ? Color.FromArgb(34, 34, 36) : Color.FromArgb(22, 22, 22));
 
                     using (SolidBrush bgBrush = new SolidBrush(backColor)) {
                         g.FillRectangle(bgBrush, tabRect);
@@ -450,10 +544,114 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
 "@ -ErrorAction SilentlyContinue
 }
 
+function Read-HighResBitmapFromIco {
+    param([Parameter(Mandatory=$true)][string]$IcoFilePath)
+    try {
+        [byte[]]$bytes = [System.IO.File]::ReadAllBytes($IcoFilePath)
+        if ($bytes.Length -lt 22) { return $null }
+
+        $count = [BitConverter]::ToUInt16($bytes, 4)
+        $bestOffset = 0
+        $bestLength = 0
+        $bestDim    = -1
+
+        for ($i = 0; $i -lt $count; $i++) {
+            $entryPos = 6 + ($i * 16)
+            if (($entryPos + 16) -gt $bytes.Length) { break }
+            $w = [int]$bytes[$entryPos]
+            if ($w -eq 0) { $w = 256 }
+            $len = [BitConverter]::ToInt32($bytes, $entryPos + 8)
+            $off = [BitConverter]::ToInt32($bytes, $entryPos + 12)
+
+            if ($w -ge $bestDim -and ($off + $len) -le $bytes.Length) {
+                $bestDim    = $w
+                $bestOffset = $off
+                $bestLength = $len
+            }
+        }
+
+        if ($bestLength -gt 8) {
+            # Check for PNG signature (89 50 4E 47) inside the largest .ico frame
+            if ($bytes[$bestOffset] -eq 0x89 -and $bytes[$bestOffset + 1] -eq 0x50 -and $bytes[$bestOffset + 2] -eq 0x4E -and $bytes[$bestOffset + 3] -eq 0x47) {
+                $ms = New-Object System.IO.MemoryStream($bytes, $bestOffset, $bestLength)
+                $img = [System.Drawing.Image]::FromStream($ms)
+                $bmp = New-Object System.Drawing.Bitmap($img)
+                $img.Dispose()
+                $ms.Dispose()
+                return $bmp
+            }
+        }
+
+        $icoLarge = New-Object System.Drawing.Icon($IcoFilePath, 256, 256)
+        $bmpFallback = $icoLarge.ToBitmap()
+        $icoLarge.Dispose()
+        return $bmpFallback
+    } catch {
+        return $null
+    }
+}
+
+function Initialize-WinUltixIcon {
+    if ($null -ne $global:UltixAppIcon) { return }
+    try {
+        # 1. Compiled Standalone .EXE Mode: Check WINULTIX_HOST_EXE passed by C# wrapper or own process PE header
+        $hostExe = if (-not [string]::IsNullOrWhiteSpace($env:WINULTIX_HOST_EXE) -and (Test-Path -LiteralPath $env:WINULTIX_HOST_EXE)) {
+            $env:WINULTIX_HOST_EXE
+        } else {
+            [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        }
+
+        if ($hostExe -and $hostExe -notmatch '(?i)(powershell|pwsh|ise)\.exe$' -and (Test-Path -LiteralPath $hostExe)) {
+            $global:UltixAppIcon     = [System.Drawing.Icon]::ExtractAssociatedIcon($hostExe)
+            $global:UltixHighResLogo = [WinUltix.NativeMethods]::ExtractHighResExeIcon($hostExe, 256)
+            if ($null -eq $global:UltixHighResLogo) {
+                $global:UltixHighResLogo = [WinUltix.NativeMethods]::ExtractHighResExeIcon($hostExe, 64)
+            }
+            if ($null -ne $global:UltixAppIcon) { return }
+        }
+
+        # 2. Local Script Mode (src\ or build\): Resolve single root X:\assets\WinUltix.ico
+        $resolvedIco = $null
+        if (-not [string]::IsNullOrWhiteSpace($ScriptDir)) {
+            $parentDir = Split-Path -Path $ScriptDir -Parent
+            foreach ($cand in @((Join-Path $ScriptDir "assets\WinUltix.ico"), (Join-Path $parentDir "assets\WinUltix.ico"))) {
+                if (-not [string]::IsNullOrWhiteSpace($cand) -and (Test-Path -LiteralPath $cand)) {
+                    $resolvedIco = $cand
+                    break
+                }
+            }
+        }
+
+        # 3. Memory-Only 'irm | iex' Mode: Cache WinUltix.ico once in %LOCALAPPDATA%\WinUltix
+        if ([string]::IsNullOrWhiteSpace($resolvedIco)) {
+            $cacheDir = Join-Path $env:LOCALAPPDATA "WinUltix"
+            $cacheIco = Join-Path $cacheDir "WinUltix.ico"
+            if (-not (Test-Path -LiteralPath $cacheIco)) {
+                try {
+                    if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null }
+                    $wc = New-Object System.Net.WebClient
+                    $wc.DownloadFile("https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/assets/WinUltix.ico", $cacheIco)
+                    $wc.Dispose()
+                } catch { }
+            }
+            if (Test-Path -LiteralPath $cacheIco) { $resolvedIco = $cacheIco }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($resolvedIco)) {
+            $global:UltixAppIcon     = New-Object System.Drawing.Icon($resolvedIco, 32, 32)
+            $global:UltixHighResLogo = Read-HighResBitmapFromIco -IcoFilePath $resolvedIco
+        }
+    } catch { }
+}
+
 function Enable-WinUltixDarkTitleBar {
     param([Parameter(Mandatory=$true)][System.Windows.Forms.Form]$Form)
     try {
         [WinUltix.NativeMethods]::EnableDarkTitleBar($Form.Handle)
+        Initialize-WinUltixIcon
+        if ($null -ne $global:UltixAppIcon) {
+            $Form.Icon = $global:UltixAppIcon
+        }
     } catch { }
 }
 
@@ -796,6 +994,16 @@ function Set-RegKey {
     } 
 }
 
+# Unified 4-Color Engineering Palette
+$global:UltixColors = @{
+    Standard  = @(55, 58, 64)    # Matte Slate: Standard OS tweaks, cleaners, and repairs
+    Inspector = @(45, 85, 125)   # Steel Blue: Interactive grid inspectors, analyzers, and safe profiles
+    Danger    = @(135, 50, 50)   # Deep Crimson: Aggressive/destructive actions and hard kernel locks
+    Audit     = @(72, 76, 82)    # Neutral Gray: All [?] audit buttons
+    Add       = @(45, 95, 60)    # Muted Green: [+] add target buttons
+    TabBg     = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
+}
+
 function New-UltixButton {
     param(
         [Parameter(Mandatory=$true)][string]$Text,
@@ -803,7 +1011,7 @@ function New-UltixButton {
         [Parameter(Mandatory=$true)][int]$Y,
         [int]$Width = 370,
         [int]$Height = 40,
-        [int[]]$RGB = @(60, 60, 60),
+        [int[]]$RGB = @(55, 58, 64),
         [System.Drawing.Color]$ForeColor = [System.Drawing.Color]::White,
         [string]$Description = "",
         [scriptblock]$OnClick = $null,
@@ -836,8 +1044,8 @@ function New-UltixActionRow {
     param(
         [Parameter(Mandatory=$true)][string]$Text,
         [Parameter(Mandatory=$true)][int]$Y,
-        [int[]]$MainRGB = @(60, 60, 60),
-        [int[]]$AuditRGB = @(80, 80, 80),
+        [int[]]$MainRGB = @(55, 58, 64),
+        [int[]]$AuditRGB = @(72, 76, 82),
         [string]$Description = "",
         [string]$AuditDescription = "",
         [scriptblock]$OnClick = $null,
@@ -1234,7 +1442,8 @@ function Show-UltixGridModal {
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][array]$Data,
         [Parameter(Mandatory=$true)][array]$Columns,
         [string]$PrimaryButtonText = "Remove Selected",
-        [string]$SecondaryButtonText = ""
+        [string]$SecondaryButtonText = "",
+        [switch]$SecondaryAlwaysEnabled
     )
 
     $modal = New-Object System.Windows.Forms.Form
@@ -1489,11 +1698,11 @@ function Show-UltixGridModal {
         $btnSecondary.Text = $SecondaryButtonText
         $btnSecondary.Location = New-Object System.Drawing.Point(295, 585)
         $btnSecondary.Size = New-Object System.Drawing.Size(270, 38)
-        $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 100, 150)
+        $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSecondary.ForeColor = [System.Drawing.Color]::White
         $btnSecondary.FlatStyle = "Flat"
         $btnSecondary.DialogResult = [System.Windows.Forms.DialogResult]::Yes
-        $btnSecondary.Enabled = ($indexedData.Count -gt 0)
+        $btnSecondary.Enabled = ($SecondaryAlwaysEnabled.IsPresent -or $indexedData.Count -gt 0)
         $btnSecondary.Anchor = 'Bottom, Left'
 
         $btnCancel.Location = New-Object System.Drawing.Point(575, 585)
@@ -1512,6 +1721,18 @@ function Show-UltixGridModal {
 
     try {
         $dlgRes = $modal.ShowDialog($global:form)
+        if ($dlgRes -eq [System.Windows.Forms.DialogResult]::Yes -and $SecondaryAlwaysEnabled.IsPresent) {
+            $selectedList = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $indexedData) {
+                if ($checkedIds.Contains($entry.RowId)) {
+                    $selectedList.Add($entry.Item)
+                }
+            }
+            return [PSCustomObject]@{
+                Action = "Secondary"
+                Items  = @($selectedList)
+            }
+        }
         if ($checkedIds.Count -gt 0 -and ($dlgRes -eq [System.Windows.Forms.DialogResult]::OK -or $dlgRes -eq [System.Windows.Forms.DialogResult]::Yes)) {
             $selectedList = [System.Collections.Generic.List[object]]::new()
             foreach ($entry in $indexedData) {

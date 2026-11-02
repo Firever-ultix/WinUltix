@@ -3,7 +3,7 @@
 # https://github.com/Firever-ultix/WinUltix
 # MODULAR MAIN LAUNCHER
 # ==========================================
-$Global:AppVersion = "v3.0.0"
+$Global:AppVersion = "v3.1.0"
 
 # ------------------------------------------
 # 1. MODULE LOADING (ARCHITECTURE MANIFESTS)
@@ -11,28 +11,28 @@ $Global:AppVersion = "v3.0.0"
 $ScriptDir = Split-Path $script:MyInvocation.MyCommand.Path
 $ModulesDir = Join-Path $ScriptDir "Modules"
 
-# Core_Helpers: Global UI functions, registry engine, and shared modal interfaces.
+# Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer/DPC, CfgMgr32 PnpTree), async Runspace engine ($UltixSync), 4-color UI factories, and JSON profile snapshotter.
 . (Join-Path $ModulesDir "Core_Helpers.ps1")
 
-# Z1_Cleanup: Deep system cleaning. Removes Windows Update cache, Temp files, Event Viewer logs (wevtutil), and 3rd-party app caches. Enhanced button interactivity and optimized execution flows.
+# Z1_Cleanup: Deep disk & orphan hygiene (WU/CBS cache, Temp/Dumps, 3rd-party/GPU shader caches, Event Logs, DriverStore OEM INF Sweeper, Windows Installer MSI/MSP Sweeper, Surgical Registry Orphan Sweeper, Ghost Services, and NTFS Recycle Bin).
 . (Join-Path $ModulesDir "Z1_Cleanup.ps1")
 
-# Z2_Bloatware: Aggressive debloatifier. Incorporates CBS and Appx state verification. Enhanced OneDrive removal across profiles, FOD package management, and intelligent orphaned framework collection (Garbage Collector).
+# Z2_Bloatware: Multi-profile OneDrive amputation, 64-target UWP Bloatware & Windows Recall/Copilot AI removal, FOD Preset, Appx Framework Garbage Collector, CBS Stubs, and 4 manual package/feature inspector grids.
 . (Join-Path $ModulesDir "Z2_Bloatware.ps1")
 
-# Z3_Registry: Main registry engine (Invoke-ApplyRegistry) featuring dedicated revert modals. Manages UI tweaks, telemetry blocks, gaming optimizations (VBS/HVCI, GameDVR), and implements Software Restriction Policies (SRP).
+# Z3_Registry: OS Tweaks, Taskbar (with UCPD.sys bypass), native 3-icon Start Menu compiler (with 26H2 Classic List view), File Explorer, Modern Standby S0, 7-Point Power & Display Optimizer, 1:1 Raw Mouse Input, and Extreme Gaming Registry.
 . (Join-Path $ModulesDir "Z3_Registry.ps1")
 
-# Z4_Services: Service state management and Task Scheduler control via centralized revert modals. Disables telemetry tasks, configures TCPNoDelay, and enforces strict service operational profiles with improved UI interactivity.
+# Z4_Services: Symmetrically revertible Office (Light) and Gaming (Heavy) service profiles, Telemetry Scheduled Tasks lockdown, and 3 interactive managers (System Services, Scheduled Tasks, and Deep Startup Manager).
 . (Join-Path $ModulesDir "Z4_Services.ps1")
 
-# Z5_Utilities: Interactive tools and applets via Show-UltixGridModal for selective package and service management. Includes DNS Enforcer and classic Windows applet launchers.
+# Z5_Utilities: Security & Control module. Privacy & UWP AppPrivacy, Boot & UEFI WPBT block, 4-Layer USB Storage & BadUSB/DMA Perimeter Guard, Dual-Layer SRP+IFEO Execution Locks, Hardened DNS + Native DoH Enforcer, and classic Win32 applets.
 . (Join-Path $ModulesDir "Z5_Utilities.ps1")
 
-# Z6_Integrity: Advanced repair and reset module. Features WinSXS compression (DISM /ResetBase) with deployment auditing, full network stack refresh, Print Spooler subsystem reset, and core file repairs.
+# Z6_Integrity: System First-Aid & OS repair (ChkDisk + DISM + SFC with fast health audit, WinSxS ResetBase compression, WMI repository salvage, Windows Update & CryptSvc reset, Network Stack refresh, Print Spooler First-Aid, and Icon Cache rebuild).
 . (Join-Path $ModulesDir "Z6_Integrity.ps1")
 
-# Z7_Hardware: Low-level hardware diagnostics and tuning with interactive modals.
+# Z7_Hardware: Low-level hardware & latency cockpit (Topology-Aware Affinity Lasso, CPPC Unhider + Dead Man's Switch, Pre-Flight Shortcut, Quantum Scheduler Matrix, MSI & Core 0 IRQ Offload, 0.5ms TSC Timer, USB XHCI Topology Mapper, NVMe/PCIe locks, NDIS/TCP Tuner, WHEA Decoder, and 1Hz DPC Monitor).
 . (Join-Path $ModulesDir "Z7_Hardware.ps1")
 
 # Promote all loaded toolkit functions to Global scope so .GetNewClosure() dynamic modules always resolve them
@@ -113,7 +113,7 @@ $btnExportLog = New-Object System.Windows.Forms.Button
 $btnExportLog.Text = "Export Log to Desktop"
 $btnExportLog.Location = New-Object System.Drawing.Point(890, 725)
 $btnExportLog.Size = New-Object System.Drawing.Size(150, 25)
-$btnExportLog.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+$btnExportLog.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
 $btnExportLog.ForeColor = [System.Drawing.Color]::White
 $btnExportLog.FlatStyle = "Flat"
 $btnExportLog.Anchor = 'Bottom, Right'
@@ -132,7 +132,7 @@ $btnClearLog = New-Object System.Windows.Forms.Button
 $btnClearLog.Text = "[ Clear Log ]"
 $btnClearLog.Location = New-Object System.Drawing.Point(1050, 725)
 $btnClearLog.Size = New-Object System.Drawing.Size(110, 25)
-$btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+$btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnClearLog.ForeColor = [System.Drawing.Color]::LightGray
 $btnClearLog.FlatStyle = "Flat"
 $btnClearLog.Anchor = 'Bottom, Right'
@@ -148,31 +148,61 @@ $btnCredits = New-Object System.Windows.Forms.Button
 $btnCredits.Text = "[ About / GitHub ]"
 $btnCredits.Location = New-Object System.Drawing.Point(10, 725)
 $btnCredits.Size = New-Object System.Drawing.Size(130, 25)
-$btnCredits.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 40)
+$btnCredits.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnCredits.ForeColor = [System.Drawing.Color]::LightGray
 $btnCredits.FlatStyle = "Flat"
 $btnCredits.Anchor = 'Bottom, Left'
+
 $btnCredits.Add_Click({ 
     $aboutForm = New-Object System.Windows.Forms.Form
     $aboutForm.Text = "About WinUltix"
-    $aboutForm.Size = New-Object System.Drawing.Size(380, 265)
+    $aboutForm.Size = New-Object System.Drawing.Size(420, 270)
     $aboutForm.StartPosition = "CenterParent"
     $aboutForm.FormBorderStyle = "FixedDialog"
     $aboutForm.MaximizeBox = $false
     $aboutForm.MinimizeBox = $false
     $aboutForm.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
     $aboutForm.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
-    
+
+    $picLogo = New-Object System.Windows.Forms.PictureBox
+    $picLogo.Location = New-Object System.Drawing.Point(20, 22)
+    $picLogo.Size = New-Object System.Drawing.Size(64, 64)
+    $picLogo.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+
+    $srcLogo = if ($null -ne $global:UltixHighResLogo) {
+        $global:UltixHighResLogo
+    } elseif ($null -ne $global:UltixAppIcon) {
+        $global:UltixAppIcon.ToBitmap()
+    } else { $null }
+
+    if ($null -ne $srcLogo) {
+        $bmpLogo = New-Object System.Drawing.Bitmap(64, 64, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $gLogo   = [System.Drawing.Graphics]::FromImage($bmpLogo)
+        $gLogo.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $gLogo.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $gLogo.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $gLogo.DrawImage($srcLogo, 0, 0, 64, 64)
+        $gLogo.Dispose()
+        $picLogo.Image = $bmpLogo
+    }
+
+    $lblTitle = New-Object System.Windows.Forms.Label
+    $lblTitle.Location = New-Object System.Drawing.Point(98, 20)
+    $lblTitle.Size = New-Object System.Drawing.Size(295, 24)
+    $lblTitle.ForeColor = [System.Drawing.Color]::Cyan
+    $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+    $lblTitle.Text = "WinUltix Pro $AppVersion"
+
     $lblAbout = New-Object System.Windows.Forms.Label
-    $lblAbout.Location = New-Object System.Drawing.Point(20, 20)
-    $lblAbout.Size = New-Object System.Drawing.Size(340, 80)
+    $lblAbout.Location = New-Object System.Drawing.Point(98, 46)
+    $lblAbout.Size = New-Object System.Drawing.Size(295, 65)
     $lblAbout.ForeColor = [System.Drawing.Color]::LightGray
-    $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lblAbout.Text = "WinUltix - Ultimate System Toolkit $AppVersion`n`nConcept, architecture and combat tests: Firever`nCoding assistance: Gemini AI`n`nLet your hardware breathe!"
+    $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $lblAbout.Text = "Ultimate Windows System & Hardware Toolkit`nConcept, architecture & combat tests: Firever`nCoding assistance: Gemini AI"
     
     $linkGit = New-Object System.Windows.Forms.LinkLabel
-    $linkGit.Location = New-Object System.Drawing.Point(20, 115)
-    $linkGit.Size = New-Object System.Drawing.Size(340, 20)
+    $linkGit.Location = New-Object System.Drawing.Point(20, 120)
+    $linkGit.Size = New-Object System.Drawing.Size(370, 20)
     $linkGit.LinkColor = [System.Drawing.Color]::LightSkyBlue
     $linkGit.ActiveLinkColor = [System.Drawing.Color]::Cyan
     $linkGit.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -180,8 +210,8 @@ $btnCredits.Add_Click({
     $linkGit.Add_LinkClicked({ Start-Process "https://github.com/Firever-ultix/WinUltix" -ErrorAction SilentlyContinue })
     
     $linkcoffee = New-Object System.Windows.Forms.LinkLabel
-    $linkcoffee.Location = New-Object System.Drawing.Point(20, 140)
-    $linkcoffee.Size = New-Object System.Drawing.Size(340, 20)
+    $linkcoffee.Location = New-Object System.Drawing.Point(20, 145)
+    $linkcoffee.Size = New-Object System.Drawing.Size(370, 20)
     $linkcoffee.LinkColor = [System.Drawing.Color]::LightSkyBlue
     $linkcoffee.ActiveLinkColor = [System.Drawing.Color]::Cyan
     $linkcoffee.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -190,17 +220,18 @@ $btnCredits.Add_Click({
     
     $btnAboutOK = New-Object System.Windows.Forms.Button
     $btnAboutOK.Text = "Close"
-    $btnAboutOK.Location = New-Object System.Drawing.Point(140, 185)
-    $btnAboutOK.Size = New-Object System.Drawing.Size(80, 25)
+    $btnAboutOK.Location = New-Object System.Drawing.Point(160, 185)
+    $btnAboutOK.Size = New-Object System.Drawing.Size(90, 28)
     $btnAboutOK.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnAboutOK.ForeColor = [System.Drawing.Color]::White
     $btnAboutOK.FlatStyle = "Flat"
     $btnAboutOK.Add_Click({ $aboutForm.Close() })
     
-    $aboutForm.Controls.AddRange(@($lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
+    $aboutForm.Controls.AddRange(@($picLogo, $lblTitle, $lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
     try {
         [void]$aboutForm.ShowDialog($global:form)
     } finally {
+        if ($null -ne $picLogo.Image) { $picLogo.Image.Dispose() }
         $aboutForm.Dispose()
     }
 })
@@ -209,7 +240,7 @@ $btnExportProfile = New-Object System.Windows.Forms.Button
 $btnExportProfile.Text = "[ Export Profile ]"
 $btnExportProfile.Location = New-Object System.Drawing.Point(150, 725)
 $btnExportProfile.Size = New-Object System.Drawing.Size(130, 25)
-$btnExportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 65, 85)
+$btnExportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
 $btnExportProfile.ForeColor = [System.Drawing.Color]::White
 $btnExportProfile.FlatStyle = "Flat"
 $btnExportProfile.Anchor = 'Bottom, Left'
@@ -221,7 +252,7 @@ $btnImportProfile = New-Object System.Windows.Forms.Button
 $btnImportProfile.Text = "[ Import Profile ]"
 $btnImportProfile.Location = New-Object System.Drawing.Point(290, 725)
 $btnImportProfile.Size = New-Object System.Drawing.Size(130, 25)
-$btnImportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 85, 50, 50)
+$btnImportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 135, 50, 50)
 $btnImportProfile.ForeColor = [System.Drawing.Color]::White
 $btnImportProfile.FlatStyle = "Flat"
 $btnImportProfile.Anchor = 'Bottom, Left'

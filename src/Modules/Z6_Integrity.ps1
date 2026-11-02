@@ -1,8 +1,8 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE (v3.0.0)
-# Z6_Integrity: Service and repair module. Executes real-time streamed WinSxS analysis, ResetBase compression, network stack refresh, Print Spooler reset, Windows Update/Cryptographic First-Aid, WMI repository salvage, Shell Icon/Thumbnail cache purge, and core OS repairs.
+# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE (v3.1.0)
+# Z6_Integrity: System First-Aid & OS repair (ChkDisk + DISM + SFC with fast health audit, WinSxS ResetBase compression, WMI repository salvage, Windows Update & CryptSvc reset, Network Stack refresh, Print Spooler First-Aid, and Icon Cache rebuild).
 # ==========================================
 
 # ------------------------------------------
@@ -12,13 +12,14 @@ function Start-ExternalConsoleAsync {
     param(
         [Parameter(Mandatory=$true)][string]$Title,
         [Parameter(Mandatory=$true)][string]$CommandChain,
-        [Parameter(Mandatory=$true)][System.Windows.Forms.Control[]]$ControlsToDisable
+        [AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @()
     )
 
+    $validControls = @($ControlsToDisable | Where-Object { $null -ne $_ })
     Write-GUI " -> Launching external maintenance console: $Title..."
     Update-Progress 20
 
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+    Invoke-AsyncTask -ControlsToDisable $validControls -ScriptBlock {
         param($CmdTitle, $CmdChain)
         # /v:on enables delayed environment variable expansion (!ERRORLEVEL! / !WUX_ERR!)
         # Preserves real command exit code across 'pause >nul'
@@ -33,7 +34,7 @@ function Start-ExternalConsoleAsync {
             Title    = $CmdTitle
             ExitCode = $exitCode
         }
-    } -Arguments @($Title, $CommandChain) -OnComplete {
+    } -Arguments @($Title, $CommandChain) -OnComplete ({
         param($res)
         Update-Progress 0
         if ($null -ne $res) {
@@ -47,7 +48,7 @@ function Start-ExternalConsoleAsync {
                 Write-GUI " -> [!] [$($res.Title)] finished with non-zero Exit Code: $code ($hexCode).`n"
             }
         }
-    }
+    }.GetNewClosure())
 }
 
 # ------------------------------------------
@@ -61,7 +62,7 @@ function Get-WinSxSState {
     $psi.Arguments = "/Online /Cleanup-Image /AnalyzeComponentStore /English"
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
-    $psi.StandardOutputEncoding = [System.Text.Encoding]::ASCII
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.CreateNoWindow = $true
 
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -89,9 +90,19 @@ function Get-WinSxSState {
     if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
     $dismOutput = $sbOutput.ToString()
 
-    $recommended = ($dismOutput -match "Component Store Cleanup Recommended\s*:\s*Yes")
-    $sizeMatch   = [regex]::Match($dismOutput, "Actual Size of Component Store\s*:\s*(.+?)(\r?\n|$)")
-    $actualSize  = if ($sizeMatch.Success) { $sizeMatch.Groups[1].Value.Trim() } else { "Unknown" }
+    # 100% locale-independent positional extraction: in DISM AnalyzeComponentStore table,
+    # the 2nd colon-separated size entry (MB/GB) is always Actual Size of Component Store
+    $sizeMatches = @([regex]::Matches($dismOutput, '(?im):\s*([\d\.,]+\s*[MGK]B)\b'))
+    $actualSize  = if ($sizeMatches.Count -ge 2) {
+        $sizeMatches[1].Groups[1].Value.Trim()
+    } elseif ($sizeMatches.Count -eq 1) {
+        $sizeMatches[0].Groups[1].Value.Trim()
+    } else {
+        "Unknown"
+    }
+
+    # Match localized Yes/Tak/Ja/Oui/Si on the last boolean line of the table
+    $recommended = ($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[ií]|True|1)\b")
 
     $rebootPending = Test-Path -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
 
@@ -120,8 +131,83 @@ function Optimize-WinSXS {
     Start-ExternalConsoleAsync -Title "WinUltix - WinSxS ResetBase" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 
+function Invoke-SystemHealthAudit {
+    param([AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI "--- AUDIT: OS Image, CBS & NTFS Volume Health (Background Thread) ---"
+    Update-Progress 15
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $UltixSync.Progress = 35
+        $null = dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
+        $dismExit = $LASTEXITCODE
+
+        # 100% locale-independent CBS corruption registry markers + DISM exit code
+        $cbsKey     = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing"
+        $cbsProps   = Get-ItemProperty -LiteralPath $cbsKey -Name "CorruptionFlags", "StoreCorrupt", "UnavailableRepairCount" -ErrorAction SilentlyContinue
+        $hasRegCorr = ($null -ne $cbsProps) -and (
+            ($null -ne $cbsProps.CorruptionFlags -and $cbsProps.CorruptionFlags -ne 0) -or
+            ($null -ne $cbsProps.StoreCorrupt -and $cbsProps.StoreCorrupt -ne 0) -or
+            ($null -ne $cbsProps.UnavailableRepairCount -and $cbsProps.UnavailableRepairCount -gt 0)
+        )
+        $isHealthy = ($dismExit -eq 0 -and -not $hasRegCorr)
+
+        $UltixSync.Progress = 70
+        $sysDrive = $env:SystemDrive.TrimEnd('\')
+        $diskObj  = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$sysDrive'" -Property VolumeDirty -ErrorAction SilentlyContinue
+        $isDirty  = if ($null -ne $diskObj -and $null -ne $diskObj.VolumeDirty) { [bool]$diskObj.VolumeDirty } else { $false }
+
+        $UltixSync.Progress = 90
+        $cbsReboot = Test-Path -Path "$cbsKey\RebootPending"
+        $sfcPend   = Test-Path -Path "$cbsKey\PackagesPending"
+
+        $UltixSync.Progress = 100
+        return [PSCustomObject]@{
+            ImageHealthy = $isHealthy
+            NtfsDirty    = $isDirty
+            DriveName    = $sysDrive
+            CbsReboot    = $cbsReboot
+            SfcPending   = $sfcPend
+        }
+    } -OnComplete ({
+        param($res)
+        Update-Progress 0
+        if ($null -ne $res) {
+            if ($res.ImageHealthy) {
+                Write-GUI "  [OK] DISM CheckHealth: No component store corruption detected (CBS Store Clean)."
+            } else {
+                Write-GUI "  [!] WARNING: DISM flagged component store corruption! Run 'Scan System' repair."
+            }
+
+            if (-not $res.NtfsDirty) {
+                Write-GUI "  [OK] NTFS Volume ($($res.DriveName)): Clean (VolumeDirty = False)."
+            } else {
+                Write-GUI "  [!] WARNING: NTFS Volume ($($res.DriveName)) has Dirty Bit set! Run 'Scan System' repair."
+            }
+
+            if ($res.CbsReboot -or $res.SfcPending) {
+                Write-GUI "  [!] CBS Servicing Status: Pending reboot / package repair detected.`n"
+            } else {
+                Write-GUI "  [OK] CBS Servicing Queue: Clean (Zero pending repairs).`n"
+            }
+        }
+    }.GetNewClosure())
+}
+
 function Repair-SystemIntegrity {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
+
+    $msg = "This operation will open an external maintenance console and execute:`n`n" +
+           "  1. Online CheckDisk Scan (chkdsk C: /scan)`n" +
+           "  2. DISM Image Repair (DISM /Online /Cleanup-Image /RestoreHealth)`n" +
+           "  3. System File Checker (sfc /scannow)`n`n" +
+           "Full verification typically takes 5 to 15 minutes. Do you want to proceed?"
+    $ans = [System.Windows.Forms.MessageBox]::Show($msg, "WinUltix - System Integrity Repair", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-GUI " -> System Integrity Repair cancelled by user.`n"
+        return
+    }
+
     $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk C: /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
     Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
@@ -420,26 +506,28 @@ function Clear-ShellIconCache {
 }
 
 # ------------------------------------------
-# Z6: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z6: UI INITIALIZATION (INTEGRITY & SYSTEM FIRST-AID)
 # ------------------------------------------
 function Initialize-Z6UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tabWinSXS = New-Object System.Windows.Forms.TabPage
     $tabWinSXS.Text = "Integrity"
-    $tabWinSXS.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
+    $tabWinSXS.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
     $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-    # 1. System Scan (ChkDisk + DISM + SFC)
-    $btnCheckSystem = New-UltixButton -Parent $tabWinSXS -X 15 -Y 20 -RGB @(60, 60, 60) `
-        -Text "Scan System (ChkDisk + SFC + RestoreHealth)" `
-        -Description "System First Aid: Scans core Windows OS files for corruption and replaces damaged components using DISM RestoreHealth and SFC without freezing the GUI." `
-        -OnClick ({ Repair-SystemIntegrity -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+    # 1. System Scan (ChkDisk + DISM + SFC) + Fast Health Audit [?]
+    $rowCheckSystem = New-UltixActionRow -Parent $tabWinSXS -Y 20 -MainRGB @(55, 58, 64) `
+        -Text "Scan System (ChkDisk + SFC + DISM)" `
+        -Description "System First-Aid: Scans core Windows OS files for corruption and replaces damaged components using ChkDisk, DISM RestoreHealth, and SFC." `
+        -AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit, and inspects CBS pending repair flags." `
+        -OnClick ({ Repair-SystemIntegrity -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
+        -OnAudit ({ Invoke-SystemHealthAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     # 2. WinSxS ResetBase + Audit [?]
-    $rowWinSxS = New-UltixActionRow -Parent $tabWinSXS -Y 70 -MainRGB @(100, 40, 40) `
-        -Text "Aggressive Cleanup (ResetBase)" `
+    $rowWinSxS = New-UltixActionRow -Parent $tabWinSXS -Y 70 -MainRGB @(135, 50, 50) `
+        -Text "WinSxS Store Compression (ResetBase)" `
         -Description "WinSxS Deep Clean: Permanently deletes superseded Windows Update backup layers (/ResetBase) to reclaim gigabytes of disk space." `
         -AuditDescription "AUDIT: Streams real-time DISM AnalyzeComponentStore progress in a background Runspace and checks for pending CBS reboots." `
         -OnClick ({ Optimize-WinSXS -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
@@ -449,7 +537,7 @@ function Initialize-Z6UI {
             Update-Progress 5
 
             $sb = (Get-Command -Name Get-WinSxSState).ScriptBlock
-            Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable $allTabButtons.ToArray() -OnComplete {
+            Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable $allTabButtons.ToArray() -OnComplete ({
                 param($output)
                 Update-Progress 0
                 $auditResult = $output | Select-Object -First 1
@@ -465,50 +553,47 @@ function Initialize-Z6UI {
                     }
                     Write-GUI ""
                 }
-            }
+            }.GetNewClosure())
         }.GetNewClosure())
 
-    # 3. Network Stack Refresh
-    $btnNetFix = New-UltixButton -Parent $tabWinSXS -X 15 -Y 120 -RGB @(0, 100, 100) `
-        -Text "Refresh Network (DNS/Winsock)" `
-        -Description "Network Fix: Flushes DNS cache, resets Winsock catalog, and resets TCP/IP stack parameters." `
-        -OnClick ({ Clear-NetworkStack -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
-
-    # 4. Print Subsystem First-Aid
-    $btnFixPrinters = New-UltixButton -Parent $tabWinSXS -X 15 -Y 170 -RGB @(120, 80, 40) `
-        -Text "Reset Print Subsystem (Spooler)" `
-        -Description "Printer First-Aid: Kills deadlocked spoolsv.exe, purges stuck .SPL/.SHD files in System32, restarts PrintWorkflowUserSvc, and resumes Spooler." `
-        -OnClick ({ Repair-PrintSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
-
-    # 5. Windows Update & Cryptographic Subsystem First-Aid
-    $btnFixWU = New-UltixButton -Parent $tabWinSXS -X 15 -Y 220 -RGB @(60, 90, 130) `
-        -Text "Reset Windows Update & CryptSvc" `
-        -Description "WU First-Aid: Stops wuauserv/bits/cryptSvc, purges corrupted qmgr*.dat queues, resets Catroot2 & DataStore, and re-registers core COM DLLs." `
-        -OnClick ({ Repair-WindowsUpdateSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
-
-    # 6. WMI / CIM Repository Salvage + Audit [?]
-    $rowWMI = New-UltixActionRow -Parent $tabWinSXS -Y 270 -MainRGB @(90, 60, 120) `
+    # 3. WMI / CIM Repository Salvage + Audit [?]
+    $rowWMI = New-UltixActionRow -Parent $tabWinSXS -Y 120 -MainRGB @(55, 58, 64) `
         -Text "Verify & Salvage WMI Repository" `
         -Description "WMI First-Aid: Verifies CIM repository consistency, runs non-destructive 'winmgmt /salvagerepository', and refreshes WMI performance counters." `
         -AuditDescription "AUDIT: Runs 'winmgmt /verifyrepository' and tests live CIM queries against root\cimv2 and root\StandardCimv2." `
         -OnClick ({ Repair-WMIRepository -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
         -OnAudit ({ Invoke-WMIAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
+    # 4. Windows Update & Cryptographic Subsystem First-Aid
+    $btnFixWU = New-UltixButton -Parent $tabWinSXS -X 15 -Y 170 -RGB @(55, 58, 64) `
+        -Text "Reset Windows Update & CryptSvc" `
+        -Description "WU First-Aid: Stops wuauserv/bits/cryptSvc, purges corrupted qmgr*.dat queues, resets Catroot2 & DataStore, and re-registers core COM DLLs." `
+        -OnClick ({ Repair-WindowsUpdateSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    # 5. Network Stack Refresh
+    $btnNetFix = New-UltixButton -Parent $tabWinSXS -X 15 -Y 220 -RGB @(55, 58, 64) `
+        -Text "Refresh Network Stack (DNS / Winsock)" `
+        -Description "Network First-Aid: Flushes DNS cache, resets Winsock catalog, and resets TCP/IP stack parameters." `
+        -OnClick ({ Clear-NetworkStack -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    # 6. Print Subsystem First-Aid
+    $btnFixPrinters = New-UltixButton -Parent $tabWinSXS -X 15 -Y 270 -RGB @(55, 58, 64) `
+        -Text "Reset Print Subsystem (Spooler)" `
+        -Description "Printer First-Aid: Kills deadlocked spoolsv.exe, purges stuck .SPL/.SHD files in System32, restarts PrintWorkflowUserSvc, and resumes Spooler." `
+        -OnClick ({ Repair-PrintSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
     # 7. Shell Icon & Thumbnail Cache First-Aid
-    $btnFixIcons = New-UltixButton -Parent $tabWinSXS -X 15 -Y 320 -RGB @(70, 100, 70) `
+    $btnFixIcons = New-UltixButton -Parent $tabWinSXS -X 15 -Y 320 -RGB @(55, 58, 64) `
         -Text "Rebuild Shell Icon & Thumbnail Cache" `
         -Description "Shell First-Aid: Gracefully cycles Explorer, purges corrupted iconcache_*.db and thumbcache_*.db files, and forces a clean rebuild via ie4uinit." `
         -OnClick ({ Clear-ShellIconCache -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
+    foreach ($row in @($rowCheckSystem, $rowWinSxS, $rowWMI)) {
+        $allTabButtons.AddRange($row.Controls)
+    }
     $allTabButtons.AddRange([System.Windows.Forms.Control[]]@(
-        $btnCheckSystem,
-        $btnNetFix,
-        $btnFixPrinters,
-        $btnFixWU,
-        $btnFixIcons
+        $btnFixWU, $btnNetFix, $btnFixPrinters, $btnFixIcons
     ))
-    $allTabButtons.AddRange($rowWinSxS.Controls)
-    $allTabButtons.AddRange($rowWMI.Controls)
 
     $TabControl.Controls.Add($tabWinSXS)
 }

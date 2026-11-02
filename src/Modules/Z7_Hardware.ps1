@@ -1,8 +1,8 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z7_HARDWARE.PS1 - HARDWARE & DIAGNOSTICS MODULE (v3.0.0)
-# Z7_Hardware: Low-level hardware diagnostics and kernel latency tuning. Uses Core_Helpers P/Invoke runtime ([WinUltix.CpuTopology], [WinUltix.NtDll], [WinUltix.NativeMethods]) and asynchronous Runspace workers ($UltixSync) for Topology-Aware Affinity Lasso, CPPC P-State Unhider & SYSTEM Dead Man's Switch, MSI & IRQ Core 0 Offload Enforcer with Live NtQuerySystemInformation DPC Telemetry, WHEA APIC XML Decoder, Symmetric NDIS/TCP Optimizer, 0.5ms TSC Timer Lock, NVMe APST / PCIe ASPM Lockdown, Profile Snapshot hooks, and Pre-Flight Game Mode macro generation.
+# Z7_HARDWARE.PS1 - HARDWARE & DIAGNOSTICS MODULE (v3.1.0)
+# Z7_Hardware: Low-level hardware & latency cockpit (Topology-Aware Affinity Lasso, CPPC Unhider + Dead Man's Switch, Pre-Flight Shortcut, Quantum Scheduler Matrix, MSI & Core 0 IRQ Offload, 0.5ms TSC Timer, USB XHCI Topology Mapper, NVMe/PCIe locks, NDIS/TCP Tuner, WHEA Decoder, and 1Hz DPC Monitor).
 # ==========================================
 
 # Cached physical core masks and CPU topology profile from kernel32!GetLogicalProcessorInformationEx
@@ -2358,74 +2358,837 @@ if (`$res -eq "Yes") {
 }
 
 # ------------------------------------------
-# Z7: UI INITIALIZATION (VIA CORE_HELPERS FACTORIES)
+# Z7: USB XHCI ROOT-HUB TOPOLOGY & HID POLLING MAPPER
+# ------------------------------------------
+if (-not ([System.Management.Automation.PSTypeName]'WinUltix.UsbProberV2').Type) {
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.Collections.Generic;
+    using System.Runtime.InteropServices;
+    using System.Text;
+
+    namespace WinUltix {
+        public class HubProbeResult {
+            public int TotalPorts;
+            public int Usb2Ports;
+            public int Usb3Ports;
+            public int SsPlusPorts;
+            public int ActivePorts;
+            public Dictionary<int, string> PortSpeeds = new Dictionary<int, string>();
+        }
+
+        public static class UsbProberV2 {
+            [StructLayout(LayoutKind.Sequential)]
+            private struct DEVPROPKEY {
+                public Guid fmtid;
+                public uint pid;
+            }
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Get_DevNode_PropertyW(
+                uint dnDevInst,
+                ref DEVPROPKEY PropertyKey,
+                out uint PropertyType,
+                IntPtr PropertyBuffer,
+                ref uint PropertyBufferSize,
+                uint ulFlags);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr CreateFileW(
+                string lpFileName,
+                uint dwDesiredAccess,
+                uint dwShareMode,
+                IntPtr lpSecurityAttributes,
+                uint dwCreationDisposition,
+                uint dwFlagsAndAttributes,
+                IntPtr hTemplateFile);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool DeviceIoControl(
+                IntPtr hDevice,
+                uint dwIoControlCode,
+                IntPtr lpInBuffer,
+                uint nInBufferSize,
+                IntPtr lpOutBuffer,
+                uint nOutBufferSize,
+                out uint lpBytesReturned,
+                IntPtr lpOverlapped);
+
+            [DllImport("kernel32.dll")]
+            private static extern bool CloseHandle(IntPtr hObject);
+
+            private const uint GENERIC_WRITE = 0x40000000;
+            private const uint FILE_SHARE_READ = 0x00000001;
+            private const uint FILE_SHARE_WRITE = 0x00000002;
+            private const uint OPEN_EXISTING = 3;
+
+            private const uint IOCTL_USB_GET_NODE_INFORMATION = 0x00220408;
+            private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX = 0x00220448;
+            private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2 = 0x0022045C;
+
+            // DEVPKEY_Device_BusReportedDeviceDesc ({540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4)
+            private static DEVPROPKEY KEY_BUS_REPORTED_DESC = new DEVPROPKEY {
+                fmtid = new Guid("540b947e-8b40-45bc-a8a2-6a0b894cbda2"),
+                pid = 4
+            };
+
+            public static string GetBusReportedDesc(string instanceId) {
+                uint devInst;
+                if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return "";
+
+                uint propType = 0;
+                uint bufSize = 512;
+                IntPtr buf = Marshal.AllocHGlobal((int)bufSize);
+                try {
+                    int cr = CM_Get_DevNode_PropertyW(devInst, ref KEY_BUS_REPORTED_DESC, out propType, buf, ref bufSize, 0);
+                    if (cr == 0 && propType == 18 && bufSize > 2) {
+                        string val = Marshal.PtrToStringUni(buf);
+                        return (val != null) ? val.Trim() : "";
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+                return "";
+            }
+
+            public static HubProbeResult ProbeHub(string hubInstanceId) {
+                var res = new HubProbeResult();
+                if (string.IsNullOrEmpty(hubInstanceId)) return res;
+
+                string symPath = @"\\?\" + hubInstanceId.Replace('\\', '#') + "#{f18a0e88-c30c-11d0-8815-00a0c906bed8}";
+                IntPtr hHub = CreateFileW(symPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) {
+                    hHub = CreateFileW(symPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                }
+                if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) return res;
+
+                IntPtr bufNode = Marshal.AllocHGlobal(128);
+                IntPtr bufV2   = Marshal.AllocHGlobal(32);
+                IntPtr bufEx   = Marshal.AllocHGlobal(64);
+
+                try {
+                    for (int i = 0; i < 128; i++) Marshal.WriteByte(bufNode, i, 0);
+                    uint ret = 0;
+                    if (!DeviceIoControl(hHub, IOCTL_USB_GET_NODE_INFORMATION, bufNode, 76, bufNode, 76, out ret, IntPtr.Zero)) {
+                        return res;
+                    }
+
+                    // Offset 6 in USB_NODE_INFORMATION is bNumberOfPorts
+                    int numPorts = Marshal.ReadByte(bufNode, 6);
+                    res.TotalPorts = numPorts;
+
+                    for (int p = 1; p <= numPorts; p++) {
+                        // 1. Query USB 2.0 vs USB 3.x protocol support & SuperSpeed/SuperSpeedPlus operating flags (V2)
+                        for (int i = 0; i < 16; i++) Marshal.WriteByte(bufV2, i, 0);
+                        Marshal.WriteInt32(bufV2, 0, p);  // ConnectionIndex
+                        Marshal.WriteInt32(bufV2, 4, 16); // Length = sizeof(USB_NODE_CONNECTION_INFORMATION_EX_V2)
+                        Marshal.WriteInt32(bufV2, 8, 7);  // SupportedUsbProtocols mask (Usb110 | Usb200 | Usb300)
+
+                        uint protocols = 0;
+                        uint v2Flags   = 0;
+                        if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, bufV2, 16, bufV2, 16, out ret, IntPtr.Zero)) {
+                            protocols = (uint)Marshal.ReadInt32(bufV2, 8);
+                            v2Flags   = (uint)Marshal.ReadInt32(bufV2, 12);
+                            if ((protocols & 0x04) != 0) {
+                                res.Usb3Ports++;
+                                if ((v2Flags & 0x08) != 0 || (v2Flags & 0x04) != 0) res.SsPlusPorts++;
+                            } else if ((protocols & 0x02) != 0) {
+                                res.Usb2Ports++;
+                            }
+                        }
+
+                        // 2. Query live connection state, bcdUSB descriptor, and negotiated link speed (EX + V2 override)
+                        for (int i = 0; i < 64; i++) Marshal.WriteByte(bufEx, i, 0);
+                        Marshal.WriteInt32(bufEx, 0, p); // ConnectionIndex
+                        if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, bufEx, 35, bufEx, 35, out ret, IntPtr.Zero)) {
+                            ushort bcdUsb   = (ushort)Marshal.ReadInt16(bufEx, 6); // Offset 4 (DeviceDescriptor) + 2 = bcdUSB
+                            byte speed      = Marshal.ReadByte(bufEx, 23);
+                            uint connStatus = (uint)Marshal.ReadInt32(bufEx, 31);
+                            if (connStatus == 1) { // DeviceConnected
+                                res.ActivePorts++;
+
+                                // USBHUB3.sys caps legacy EX Speed at 2 (HighSpeed); V2 Flags & bcdUSB hold true SS/SS+ state
+                                bool isDedicatedSsPort = ((protocols & 0x04) != 0 && (protocols & 0x02) == 0);
+                                bool isOperatingSsPlus = ((v2Flags & 0x04) != 0);
+                                bool isOperatingSs     = ((v2Flags & 0x01) != 0) || (speed >= 3) || isDedicatedSsPort || (bcdUsb >= 0x0300);
+                                bool isSsCapableDevice = ((v2Flags & 0x02) != 0) || ((v2Flags & 0x08) != 0);
+
+                                string speedStr = "USB";
+                                if (isOperatingSsPlus || (isOperatingSs && bcdUsb >= 0x0320)) {
+                                    speedStr = (bcdUsb >= 0x0320) ? "20 Gbps SS+" : "10 Gbps SS+";
+                                } else if (isOperatingSs && bcdUsb >= 0x0310) {
+                                    speedStr = ((v2Flags & 0x08) != 0 || isDedicatedSsPort) ? "10 Gbps SS+" : "5 Gbps SS";
+                                } else if (isOperatingSs) {
+                                    speedStr = "5 Gbps SS";
+                                } else if (speed == 2) {
+                                    speedStr = isSsCapableDevice ? "480 Mbps HS [Throttled USB 3.x!]" : "480 Mbps HS";
+                                } else if (speed == 1) {
+                                    speedStr = "12 Mbps FS";
+                                } else if (speed == 0) {
+                                    speedStr = "1.5 Mbps LS";
+                                }
+                                res.PortSpeeds[p] = speedStr;
+                            }
+                        }
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(bufNode);
+                    Marshal.FreeHGlobal(bufV2);
+                    Marshal.FreeHGlobal(bufEx);
+                    CloseHandle(hHub);
+                }
+                return res;
+            }
+        }
+    }
+"@ -ErrorAction SilentlyContinue
+}
+
+function Get-UsbTopologyMap {
+    param([switch]$IncludeRawHubs)
+
+    $controllers = [System.Collections.Generic.List[PSCustomObject]]::new()
+    [int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
+    [uint64]$core0Mask  = if ($coreMasks.Count -ge 1) { [uint64]$coreMasks[0] } else { 3 }
+    [uint64]$core1Mask  = if ($coreMasks.Count -ge 2) { [uint64]$coreMasks[1] } else { 12 }
+
+    $pciRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\PCI"
+    if (-not (Test-Path -LiteralPath $pciRoot)) { return @() }
+
+    foreach ($venKey in (Get-ChildItem -LiteralPath $pciRoot -ErrorAction SilentlyContinue)) {
+        foreach ($instKey in (Get-ChildItem -LiteralPath $venKey.PSPath -ErrorAction SilentlyContinue)) {
+            $props = Get-ItemProperty -LiteralPath $instKey.PSPath -Name "Service", "FriendlyName", "DeviceDesc", "LocationInformation" -ErrorAction SilentlyContinue
+            if ($null -eq $props -or $props.Service -notmatch '^(?i)(USBXHCI|USB4|usbehci)$') { continue }
+
+            $instanceId = "PCI\$($venKey.PSChildName)\$($instKey.PSChildName)"
+            $ctrlName = if ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
+            if ($ctrlName -match ';([^;]+)$') { $ctrlName = $matches[1] }
+
+            # Walk up CfgMgr32 parent chain to count PCI bridge hops and determine CPU Direct vs Chipset PCH
+            $parents = @([WinUltix.PnpTree]::GetParentChain($instanceId))
+            $pciBridgeHops = @($parents | Where-Object { $_ -like "PCI\*" }).Count
+
+            $routingBadge = if ($venKey.PSChildName -match 'DEV_43[A-F0-9]{2}' -or $ctrlName -match '(?i)Chipset') {
+                if ($pciBridgeHops -ge 3) { "[CHIPSET PCH (Daisy-Chained / $pciBridgeHops Hops)]" }
+                else { "[CHIPSET PCH ($pciBridgeHops PCIe Hops)]" }
+            } elseif ($pciBridgeHops -le 1) {
+                "[CPU DIRECT SoC LANES (1 PCIe Hop - Lowest Latency)]"
+            } else {
+                "[SECONDARY BRIDGE ($pciBridgeHops PCIe Hops)]"
+            }
+
+            # Read MSI & IRQ Affinity of this XHCI controller
+            $msiPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
+            $affPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\Affinity Policy"
+            $msiOn   = ((Get-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -ErrorAction SilentlyContinue).MSISupported -eq 1)
+            $affProps = Get-ItemProperty -LiteralPath $affPath -ErrorAction SilentlyContinue
+            $irqTag  = "Core 0 (Default)"
+            if ($null -ne $affProps -and $affProps.DevicePolicy -eq 4 -and $null -ne $affProps.AssignmentSetOverride) {
+                [uint64]$mVal = 0
+                for ($b = 0; $b -lt [math]::Min(8, $affProps.AssignmentSetOverride.Length); $b++) {
+                    $mVal = $mVal -bor ([uint64]$affProps.AssignmentSetOverride[$b] -shl ($b * 8))
+                }
+                $cHint = if ($mVal -eq $core1Mask) { " (C1 Offloaded)" } elseif (($mVal -band $core0Mask) -ne 0) { " (C0)" } else { "" }
+                $irqTag = "0x$($mVal.ToString('X'))$cHint"
+            }
+
+            # Walk CfgMgr32 descendants and group by physical USB device node (USB\VID_xxxx&PID_xxxx\<Instance>)
+            $descendants  = @([WinUltix.PnpTree]::GetDescendants($instanceId))
+            $endpoints    = [System.Collections.Generic.List[PSCustomObject]]::new()
+            $hubNames     = [System.Collections.Generic.List[string]]::new()
+            $hasMouse     = $false
+            $hasAudio     = $false
+            $hasStorage   = $false
+            $hasVr        = $false
+
+            $rootHubInfo  = $null
+            $hubSpeedMap  = @{}
+            $physDevices  = [System.Collections.Generic.List[PSCustomObject]]::new()
+            $currentPhys  = $null
+
+            foreach ($entry in $descendants) {
+                $parts = $entry -split '\|', 2
+                $depth = [int]$parts[0]
+                $devId = $parts[1]
+
+                if ($devId -match '^USB\\ROOT_HUB') {
+                    $rootHubInfo = [WinUltix.UsbProberV2]::ProbeHub($devId)
+                    $hubSpeedMap[$depth] = $rootHubInfo.PortSpeeds
+                    continue
+                }
+
+                $regNode = "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId"
+                $dProps  = Get-ItemProperty -LiteralPath $regNode -Name "FriendlyName", "DeviceDesc", "Service", "Class", "Address", "LocationInformation" -ErrorAction SilentlyContinue
+                if ($null -eq $dProps) { continue }
+
+                $dName = if ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
+                if ($dName -match ';([^;]+)$') { $dName = $matches[1] }
+                $dSvc  = [string]$dProps.Service
+                $dCls  = [string]$dProps.Class
+
+                if ($dSvc -match '^(?i)(USBHUB3|usbhub)$') {
+                    $subHub = [WinUltix.UsbProberV2]::ProbeHub($devId)
+                    $hubSpeedMap[$depth] = $subHub.PortSpeeds
+                }
+
+                # Check if this node is a physical USB device plugged into a port (USB\... without &MI_xx)
+                $isPhysicalUsbNode = ($devId -match '^USB\\(?!ROOT_HUB)[^\\]+\\[^\\]+$' -and $devId -notmatch '(?i)&MI_')
+
+                if ($isPhysicalUsbNode) {
+                    $busDesc = [WinUltix.UsbProberV2]::GetBusReportedDesc($devId)
+                    $portNum = if ($null -ne $dProps.Address -and $dProps.Address -gt 0) {
+                        [int]$dProps.Address
+                    } elseif ($dProps.LocationInformation -match 'Port_#0*(\d+)') {
+                        [int]$matches[1]
+                    } else { 0 }
+
+                    $parentHubDepth = $depth - 1
+                    $negSpeed = ""
+                    if ($portNum -gt 0 -and $hubSpeedMap.ContainsKey($parentHubDepth) -and $hubSpeedMap[$parentHubDepth].ContainsKey($portNum)) {
+                        $negSpeed = $hubSpeedMap[$parentHubDepth][$portNum]
+                    }
+
+                    $currentPhys = [PSCustomObject]@{
+                        Depth       = $depth
+                        DevId       = $devId
+                        PortNumber  = $portNum
+                        LinkSpeed   = $negSpeed
+                        BusName     = $busDesc
+                        BaseName    = $dName
+                        BaseService = $dSvc
+                        BaseClass   = $dCls
+                        Children    = [System.Collections.Generic.List[PSCustomObject]]::new()
+                    }
+                    $physDevices.Add($currentPhys)
+                } elseif ($null -ne $currentPhys -and $depth -gt $currentPhys.Depth) {
+                    $currentPhys.Children.Add([PSCustomObject]@{
+                        Depth   = $depth
+                        DevId   = $devId
+                        Name    = $dName
+                        Service = $dSvc
+                        Class   = $dCls
+                    })
+                }
+            }
+
+            foreach ($phys in $physDevices) {
+                $deviceNodes = @([PSCustomObject]@{ DevId = $phys.DevId; Name = $phys.BaseName; Service = $phys.BaseService; Class = $phys.BaseClass }) + @($phys.Children)
+
+                # Resolve best human-readable hardware name (prefer firmware BusReportedDeviceDesc)
+                $bestName = $phys.BusName
+                if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Composite Device|Generic|USB Input Device|HID-compliant)') {
+                    foreach ($n in $deviceNodes) {
+                        if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|Urządzenie kompozytowe|USB Input Device|Urządzenie wejściowe|HID Keyboard Device|Urządzenie klawiatury HID|HID-compliant|Zgodne z HID|Generic)') {
+                            $bestName = $n.Name
+                            break
+                        }
+                    }
+                }
+                if ([string]::IsNullOrWhiteSpace($bestName)) { $bestName = $phys.BaseName }
+
+                # Classify physical device role based on kernel drivers & USB HID Boot primary interface (MI_00)
+                $role      = "[USB DEVICE]"
+                $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { $phys.BaseClass }
+
+                $isStorage    = $false; $isAudio = $false; $isVr = $false; $isCam = $false; $isBt = $false; $isHub = $false
+                $isOnboardMcu = ($bestName -match '(?i)(AURA\s*LED|Mystic\s*Light|RGB\s*Fusion|Polychrome|ITE\s*Device|Nuvoton)')
+                $hasMou       = $false; $hasKbd  = $false
+                $mi00IsKbd    = $false; $mi00IsMou = $false
+
+                foreach ($n in $deviceNodes) {
+                    if ($n.Service -match '^(?i)(USBSTOR|UASPStor)$' -or $n.Class -eq "DiskDrive") { $isStorage = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Class -eq "Media" -or $n.Service -match '^(?i)(usbaudio|usbaudio2|iFiUsbAudio)' -or $n.Name -match '(?i)(DAC|iFi|Audio|Headset|Microphone|Sound)') {
+                        if ($n.Class -ne "AudioEndpoint" -and $n.Class -ne "SoftwareDevice") { $isAudio = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    }
+                    elseif ($n.Name -match '(?i)(Index|Steam Frame|VR|HMD|Watchman|Tracker|Beyond)') { $isVr = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Service -eq "usbvideo" -or $n.Class -in @("Camera", "Image")) { $isCam = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Class -eq "Bluetooth" -or $n.Service -match '(?i)BTHUSB') { $isBt = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                    elseif ($n.Service -match '^(?i)(USBHUB3|usbhub)$') { $isHub = $true; $activeSvc = $n.Service }
+                    elseif ($n.Service -eq "mouhid" -or $n.Class -eq "Mouse") {
+                        $hasMou = $true
+                        if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsMou = $true }
+                    }
+                    elseif ($n.Service -eq "kbdhid" -or $n.Class -eq "Keyboard") {
+                        $hasKbd = $true
+                        if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsKbd = $true }
+                    }
+                }
+
+                if ($isHub)            { $role = "[USB HUB]" }
+                elseif ($isOnboardMcu) { $role = "[ONBOARD MCU]"; $activeSvc = "Internal PCB RGB - Idle" }
+                elseif ($isStorage)    { $role = "[STORAGE]";     $hasStorage = $true }
+                elseif ($isVr)         { $role = "[VR / HMD]";    $hasVr      = $true }
+                elseif ($isAudio)      { $role = "[AUDIO / DAC]"; $hasAudio   = $true }
+                elseif ($isCam)        { $role = "[VIDEO / CAM]"; $hasAudio   = $true }
+                elseif ($isBt)         { $role = "[BLUETOOTH]" }
+                elseif ($hasMou -and $hasKbd) {
+                    if ($mi00IsKbd -and -not $mi00IsMou) {
+                        $role      = "[KEYBOARD]"
+                        $activeSvc = "kbdhid"
+                    } else {
+                        $role      = "[MOUSE / HID]"
+                        $activeSvc = "mouhid"
+                        $hasMouse  = $true
+                    }
+                }
+                elseif ($hasMou) { $role = "[MOUSE / HID]"; $activeSvc = "mouhid"; $hasMouse = $true }
+                elseif ($hasKbd) { $role = "[KEYBOARD]";    $activeSvc = "kbdhid" }
+                elseif ($phys.Children | Where-Object { $_.Class -eq "HIDClass" -or $_.Service -eq "HidUsb" }) {
+                    $role      = "[HID / INPUT]"
+                    $activeSvc = "HidUsb"
+                }
+
+                $portBadge = if ($phys.PortNumber -gt 0) {
+                    $pPrefix = if ($phys.Depth -le 2) { "Port #$($phys.PortNumber)" } else { "Hub Port #$($phys.PortNumber)" }
+                    if ($phys.LinkSpeed) { " [$pPrefix | $($phys.LinkSpeed)]" } else { " [$pPrefix]" }
+                } else { "" }
+
+                if ($isHub) {
+                    $hubNames.Add($bestName)
+                    if (-not $IncludeRawHubs) { continue }
+                }
+
+                $endpoints.Add([PSCustomObject]@{
+                    Role       = $role
+                    Name       = "$bestName$portBadge"
+                    InstanceId = $phys.DevId
+                    Service    = $activeSvc
+                    Depth      = $phys.Depth
+                })
+            }
+
+            if (-not $IncludeRawHubs -and $hubNames.Count -gt 0) {
+                $uniqueHubs = @($hubNames | Select-Object -Unique) -join ", "
+                $endpoints.Add([PSCustomObject]@{
+                    Role       = "[ONBOARD HUBS]"
+                    Name       = "$($hubNames.Count)x Passive USB 2.0/3.x Port Splitters ($uniqueHubs)"
+                    InstanceId = "HUB_SUMMARY"
+                    Service    = "0% DMA Load"
+                    Depth      = 99
+                })
+            }
+
+            # Format Root Hub port count & speed capability summary
+            $portMapSummary = if ($venKey.PSChildName -match 'DEV_15B8') {
+                "1 Internal SoC Line (USB 2.0 480 Mbps - Unrouted on Desktop PCB)"
+            } elseif ($null -ne $rootHubInfo -and $rootHubInfo.TotalPorts -gt 0) {
+                $ssLabel = if ($ctrlName -match '(?i)(USB4|40G)' -or $venKey.PSChildName -match 'DEV_2426') {
+                    "USB4 40 Gbps"
+                } elseif ($rootHubInfo.SsPlusPorts -gt 0 -or $ctrlName -match '(?i)(3\.2|3\.1)') {
+                    "USB 3.x SuperSpeed (5/10/20 Gbps)"
+                } else {
+                    "USB 3.0 SuperSpeed (5 Gbps)"
+                }
+                "$($rootHubInfo.TotalPorts) Logical Lines ($($rootHubInfo.Usb3Ports)x $ssLabel + $($rootHubInfo.Usb2Ports)x USB 2.0 High-Speed [480 Mbps] | Active: $($rootHubInfo.ActivePorts))"
+            } else {
+                "Root Hub port descriptor unavailable"
+            }
+
+            $statusAdvice = "Optimal Isolation"
+            $severity     = "Green"
+            if ($hasMouse -and ($hasAudio -or $hasStorage)) {
+                $statusAdvice = "[!] CONTENTION: High-Polling Mouse shares XHCI bus with Audio DAC / Storage!"
+                $severity     = "Red"
+            } elseif (($hasMouse -or $hasVr) -and $routingBadge -match "CHIPSET") {
+                $statusAdvice = "[*] Notice: Latency-sensitive Mouse/VR is on Chipset PCH instead of CPU Direct lanes"
+                $severity     = "Yellow"
+            } elseif ($endpoints.Count -eq 0) {
+                if ($venKey.PSChildName -match 'DEV_15B8') {
+                    $statusAdvice = "[Internal SoC USB 2.0 Node - Unrouted on Desktop PCB]"
+                } else {
+                    $statusAdvice = "[Idle Root Hub - Free Ports Available]"
+                }
+                $severity = "Gray"
+            }
+
+            $controllers.Add([PSCustomObject]@{
+                ControllerName = $ctrlName
+                InstanceId     = $instanceId
+                RoutingBadge   = $routingBadge
+                PortSummary    = $portMapSummary
+                PciHops        = $pciBridgeHops
+                MsiEnabled     = $msiOn
+                IrqAffinity    = $irqTag
+                Endpoints      = @($endpoints)
+                Advice         = $statusAdvice
+                Severity       = $severity
+            })
+        }
+    }
+
+    return @($controllers | Sort-Object PciHops, ControllerName)
+}
+
+function Show-UsbTopologyModal {
+    $modal = New-Object System.Windows.Forms.Form
+    $modal.Text = "WinUltix - USB XHCI Root-Hub Topology & Contention Mapper"
+    $modal.Size = New-Object System.Drawing.Size(940, 680)
+    $modal.MinimumSize = New-Object System.Drawing.Size(880, 580)
+    $modal.StartPosition = "CenterParent"
+    $modal.FormBorderStyle = "Sizable"
+    $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+    $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
+
+    $lblDesc = New-Object System.Windows.Forms.Label
+    $lblDesc.Text = "Maps every physical USB XHCI controller back to the PCIe Root Complex. Keep 4K/8KHz mice and VR headsets on [CPU DIRECT SoC LANES] and isolate them from USB Audio DACs or external SSDs."
+    $lblDesc.Location = New-Object System.Drawing.Point(15, 12)
+    $lblDesc.Size = New-Object System.Drawing.Size(895, 36)
+    $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $lblDesc.Anchor = 'Top, Left, Right'
+
+    $rtbMap = New-Object System.Windows.Forms.RichTextBox
+    $rtbMap.Location = New-Object System.Drawing.Point(15, 52)
+    $rtbMap.Size = New-Object System.Drawing.Size(895, 525)
+    $rtbMap.BackColor = [System.Drawing.Color]::FromArgb(255, 18, 18, 18)
+    $rtbMap.ForeColor = [System.Drawing.Color]::LightGray
+    $rtbMap.BorderStyle = "FixedSingle"
+    $rtbMap.ReadOnly = $true
+    $rtbMap.Font = New-Object System.Drawing.Font("Consolas", 9.8)
+    $rtbMap.Anchor = 'Top, Bottom, Left, Right'
+
+    $chkShowHubs = New-Object System.Windows.Forms.CheckBox
+    $chkShowHubs.Text = "Show Raw USB Hub Nodes"
+    $chkShowHubs.Location = New-Object System.Drawing.Point(440, 595)
+    $chkShowHubs.Size = New-Object System.Drawing.Size(210, 24)
+    $chkShowHubs.ForeColor = [System.Drawing.Color]::LightGray
+    $chkShowHubs.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $chkShowHubs.Anchor = 'Bottom, Left'
+    $chkShowHubs.Checked = $false
+
+    $appendColored = {
+        param([string]$Text, [System.Drawing.Color]$Color)
+        $rtbMap.SelectionStart  = $rtbMap.TextLength
+        $rtbMap.SelectionLength = 0
+        $rtbMap.SelectionColor  = $Color
+        $rtbMap.AppendText($Text)
+    }
+
+    $renderTopology = {
+        $rtbMap.Clear()
+
+        # Render concise Engineering Mini-Guide at the top of the report
+        & $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+        & $appendColored "QUICK WIRING GUIDE & HOW TO READ THIS TOPOLOGY MAP:`r`n" ([System.Drawing.Color]::Gold)
+        & $appendColored "  1. [CPU DIRECT SoC] : Wired straight to CPU silicon (1 Hop). Best for 4K/8KHz Mice & VR.`r`n" ([System.Drawing.Color]::Cyan)
+        & $appendColored "  2. [CHIPSET PCH]    : Routed via motherboard chipset. Ideal for USB Audio DACs, Keyboards & Drives.`r`n" ([System.Drawing.Color]::LightSkyBlue)
+        & $appendColored "  3. XHCI Isolation   : NEVER share one controller between an 8KHz Mouse and an Audio DAC or USB Drive.`r`n" ([System.Drawing.Color]::LightGreen)
+        & $appendColored "  4. Logical Lines    : Every physical USB 3.x port contains 2 logical lines (1x SuperSpeed + 1x USB 2.0).`r`n" ([System.Drawing.Color]::Silver)
+        & $appendColored "  5. Onboard Hubs/MCU : Passive PCB splitters (ASM107x) & static RGB (AURA) do NOT disturb Audio DACs.`r`n" ([System.Drawing.Color]::DarkGray)
+
+        $map = Get-UsbTopologyMap -IncludeRawHubs:($chkShowHubs.Checked)
+        $idx = 0
+        foreach ($ctrl in $map) {
+            $idx++
+            $hdrColor = if ($ctrl.RoutingBadge -match "CPU DIRECT") { [System.Drawing.Color]::Cyan } else { [System.Drawing.Color]::LightSkyBlue }
+            & $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+            & $appendColored "CONTROLLER #$idx : $($ctrl.ControllerName)`r`n" $hdrColor
+            & $appendColored "  PCIe Routing : $($ctrl.RoutingBadge)`r`n" $hdrColor
+            & $appendColored "  PCI ID & IRQ : $($ctrl.InstanceId) | MSI: $(if($ctrl.MsiEnabled){'ON'}else{'OFF'}) | IRQ: $($ctrl.IrqAffinity)`r`n" ([System.Drawing.Color]::Silver)
+            & $appendColored "  Root Hub Map : $($ctrl.PortSummary)`r`n" ([System.Drawing.Color]::LightSkyBlue)
+            
+            $advColor = switch ($ctrl.Severity) {
+                "Red"    { [System.Drawing.Color]::OrangeRed; break }
+                "Yellow" { [System.Drawing.Color]::Gold;      break }
+                "Green"  { [System.Drawing.Color]::LightGreen; break }
+                default  { [System.Drawing.Color]::DarkGray;  break }
+            }
+            & $appendColored "  Assessment   : $($ctrl.Advice)`r`n" $advColor
+
+            if ($ctrl.Endpoints.Count -gt 0) {
+                & $appendColored "  Connected Endpoints:`r`n" ([System.Drawing.Color]::White)
+                foreach ($ep in $ctrl.Endpoints) {
+                    $epColor = switch -Wildcard ($ep.Role) {
+                        "*MOUSE*"   { [System.Drawing.Color]::LightGreen; break }
+                        "*AUDIO*"   { [System.Drawing.Color]::Violet;     break }
+                        "*VR*"      { [System.Drawing.Color]::Cyan;       break }
+                        "*STORAGE*" { [System.Drawing.Color]::Orange;     break }
+                        "*ONBOARD*" { [System.Drawing.Color]::DarkGray;   break }
+                        "*HUB*"     { [System.Drawing.Color]::DarkGray;   break }
+                        default     { [System.Drawing.Color]::LightGray;  break }
+                    }
+                    & $appendColored ("    +-- {0,-15} {1} ({2})`r`n" -f $ep.Role, $ep.Name, $ep.Service) $epColor
+                }
+            } else {
+                & $appendColored "    +-- (No active external USB endpoints attached)`r`n" ([System.Drawing.Color]::DarkGray)
+            }
+            & $appendColored "`r`n" ([System.Drawing.Color]::LightGray)
+        }
+        $rtbMap.SelectionStart = 0
+        $rtbMap.ScrollToCaret()
+    }
+
+    &$renderTopology
+    $chkShowHubs.Add_CheckedChanged({ &$renderTopology }.GetNewClosure())
+
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Rescan USB Tree (Live)" -X 15 -Y 590 -Width 200 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh.Anchor = 'Bottom, Left'
+    $btnRefresh.Add_Click({ &$renderTopology }.GetNewClosure())
+
+    $btnExportLog = New-UltixButton -Parent $modal -Text "Print Map to Main Log" -X 225 -Y 590 -Width 200 -Height 35 -RGB @(50, 110, 70)
+    $btnExportLog.Anchor = 'Bottom, Left'
+    $btnExportLog.Add_Click({
+        Write-GUI "=== USB XHCI ROOT-HUB & PCIE TOPOLOGY MAP ==="
+        foreach ($line in ($rtbMap.Text -split '\r?\n')) {
+            if (-not [string]::IsNullOrWhiteSpace($line) -and $line -notmatch '^===') {
+                Write-GUI "  $line"
+            }
+        }
+        Write-GUI ""
+    }.GetNewClosure())
+
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 790 -Y 590 -Width 120 -Height 35 -RGB @(60, 60, 60)
+    $btnClose.Anchor = 'Bottom, Right'
+    $btnClose.DialogResult = "Cancel"
+
+    $modal.Controls.AddRange(@($lblDesc, $rtbMap, $chkShowHubs))
+    try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
+}
+
+# ------------------------------------------
+# Z7: QUANTUM SCHEDULER MATRIX (WIN32PRIORITYSEPARATION LIVE TUNER)
+# ------------------------------------------
+function Get-QuantumSchedulerInfo {
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
+    $rawVal  = (Get-ItemProperty -LiteralPath $regPath -Name "Win32PrioritySeparation" -ErrorAction SilentlyContinue).Win32PrioritySeparation
+    if ($null -eq $rawVal) { $rawVal = 2 }
+
+    $lenBits   = ($rawVal -shr 4) -band 3
+    $varBits   = ($rawVal -shr 2) -band 3
+    $boostBits = $rawVal -band 3
+
+    $lenStr = switch ($lenBits) {
+        2 { "Short Quantum (Low Input Latency)" }
+        1 { "Long Quantum (High Throughput / Workstation)" }
+        default { "OS Default (Short on Client SKU)" }
+    }
+    $varStr = switch ($varBits) {
+        1 { "Variable (Foreground Boosted vs Background)" }
+        2 { "Fixed (Equal Determinism Across Threads)" }
+        default { "OS Default (Variable on Client SKU)" }
+    }
+    $boostStr = switch ($boostBits) {
+        2 { "3:1 Foreground Ratio (Max Gaming Boost)" }
+        1 { "2:1 Foreground Ratio (Moderate Boost)" }
+        default { "1:1 Equal Slice (No Foreground Bias)" }
+    }
+
+    $binStr = [Convert]::ToString(([int]$rawVal -band 0x3F), 2).PadLeft(6, '0')
+    $bitFormatted = "$($binStr.Substring(0,2))|$($binStr.Substring(2,2))|$($binStr.Substring(4,2))"
+
+    return [PSCustomObject]@{
+        DecimalValue = [int]$rawVal
+        HexValue     = ("0x{0:X2}" -f [int]$rawVal)
+        BitMask      = $bitFormatted
+        LengthDesc   = $lenStr
+        VarDesc      = $varStr
+        BoostDesc    = $boostStr
+    }
+}
+
+function Show-QuantumSchedulerModal {
+    $modal = New-Object System.Windows.Forms.Form
+    $modal.Text = "WinUltix - Quantum Scheduler Matrix (Win32PrioritySeparation)"
+    $modal.Size = New-Object System.Drawing.Size(760, 520)
+    $modal.MinimumSize = New-Object System.Drawing.Size(760, 520)
+    $modal.StartPosition = "CenterParent"
+    $modal.FormBorderStyle = "FixedDialog"
+    $modal.MaximizeBox = $false
+    $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+    $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
+
+    $lblDesc = New-Object System.Windows.Forms.Label
+    $lblDesc.Text = "Modifies HKLM\...\PriorityControl\Win32PrioritySeparation. The Windows kernel (PsChangeQuantumTable) applies changes INSTANTLY in real time without a reboot, allowing live A/B testing in games."
+    $lblDesc.Location = New-Object System.Drawing.Point(15, 12)
+    $lblDesc.Size = New-Object System.Drawing.Size(715, 38)
+    $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+
+    $lblTelemetry = New-Object System.Windows.Forms.Label
+    $lblTelemetry.Location = New-Object System.Drawing.Point(15, 55)
+    $lblTelemetry.Size = New-Object System.Drawing.Size(715, 72)
+    $lblTelemetry.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 20, 20)
+    $lblTelemetry.ForeColor = [System.Drawing.Color]::LightGreen
+    $lblTelemetry.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblTelemetry.BorderStyle = "FixedSingle"
+    $lblTelemetry.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 6)
+
+    $profiles = @(
+        [PSCustomObject]@{ Value = 38; Hex = "0x26"; Name = "0x26 (38 dec) | Short | Variable | 3:1 Foreground Boost [Competitive FPS]"; Desc = "Fastest context switching + 3x CPU time slice for the active game window. Best for CS2, Valorant, Overwatch, and Apex." }
+        [PSCustomObject]@{ Value = 40; Hex = "0x28"; Name = "0x28 (40 dec) | Short | Fixed    | 1:1 Equal Slice      [WinUltix Heavy Default]"; Desc = "Deterministic fixed quantum. Prevents foreground render threads from starving audio (audiodg) or worker threads in UE5/heavy titles." }
+        [PSCustomObject]@{ Value = 42; Hex = "0x2A"; Name = "0x2A (42 dec) | Short | Fixed    | 3:1 Hybrid Matrix    [Enthusiast Low-Jitter]"; Desc = "Combines Fixed quantum bitmask (10) with maximum quantum table index (10). Popular among competitive latency tuners." }
+        [PSCustomObject]@{ Value = 22; Hex = "0x16"; Name = "0x16 (22 dec) | Long  | Variable | 3:1 Foreground Boost [Cache-Heavy Simulators]"; Desc = "Longer execution slices reduce context-switch L1/L2 cache flushes. Useful in MSFS, Tarkov, or strategy sims." }
+        [PSCustomObject]@{ Value = 2;  Hex = "0x02"; Name = "0x02 (2 dec)  | OS Default       | 3:1 Standard Client  [Windows 11 Factory]"; Desc = "Standard Windows 11 out-of-the-box scheduler behavior (6:2 quantum ticks)." }
+    )
+
+    $listBox = New-Object System.Windows.Forms.ListBox
+    $listBox.Location = New-Object System.Drawing.Point(15, 140)
+    $listBox.Size = New-Object System.Drawing.Size(715, 165)
+    $listBox.BackColor = [System.Drawing.Color]::FromArgb(255, 42, 42, 42)
+    $listBox.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $listBox.Font = New-Object System.Drawing.Font("Consolas", 10.5)
+    foreach ($p in $profiles) { [void]$listBox.Items.Add($p.Name) }
+
+    $lblDetail = New-Object System.Windows.Forms.Label
+    $lblDetail.Location = New-Object System.Drawing.Point(15, 315)
+    $lblDetail.Size = New-Object System.Drawing.Size(715, 45)
+    $lblDetail.ForeColor = [System.Drawing.Color]::Silver
+    $lblDetail.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Italic)
+
+    $refreshInfo = {
+        $info = Get-QuantumSchedulerInfo
+        $lblTelemetry.Text = "ACTIVE KERNEL STATE : $($info.HexValue) ($($info.DecimalValue) dec) | 6-Bit Mask (AA|BB|CC): [$($info.BitMask)]`r`n" +
+                             "QUANTUM LENGTH      : $($info.LengthDesc)`r`n" +
+                             "SCHEDULER MODE      : $($info.VarDesc) | $($info.BoostDesc)"
+        for ($i = 0; $i -lt $profiles.Count; $i++) {
+            if ($profiles[$i].Value -eq $info.DecimalValue) {
+                $listBox.SelectedIndex = $i
+                break
+            }
+        }
+    }
+
+    $listBox.Add_SelectedIndexChanged({
+        if ($listBox.SelectedIndex -ge 0) {
+            $lblDetail.Text = "Engineering Note: " + $profiles[$listBox.SelectedIndex].Desc
+        }
+    }.GetNewClosure())
+
+    &$refreshInfo
+    if ($listBox.SelectedIndex -lt 0) { $listBox.SelectedIndex = 0 }
+
+    $btnApply = New-UltixButton -Parent $modal -Text "Apply Selected Quantum (Live - Zero Reboot)" -X 15 -Y 425 -Width 330 -Height 38 -RGB @(150, 60, 60)
+    $btnApply.Add_Click({
+        if ($listBox.SelectedIndex -lt 0) { return }
+        $sel = $profiles[$listBox.SelectedIndex]
+        Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value $sel.Value -Type DWord -Force
+        Write-GUI " -> [LIVE QUANTUM] Enforced Win32PrioritySeparation = $($sel.Hex) ($($sel.Value) dec) [$($sel.Name)]"
+        &$refreshInfo
+    }.GetNewClosure())
+
+    $btnReset = New-UltixButton -Parent $modal -Text "Restore Factory (0x02)" -X 355 -Y 425 -Width 200 -Height 38 -RGB @(60, 100, 150)
+    $btnReset.Add_Click({
+        Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 2 -Type DWord -Force
+        Write-GUI " -> [LIVE QUANTUM] Restored factory Win32PrioritySeparation = 0x02 (2 dec)."
+        &$refreshInfo
+    }.GetNewClosure())
+
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 610 -Y 425 -Width 120 -Height 38 -RGB @(60, 60, 60)
+    $btnClose.DialogResult = "Cancel"
+
+    $modal.Controls.AddRange(@($lblDesc, $lblTelemetry, $listBox, $lblDetail))
+    try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
+}
+
+# ------------------------------------------
+# Z7: UI INITIALIZATION (PRE-FLIGHT HEADER + 2-COLUMN HARDWARE COCKPIT)
 # ------------------------------------------
 function Initialize-Z7UI {
     param([System.Windows.Forms.TabControl]$TabControl)
 
     $tab = New-Object System.Windows.Forms.TabPage
     $tab.Text = "Hardware"
-    $tab.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
+    $tab.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 
     $topo = Get-CPUTopologyProfile
 
+    # --- SECTION 1: PRE-FLIGHT CPU TOPOLOGY & P-STATE CONTROL ---
+    $lblPreFlight = New-Object System.Windows.Forms.Label
+    $lblPreFlight.Text = "Pre-Flight CPU Affinity & CPPC P-State Control"
+    $lblPreFlight.Location = New-Object System.Drawing.Point(15, 14)
+    $lblPreFlight.Size = New-Object System.Drawing.Size(370, 18)
+    $lblPreFlight.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblPreFlight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
     if ($topo.IsSupported) {
-        [void](New-UltixButton -Parent $tab -X 15 -Y 20 -Width 240 -Height 40 -RGB @(150, 60, 60) `
+        [void](New-UltixButton -Parent $tab -X 15 -Y 36 -Width 240 -Height 40 -RGB @(135, 50, 50) `
             -Text "Affinity Lasso (CPU Core Lock)" `
             -Description "Lock background apps to specific cores ($($topo.CoreDesc)) to free up prime gaming cores." `
             -OnClick ({ Show-AffinityModal "Affinity Lasso - $($topo.Label)" "Lock background processes to $($topo.CoreDesc) with BelowNormal priority." }.GetNewClosure()))
     } else {
-        $btnAffinity = New-UltixButton -Parent $tab -X 15 -Y 20 -Width 240 -Height 40 -RGB @(45, 45, 45) `
+        $btnAffinity = New-UltixButton -Parent $tab -X 15 -Y 36 -Width 240 -Height 40 -RGB @(45, 45, 48) `
             -ForeColor ([System.Drawing.Color]::DarkGray) `
             -Text "Affinity Lasso (Unsupported CPU)"
         $btnAffinity.Enabled = $false
     }
 
-    [void](New-UltixButton -Parent $tab -X 265 -Y 20 -Width 120 -Height 90 -RGB @(60, 100, 150) `
-        -Text "Generate Pre-Flight Shortcut" `
-        -Description "Create a desktop shortcut to instantly apply Affinity and CPPC rules." `
-        -OnClick { New-PreFlightShortcut })
-
-    [void](New-UltixButton -Parent $tab -X 15 -Y 70 -Width 240 -Height 40 -RGB @(100, 60, 150) `
+    [void](New-UltixButton -Parent $tab -X 15 -Y 86 -Width 240 -Height 40 -RGB @(55, 58, 64) `
         -Text "CPPC P-State Unhider" `
-        -Description "Unhide and manage advanced AMD/Intel CPPC power states." `
+        -Description "Unhide and manage advanced AMD/Intel CPPC power states with an automatic SYSTEM Dead Man's Switch." `
         -OnClick { Show-CPPCModal "CPPC Management" "Unhide advanced power plan settings (EPP, Demote, Promote)." })
 
-    [void](New-UltixButton -Parent $tab -X 15 -Y 120 -Width 370 -Height 40 -RGB @(100, 100, 100) `
+    [void](New-UltixButton -Parent $tab -X 265 -Y 36 -Width 120 -Height 90 -RGB @(45, 85, 125) `
+        -Text "Generate Pre-Flight Shortcut" `
+        -Description "Create a desktop shortcut to instantly toggle CPU Affinity Lasso and Max CPPC rules right before launching a game." `
+        -OnClick { New-PreFlightShortcut })
+
+    # --- SECTION 2: 2-COLUMN LOW-LATENCY HARDWARE & BUS TUNING ---
+    $lblColLeft = New-Object System.Windows.Forms.Label
+    $lblColLeft.Text = "Scheduler, Timer & Bus"
+    $lblColLeft.Location = New-Object System.Drawing.Point(15, 138)
+    $lblColLeft.Size = New-Object System.Drawing.Size(180, 18)
+    $lblColLeft.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblColLeft.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+    $lblColRight = New-Object System.Windows.Forms.Label
+    $lblColRight.Text = "IRQ, USB & OC Diagnostics"
+    $lblColRight.Location = New-Object System.Drawing.Point(205, 138)
+    $lblColRight.Size = New-Object System.Drawing.Size(180, 18)
+    $lblColRight.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblColRight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+    # Row 1 (Y = 160)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "Quantum Scheduler Matrix" `
+        -Description "Live Win32PrioritySeparation quantum tuner (0x26, 0x28, 0x2A, 0x16, 0x02). Changes apply in real time without rebooting." `
+        -OnClick { Show-QuantumSchedulerModal })
+
+    [void](New-UltixButton -Parent $tab -X 205 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
         -Text "MSI & IRQ Affinity Enforcer" `
         -Description "Force Message Signaled Interrupts (MSI), set Interrupt Priority, offload IRQs from Core 0, and monitor live kernel DPCs." `
         -OnClick { Show-MsiModal "MSI & IRQ Affinity Enforcer" "Force PCI devices into MSI mode, adjust interrupt priority, and offload high-DPC drivers (GPU/NIC) from Core 0." })
 
-    [void](New-UltixButton -Parent $tab -X 15 -Y 170 -Width 370 -Height 40 -RGB @(150, 100, 60) `
-        -Text "WHEA Hardware Error Logger" `
-        -Description "Scan system logs for hardware instability (Curve Optimizer / RAM)." `
-        -OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores or RAM." })
-
-    [void](New-UltixButton -Parent $tab -X 15 -Y 220 -Width 370 -Height 40 -RGB @(60, 100, 150) `
-        -Text "Network NDIS & TCP Optimizer" `
-        -Description "Configure low-latency NDIS parameters, TCP properties, and offloads with full symmetric revert." `
-        -OnClick { Show-NetworkModal "Network Optimizer" "Disable flow control, power saving, interrupt moderation, and enforce TCPNoDelay." })
-
-    [void](New-UltixButton -Parent $tab -X 15 -Y 270 -Width 370 -Height 40 -RGB @(100, 100, 100) `
-        -Text "System Timer & TSC Fix (0.5ms)" `
+    # Row 2 (Y = 210)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 210 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "System Timer & TSC (0.5ms)" `
         -Description "Fix Windows 11 API to allow global 0.5ms High Resolution Timers and force CPU TSC." `
         -OnClick { Show-TimerModal "Timer Resolution Subsystem" "Enable legacy 0.5ms requests globally and stabilize DPC latency." })
 
-    [void](New-UltixButton -Parent $tab -X 15 -Y 320 -Width 370 -Height 40 -RGB @(100, 60, 150) `
-        -Text "I/O & Memory Latency Optimizer" `
+    [void](New-UltixButton -Parent $tab -X 205 -Y 210 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "USB XHCI Topology Map" `
+        -Description "Maps physical USB XHCI controllers to CPU Direct PCIe lanes vs Chipset PCH bridges, and spots Mouse/DAC/VR bus contention." `
+        -OnClick { Show-UsbTopologyModal })
+
+    # Row 3 (Y = 260)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "I/O & Memory Optimizer" `
         -Description "Disable NVMe APST, PCIe ASPM, and System Memory Compression to reduce CPU overhead and micro-stuttering." `
         -OnClick { Show-NVMeModal "I/O & Memory Optimizer" "Prevent NVMe and PCIe bus from entering low-power states (D3hot/L1.2) and disable RAM compression." })
 
-    # Dedicated 3-Line Live Kernel Interrupt / DPC Telemetry Panel on Hardware Tab
+    [void](New-UltixButton -Parent $tab -X 205 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Network NDIS & TCP Tuner" `
+        -Description "Configure low-latency NDIS parameters, TCP properties, and offloads with full symmetric revert." `
+        -OnClick { Show-NetworkModal "Network Optimizer" "Disable flow control, power saving, interrupt moderation, and enforce TCPNoDelay." })
+
+    # Row 4 (Y = 310 - Full Width)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 310 -Width 370 -Height 40 -RGB @(45, 85, 125) `
+        -Text "WHEA Hardware Error Logger & OC Decoder" `
+        -Description "Scan system logs for hardware instability (Curve Optimizer / FCLK / DDR5 timings) and decode APIC IDs to physical CPU cores." `
+        -OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores or RAM." })
+
+    # --- SECTION 3: LIVE KERNEL INTERRUPT / DPC TELEMETRY PANEL (Y = 365) ---
     $lblDpcHeader = New-Object System.Windows.Forms.Label
     $lblDpcHeader.Text = "Live Kernel Interrupt / DPC Distribution Monitor (ntdll.dll)"
-    $lblDpcHeader.Location = New-Object System.Drawing.Point(15, 374)
+    $lblDpcHeader.Location = New-Object System.Drawing.Point(15, 365)
     $lblDpcHeader.Size = New-Object System.Drawing.Size(370, 20)
     $lblDpcHeader.ForeColor = [System.Drawing.Color]::DarkGray
     $lblDpcHeader.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 
     $lblTabDpc = New-Object System.Windows.Forms.Label
-    $lblTabDpc.Location = New-Object System.Drawing.Point(15, 396)
+    $lblTabDpc.Location = New-Object System.Drawing.Point(15, 387)
     $lblTabDpc.Size = New-Object System.Drawing.Size(370, 68)
     $lblTabDpc.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 20, 20)
     $lblTabDpc.ForeColor = [System.Drawing.Color]::LightSkyBlue
@@ -2436,7 +3199,7 @@ function Initialize-Z7UI {
 
     $lblTabLegend = New-Object System.Windows.Forms.Label
     $lblTabLegend.Text = "C0..Cn = Physical Cores (SMT: 2 LP#/Core) | LP# = Logical Thread`r`nColor = Core 0 Load: Green (<30%) | Yellow (30-54%) | Red (>=55%)"
-    $lblTabLegend.Location = New-Object System.Drawing.Point(15, 468)
+    $lblTabLegend.Location = New-Object System.Drawing.Point(15, 459)
     $lblTabLegend.Size = New-Object System.Drawing.Size(370, 30)
     $lblTabLegend.ForeColor = [System.Drawing.Color]::DarkGray
     $lblTabLegend.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Italic)
@@ -2463,11 +3226,11 @@ function Initialize-Z7UI {
         }
     })
 
-    $btnToggleDpc = New-UltixButton -Parent $tab -X 15 -Y 502 -Width 320 -Height 34 -RGB @(50, 75, 100) `
+    $btnToggleDpc = New-UltixButton -Parent $tab -X 15 -Y 495 -Width 320 -Height 36 -RGB @(45, 85, 125) `
         -Text "Start Live DPC Monitor (1Hz Stream)" `
         -Description "Toggles real-time 1Hz polling of ntdll!NtQuerySystemInformation (SystemInterruptInformation). Automatically pauses if you switch tabs."
 
-    $btnHelpDpc = New-UltixButton -Parent $tab -X 345 -Y 502 -Width 40 -Height 34 -RGB @(80, 80, 80) `
+    $btnHelpDpc = New-UltixButton -Parent $tab -X 345 -Y 495 -Width 40 -Height 36 -RGB @(72, 76, 82) `
         -Text "?" `
         -Description "DPC LEGEND & REPORT: Samples per-core DPC distribution over 1s and prints a compact breakdown of all physical cores (C0..Cn) and logical threads (LP#) to the log."
 
@@ -2489,7 +3252,7 @@ function Initialize-Z7UI {
             $state.IsRunning  = $true
             $state.PrevCounts = $null
             $this.Text        = "Stop Live DPC Monitor [ACTIVE - 1Hz]"
-            $this.BackColor   = [System.Drawing.Color]::FromArgb(255, 45, 110, 65)
+            $this.BackColor   = [System.Drawing.Color]::FromArgb(255, 45, 95, 60)
             Update-UltixDpcMonitorUI -TargetLabel $lbl -State $state -CompactMode
             $timer.Start()
             Write-GUI " -> Live Kernel DPC Monitor started (1Hz polling)."
@@ -2497,7 +3260,7 @@ function Initialize-Z7UI {
             $timer.Stop()
             $state.IsRunning = $false
             $this.Text       = "Start Live DPC Monitor (1Hz Stream)"
-            $this.BackColor  = [System.Drawing.Color]::FromArgb(255, 50, 75, 100)
+            $this.BackColor  = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
             if ($null -ne $state.LastSnap -and $state.LastSnap.HasLiveDelta) {
                 Write-UltixDpcReport -Snapshot $state.LastSnap
             } else {
@@ -2524,6 +3287,6 @@ function Initialize-Z7UI {
         }
     })
 
-    $tab.Controls.AddRange(@($lblDpcHeader, $lblTabDpc, $lblTabLegend))
+    $tab.Controls.AddRange(@($lblPreFlight, $lblColLeft, $lblColRight, $lblDpcHeader, $lblTabDpc, $lblTabLegend))
     $TabControl.Controls.Add($tab)
 }
