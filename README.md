@@ -42,8 +42,6 @@ On modern AMD and Intel motherboards, **not all USB ports are created equal**. S
 
 #### 2. Eliminate Micro-Stutters, Core 0 Bottlenecks & Scheduler Jitter (`Hardware` Tab)
 
-![WinUltix Z7](assets/3.png)
-
 By default, Windows piles your GPU, network card, and system timers onto **CPU Core 0**. When they collide, you get audio crackles, input lag, and 1% low FPS drops.
 
 * **Live 1Hz Kernel DPC Monitor:** Watch real-time interrupt load across every physical CPU core (`C0..Cn`) and logical thread (`LP#`) via native `ntdll.dll` telemetry.
