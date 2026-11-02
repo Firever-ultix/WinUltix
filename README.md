@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo.png" alt="WinUltix Logo" width="128" height="128" />
   <h1>WinUltix 3.1</h1>
-  <p><b>The Ultimate ~500KB Windows 11 & 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
+  <p><b>The Ultimate ~600KB Windows 11 & 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
 </div>
 
 > 🔗 **Part of the Ultix Ecosystem:**
@@ -10,7 +10,7 @@
 
 Most Windows utilities force a bad compromise: they are either bloated 150 MB background apps that eat your RAM, or reckless "black-box" scripts that blindly delete system files, break Windows Update, and ruin your Xbox/Steam logins.
 
-I built **WinUltix** to be the exact opposite: **a fast, 100% transparent, zero-dependency engineering toolkit (~500 KB)** for Windows 11 (25H2 / 26H2) and Windows 10. It replaces **10 separate standalone programs** (*DriverStore Explorer, PatchCleaner, MSI Utility, Process Lasso, LatencyMon, USB Tree Viewer, TimerResolution, Autoruns, TCP Optimizer, and Debloaters*) inside one native dark interface. Every tweak is explained on hover, runs asynchronously without freezing the GUI, and includes a **Symmetric Revert (Undo)** engine so you can restore factory defaults anytime.
+I built **WinUltix** to be the exact opposite: **a fast, 100% transparent, zero-dependency engineering toolkit (~600 KB)** for Windows 11 (25H2 / 26H2) and Windows 10. It replaces **10 separate standalone programs** (*DriverStore Explorer, PatchCleaner, MSI Utility, Process Lasso, LatencyMon, USB Tree Viewer, TimerResolution, Autoruns, TCP Optimizer, and Debloaters*) inside one native dark interface. Every tweak is explained on hover, runs asynchronously without freezing the GUI, and includes a **Symmetric Revert (Undo)** engine so you can restore factory defaults anytime.
 
 ![WinUltix Main Interface](assets/1.png)
 
