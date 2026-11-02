@@ -631,25 +631,52 @@ function Initialize-WinUltixIcon {
             $parentDir = Split-Path -Path $ScriptDir -Parent
             foreach ($cand in @((Join-Path $ScriptDir "assets\WinUltix.ico"), (Join-Path $parentDir "assets\WinUltix.ico"))) {
                 if (-not [string]::IsNullOrWhiteSpace($cand) -and (Test-Path -LiteralPath $cand)) {
-                    $resolvedIco = $cand
-                    break
+                    if ((Get-Item -LiteralPath $cand -ErrorAction SilentlyContinue).Length -gt 1024) {
+                        $resolvedIco = $cand
+                        break
+                    }
                 }
             }
         }
 
-        # 3. Memory-Only 'irm | iex' Mode: Cache WinUltix.ico once in %LOCALAPPDATA%\WinUltix
+        # 3. Memory-Only 'irm | iex' Mode: Validate cache & download into RAM buffer before writing to disk
         if ([string]::IsNullOrWhiteSpace($resolvedIco)) {
             $cacheDir = Join-Path $env:LOCALAPPDATA "WinUltix"
             $cacheIco = Join-Path $cacheDir "WinUltix.ico"
+
+            # Purge poisoned 0-byte / corrupted cache file left by previous failed DownloadFile call
+            if (Test-Path -LiteralPath $cacheIco) {
+                if ((Get-Item -LiteralPath $cacheIco -Force -ErrorAction SilentlyContinue).Length -le 1024) {
+                    Remove-Item -LiteralPath $cacheIco -Force -ErrorAction SilentlyContinue
+                }
+            }
+
             if (-not (Test-Path -LiteralPath $cacheIco)) {
                 try {
                     if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null }
+                    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
                     $wc = New-Object System.Net.WebClient
-                    $wc.DownloadFile("https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/assets/WinUltix.ico", $cacheIco)
+                    $urls = @(
+                        "https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/assets/WinUltix.ico",
+                        "https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/assets/winultix.ico"
+                    )
+                    foreach ($url in $urls) {
+                        try {
+                            [byte[]]$icoBytes = $wc.DownloadData($url)
+                            # Verify valid Win32 ICONDIR magic header (00 00 01 00) and size > 1 KB
+                            if ($null -ne $icoBytes -and $icoBytes.Length -gt 1024 -and $icoBytes[0] -eq 0 -and $icoBytes[1] -eq 0 -and $icoBytes[2] -eq 1 -and $icoBytes[3] -eq 0) {
+                                [System.IO.File]::WriteAllBytes($cacheIco, $icoBytes)
+                                break
+                            }
+                        } catch { }
+                    }
                     $wc.Dispose()
                 } catch { }
             }
-            if (Test-Path -LiteralPath $cacheIco) { $resolvedIco = $cacheIco }
+
+            if ((Test-Path -LiteralPath $cacheIco) -and (Get-Item -LiteralPath $cacheIco -Force -ErrorAction SilentlyContinue).Length -gt 1024) {
+                $resolvedIco = $cacheIco
+            }
         }
 
         if (-not [string]::IsNullOrWhiteSpace($resolvedIco)) {

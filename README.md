@@ -23,7 +23,7 @@ irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix
 ```
 
 *(Prefer a standalone `.exe`? Grab the compiled executable from the **[Releases](https://github.com/Firever-ultix/WinUltix/releases)** page).*
-SHA-256: 2C7F4225881DD1AC7411E9E5AFC1A97BE036172BE42919074452DAFA8E5BA739
+SHA-256: 6051BBA7974738CD1E0CA0C87F59E4FC2468223EBFA0E36A9561A9DFA32204F9
 
 ---
 
