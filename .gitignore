@@ -30,5 +30,6 @@ err/
 *.7z
 
 WinUltix.exe
+START.cmd
 
 tmp/
