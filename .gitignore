@@ -29,7 +29,7 @@ err/
 *.rar
 *.7z
 
-WinUltix.exe
+WinUltix*.exe
 START.cmd
 
 tmp/
