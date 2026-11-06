@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE (v3.1.0)
+# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE (v3.14)
 # Z6_Integrity: System First-Aid & OS repair (ChkDisk + DISM + SFC with fast health audit, WinSxS ResetBase compression, WMI repository salvage, Windows Update & CryptSvc reset, Network Stack refresh, Print Spooler First-Aid, and Icon Cache rebuild).
 # ==========================================
 
@@ -25,10 +25,14 @@ function Start-ExternalConsoleAsync {
         # Preserves real command exit code across 'pause >nul'
         $fullArgs = "/v:on /c `"title $CmdTitle & color 0A & set WUX_ERR=0 & $CmdChain & if !WUX_ERR! EQU 0 (set WUX_ERR=!ERRORLEVEL!) & echo. & echo Operation finished (Exit Code: !WUX_ERR!). Press any key to close... & pause >nul & exit /b !WUX_ERR!`""
         
-        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $fullArgs -PassThru
-        $proc.WaitForExit()
-        $exitCode = $proc.ExitCode
-        $proc.Dispose()
+        $exitCode = -1
+        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $fullArgs -PassThru -ErrorAction Stop
+        try {
+            $proc.WaitForExit()
+            $exitCode = $proc.ExitCode
+        } finally {
+            $proc.Dispose()
+        }
 
         return [PSCustomObject]@{
             Title    = $CmdTitle
@@ -65,27 +69,37 @@ function Get-WinSxSState {
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.CreateNoWindow = $true
 
-    $proc = [System.Diagnostics.Process]::Start($psi)
     $sbOutput = [System.Text.StringBuilder]::new()
+    $exitCode = -1
+    $proc = $null
 
-    # StreamReader.ReadLine() yields on every '\r' progress bar update from dism.exe
-    while (-not $proc.StandardOutput.EndOfStream) {
-        $line = $proc.StandardOutput.ReadLine()
-        if ($null -eq $line) { continue }
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if ($null -ne $proc) {
+            # StreamReader.ReadLine() yields on every '\r' progress bar update from dism.exe
+            while (-not $proc.StandardOutput.EndOfStream) {
+                $line = $proc.StandardOutput.ReadLine()
+                if ($null -eq $line) { continue }
 
-        if ($line -match '(\d{1,3})\.\d+%') {
-            $pct = [int]$matches[1]
-            if ($null -ne $UltixSync) {
-                $UltixSync.Progress = [math]::Max(5, [math]::Min(95, $pct))
+                if ($line -match '(\d{1,3})\.\d+%') {
+                    $pct = [int]$matches[1]
+                    if ($null -ne $UltixSync) {
+                        $UltixSync.Progress = [math]::Max(5, [math]::Min(95, $pct))
+                    }
+                } else {
+                    [void]$sbOutput.AppendLine($line)
+                }
             }
-        } else {
-            [void]$sbOutput.AppendLine($line)
+            $proc.WaitForExit()
+            $exitCode = $proc.ExitCode
         }
+    } catch {
+        if ($null -ne $UltixSync) {
+            $UltixSync.Logs.Enqueue(" [!] DISM component store analysis failed: $($_.Exception.Message)")
+        }
+    } finally {
+        if ($null -ne $proc) { $proc.Dispose() }
     }
-
-    $proc.WaitForExit()
-    $exitCode = $proc.ExitCode
-    $proc.Dispose()
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
     $dismOutput = $sbOutput.ToString()
@@ -104,7 +118,7 @@ function Get-WinSxSState {
     # Match localized Yes/Tak/Ja/Oui/Si on the last boolean line of the table
     $recommended = ($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[ií]|True|1)\b")
 
-    $rebootPending = Test-Path -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+    $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
 
     return [PSCustomObject]@{
         UIDisplayName = "WinSxS Payload (Actual Size: $actualSize)"
@@ -118,7 +132,7 @@ function Get-WinSxSState {
 function Optimize-WinSXS {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
 
-    if (Test-Path -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
+    if (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
         $warnMsg = "A pending Windows servicing reboot was detected in the CBS registry.`n`nRunning DISM /ResetBase while a reboot is pending on Windows 11 24H2/26H2 may fail with error 0x800f0806.`n`nDo you still want to force execution?"
         $ans = [System.Windows.Forms.MessageBox]::Show($warnMsg, "WinUltix - CBS Reboot Pending", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
         if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
@@ -139,7 +153,7 @@ function Invoke-SystemHealthAudit {
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         $UltixSync.Progress = 35
-        $null = dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
+        $null = & dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
         $dismExit = $LASTEXITCODE
 
         # 100% locale-independent CBS corruption registry markers + DISM exit code
@@ -152,14 +166,21 @@ function Invoke-SystemHealthAudit {
         )
         $isHealthy = ($dismExit -eq 0 -and -not $hasRegCorr)
 
+        # Zero-WMI NTFS Dirty Bit verification via native fsutil.exe
         $UltixSync.Progress = 70
         $sysDrive = $env:SystemDrive.TrimEnd('\')
-        $diskObj  = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$sysDrive'" -Property VolumeDirty -ErrorAction SilentlyContinue
-        $isDirty  = if ($null -ne $diskObj -and $null -ne $diskObj.VolumeDirty) { [bool]$diskObj.VolumeDirty } else { $false }
+        $isDirty  = $false
+        $fsOut    = (& fsutil.exe dirty query $sysDrive 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($fsOut)) {
+            # Clean output always contains a negation particle across locales (NOT, NIE, NICHT, PAS, NON, NO, NIET, NAO, EI, etc.)
+            if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[AÃ]O|EI|INTE|IKKE|NE|NINCS)\b' -and $fsOut -notmatch '干净|正常|클린|クリーン') {
+                $isDirty = $true
+            }
+        }
 
         $UltixSync.Progress = 90
-        $cbsReboot = Test-Path -Path "$cbsKey\RebootPending"
-        $sfcPend   = Test-Path -Path "$cbsKey\PackagesPending"
+        $cbsReboot = Test-Path -LiteralPath "$cbsKey\RebootPending"
+        $sfcPend   = Test-Path -LiteralPath "$cbsKey\PackagesPending"
 
         $UltixSync.Progress = 100
         return [PSCustomObject]@{
@@ -197,8 +218,9 @@ function Invoke-SystemHealthAudit {
 function Repair-SystemIntegrity {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
 
+    $sysDrive = $env:SystemDrive.TrimEnd('\')
     $msg = "This operation will open an external maintenance console and execute:`n`n" +
-           "  1. Online CheckDisk Scan (chkdsk C: /scan)`n" +
+           "  1. Online CheckDisk Scan (chkdsk $sysDrive /scan)`n" +
            "  2. DISM Image Repair (DISM /Online /Cleanup-Image /RestoreHealth)`n" +
            "  3. System File Checker (sfc /scannow)`n`n" +
            "Full verification typically takes 5 to 15 minutes. Do you want to proceed?"
@@ -208,14 +230,46 @@ function Repair-SystemIntegrity {
         return
     }
 
-    $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk C: /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
+    $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk $sysDrive /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
     Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 
 function Clear-NetworkStack {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
-    $cmd = "echo Flushing DNS resolver cache... & ipconfig /flushdns & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo Resetting Winsock Catalog... & netsh winsock reset & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo Resetting TCP/IP Stack... & netsh int ip reset & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
-    Start-ExternalConsoleAsync -Title "WinUltix - Network Stack Refresh" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
+
+    Write-GUI " -> Initiating Full Network Stack Refresh (Background Thread)..."
+    Update-Progress 10
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        try {
+            $UltixSync.Progress = 25
+            $UltixSync.Logs.Enqueue(" -> [1/4] Flushing DNS Resolver Cache (ipconfig /flushdns)...")
+            $null = & ipconfig.exe /flushdns 2>&1
+
+            $UltixSync.Progress = 50
+            $UltixSync.Logs.Enqueue(" -> [2/4] Clearing ARP routing tables & resetting WinHTTP proxy...")
+            $null = & arp.exe -d * 2>&1
+            $null = & netsh.exe winhttp reset proxy 2>&1
+
+            $UltixSync.Progress = 75
+            $UltixSync.Logs.Enqueue(" -> [3/4] Resetting Winsock Catalog (netsh winsock reset)...")
+            $null = & netsh.exe winsock reset 2>&1
+
+            $UltixSync.Progress = 95
+            $UltixSync.Logs.Enqueue(" -> [4/4] Resetting TCP/IPv4 & IPv6 Stack (netsh int ip/ipv6 reset)...")
+            $null = & netsh.exe int ip reset 2>&1
+            $null = & netsh.exe int ipv6 reset 2>&1
+
+            $UltixSync.Progress = 100
+            $UltixSync.Logs.Enqueue(" -> [OK] Network stack refreshed (Reboot recommended to finalize Winsock reset).")
+        } catch {
+            $UltixSync.Logs.Enqueue(" [!] Network stack refresh failed: $($_.Exception.Message)")
+        }
+    } -OnComplete {
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI ""
+    }
 }
 
 function Repair-PrintSubsystem {
@@ -227,9 +281,21 @@ function Repair-PrintSubsystem {
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         try {
             $UltixSync.Progress = 20
-            $spoolerProc = Get-Process -Name "spoolsv" -ErrorAction SilentlyContinue
-            if ($spoolerProc) {
-                $spoolerProc | Stop-Process -Force -ErrorAction SilentlyContinue
+
+            # Auto-heal if Spooler was disabled (Start=4) by Gaming Heavy Service Profile
+            $spoolReg = "HKLM:\SYSTEM\CurrentControlSet\Services\Spooler"
+            $curStart = (Get-ItemProperty -LiteralPath $spoolReg -Name "Start" -ErrorAction SilentlyContinue).Start
+            if ($curStart -eq 4) {
+                Set-ProtectedServiceStart -ServiceName "Spooler" -StartValue 2
+                $UltixSync.Logs.Enqueue(" -> Re-enabled Print Spooler service (Was locked to Disabled by Gaming Profile).")
+            }
+
+            $spoolerProcs = @(Get-Process -Name "spoolsv" -ErrorAction SilentlyContinue)
+            if ($spoolerProcs.Count -gt 0) {
+                foreach ($p in $spoolerProcs) {
+                    try { $p.Kill() } catch { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+                    finally { $p.Dispose() }
+                }
                 $UltixSync.Logs.Enqueue(" -> Terminated locked spoolsv.exe process.")
             } else {
                 Stop-Service -Name "Spooler" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
@@ -253,10 +319,16 @@ function Repair-PrintSubsystem {
             }
 
             $UltixSync.Progress = 80
-            $printWorkflow = Get-Service -Name "PrintWorkflowUserSvc*" -ErrorAction SilentlyContinue
-            if ($printWorkflow) {
-                $printWorkflow | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                $printWorkflow | Start-Service -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            $printWorkflow = @(Get-Service -Name "PrintWorkflowUserSvc*" -ErrorAction SilentlyContinue)
+            if ($printWorkflow.Count -gt 0) {
+                foreach ($wfSvc in $printWorkflow) {
+                    try {
+                        Stop-Service -InputObject $wfSvc -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                        Start-Service -InputObject $wfSvc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                    } finally {
+                        $wfSvc.Dispose()
+                    }
+                }
                 $UltixSync.Logs.Enqueue(" -> Restarted dynamic PrintWorkflowUserSvc service.")
             }
 
@@ -265,6 +337,7 @@ function Repair-PrintSubsystem {
             $UltixSync.Logs.Enqueue(" -> [OK] Print Spooler service is back online.")
         } catch {
             $UltixSync.Logs.Enqueue(" [!] Failed to reset print subsystem: $($_.Exception.Message)")
+            Start-Service -Name "Spooler" -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
         }
     } -OnComplete {
         param($nullOut)
@@ -327,33 +400,47 @@ function Repair-WindowsUpdateSubsystem {
             }
             $UltixSync.Logs.Enqueue(" -> [3/5] Flushed Catroot2 cryptographic catalog cache and WU DataStore.")
 
-            # Stage 4: Re-register core cryptographic & Windows Update COM DLLs
+            # Stage 4: Single-pass batch re-registration of active Win10/11 Cryptographic & WU COM DLLs
             $UltixSync.Progress = 75
-            $dlls = @(
-                "atl.dll", "urlmon.dll", "mshtml.dll", "shdocvw.dll", "browseui.dll",
-                "jscript.dll", "vbscript.dll", "scrrun.dll", "msxml3.dll", "msxml6.dll",
-                "actxprxy.dll", "softpub.dll", "wintrust.dll", "dssenh.dll", "rsaenh.dll",
-                "gpkcsp.dll", "sccbase.dll", "slbcsp.dll", "cryptdlg.dll", "oleaut32.dll",
-                "ole32.dll", "shell32.dll", "initpki.dll", "wuapi.dll", "wuaueng.dll",
-                "wucltux.dll", "wups.dll", "wups2.dll", "wuwebv.dll", "qmgr.dll", "qmgrprxy.dll"
+            $modernDlls = @(
+                "atl.dll", "urlmon.dll", "jscript.dll", "vbscript.dll", "scrrun.dll",
+                "msxml3.dll", "msxml6.dll", "actxprxy.dll", "softpub.dll", "wintrust.dll",
+                "dssenh.dll", "rsaenh.dll", "cryptdlg.dll", "oleaut32.dll", "ole32.dll",
+                "shell32.dll", "wuapi.dll", "wuaueng.dll", "wups.dll", "wups2.dll", "qmgr.dll"
             )
-            foreach ($dll in $dlls) {
+
+            $validDllPaths = [System.Collections.Generic.List[string]]::new()
+            foreach ($dll in $modernDlls) {
                 $dllFull = "$env:windir\System32\$dll"
-                if (Test-Path -LiteralPath $dllFull) {
-                    Start-Process -FilePath "regsvr32.exe" -ArgumentList "/s `"$dllFull`"" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+                if ([System.IO.File]::Exists($dllFull)) {
+                    $validDllPaths.Add("`"$dllFull`"")
                 }
             }
-            $UltixSync.Logs.Enqueue(" -> [4/5] Re-registered Cryptographic, WinTrust, and Windows Update COM DLLs.")
 
-            # Stage 5: Restart core services
+            if ($validDllPaths.Count -gt 0) {
+                $batchArgs = "/s " + ($validDllPaths -join " ")
+                $regProc = Start-Process -FilePath "regsvr32.exe" -ArgumentList $batchArgs -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+                if ($null -ne $regProc) {
+                    try { $regProc.WaitForExit(15000) | Out-Null } finally { $regProc.Dispose() }
+                }
+            }
+            $UltixSync.Logs.Enqueue(" -> [4/5] Batch re-registered $($validDllPaths.Count) Cryptographic, WinTrust, and WU COM DLLs.")
+        } catch {
+            $UltixSync.Logs.Enqueue(" [!] Error during Windows Update subsystem repair: $($_.Exception.Message)")
+        } finally {
+            # Stage 5: Deterministic restoration of core services (auto-unlocks Start=4 if blocked by 3rd-party tools)
             $UltixSync.Progress = 95
+            $svcDefaults = @{ "cryptSvc" = 2; "bits" = 3; "wuauserv" = 3 }
             foreach ($svc in @("cryptSvc", "bits", "wuauserv")) {
+                $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+                $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
+                if ($curSt -eq 4) {
+                    Set-ProtectedServiceStart -ServiceName $svc -StartValue $svcDefaults[$svc]
+                }
                 Start-Service -Name $svc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
             }
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [5/5] [OK] Windows Update & Cryptographic services restored and online.")
-        } catch {
-            $UltixSync.Logs.Enqueue(" [!] Error during Windows Update subsystem repair: $($_.Exception.Message)")
         }
     } -OnComplete {
         param($nullOut)
@@ -370,7 +457,7 @@ function Invoke-WMIAudit {
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         $UltixSync.Progress = 40
-        $verifyOut = (winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+        $verifyOut = (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
 
         $UltixSync.Progress = 75
         $cimHealthy = $false
@@ -411,17 +498,20 @@ function Repair-WMIRepository {
         try {
             $UltixSync.Progress = 25
             $UltixSync.Logs.Enqueue(" -> [1/3] Running winmgmt /verifyrepository...")
-            $verifyOut = (winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+            $verifyOut = (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
             $UltixSync.Logs.Enqueue("    [*] Status: $verifyOut")
 
             $UltixSync.Progress = 55
             $UltixSync.Logs.Enqueue(" -> [2/3] Executing non-destructive winmgmt /salvagerepository...")
-            $salvageOut = (winmgmt.exe /salvagerepository 2>&1 | Out-String).Trim()
+            $salvageOut = (& winmgmt.exe /salvagerepository 2>&1 | Out-String).Trim()
             $UltixSync.Logs.Enqueue("    [*] Result: $salvageOut")
 
             $UltixSync.Progress = 85
             $UltixSync.Logs.Enqueue(" -> [3/3] Refreshing WMI Performance Adapter (wmiadap /f)...")
-            Start-Process -FilePath "wmiadap.exe" -ArgumentList "/f" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+            $adapProc = Start-Process -FilePath "wmiadap.exe" -ArgumentList "/f" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+            if ($null -ne $adapProc) {
+                try { $adapProc.WaitForExit(15000) | Out-Null } finally { $adapProc.Dispose() }
+            }
 
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [OK] WMI Repository verification and salvage routine finished.")
@@ -473,6 +563,8 @@ function Clear-ShellIconCache {
             $legacyIconDb = "$env:LOCALAPPDATA\IconCache.db"
             if (Test-Path -LiteralPath $legacyIconDb) {
                 try {
+                    $item = Get-Item -LiteralPath $legacyIconDb -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $item) { $item.Attributes = 'Normal' }
                     Remove-Item -LiteralPath $legacyIconDb -Force -ErrorAction Stop
                     $purgedIcons++
                 } catch { }
@@ -482,21 +574,129 @@ function Clear-ShellIconCache {
 
             $UltixSync.Progress = 80
             $UltixSync.Logs.Enqueue(" -> [3/4] Triggering ie4uinit.exe cache rebuild...")
-            Start-Process -FilePath "ie4uinit.exe" -ArgumentList "-show" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
-
-            $UltixSync.Progress = 95
-            $UltixSync.Logs.Enqueue(" -> [4/4] Restarting Windows Explorer shell...")
-            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
-                Start-Process "explorer.exe"
+            $ieProc = Start-Process -FilePath "ie4uinit.exe" -ArgumentList "-show" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+            if ($null -ne $ieProc) {
+                try { $ieProc.WaitForExit(10000) | Out-Null } finally { $ieProc.Dispose() }
             }
 
             $UltixSync.Progress = 100
-            $UltixSync.Logs.Enqueue(" -> [OK] Shell Icon & Thumbnail caches rebuilt cleanly.")
+            $UltixSync.Logs.Enqueue(" -> [4/4] [OK] Shell Icon & Thumbnail caches rebuilt cleanly.")
         } catch {
             $UltixSync.Logs.Enqueue(" [!] Failed to rebuild Icon/Thumbnail cache: $($_.Exception.Message)")
-            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+        } finally {
+            $expProcs = @(Get-Process -Name "explorer" -ErrorAction SilentlyContinue)
+            if ($expProcs.Count -eq 0) {
                 Start-Process "explorer.exe"
+            } else {
+                foreach ($ep in $expProcs) { $ep.Dispose() }
             }
+        }
+    } -OnComplete {
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI ""
+    }
+}
+
+function Repair-TimeSynchronization {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable)
+
+    Write-GUI " -> Initiating Time & NTP Clock Synchronization First-Aid (Background Thread)..."
+    Update-Progress 10
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        try {
+            $UltixSync.Progress = 25
+            $UltixSync.Logs.Enqueue(" -> [1/4] Enforcing UTC hardware RTC clock (RealTimeIsUniversal=1) & unlocking W32Time...")
+            $tzPath = "HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation"
+            if (Test-Path -LiteralPath $tzPath) {
+                Set-ItemProperty -LiteralPath $tzPath -Name "RealTimeIsUniversal" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+
+            Stop-Service -Name "W32Time" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            & w32tm.exe /unregister 2>$null | Out-Null
+            Start-Sleep -Milliseconds 300
+            & w32tm.exe /register 2>$null | Out-Null
+            Set-ProtectedServiceStart -ServiceName "W32Time" -StartValue 3
+
+            $UltixSync.Progress = 55
+            $UltixSync.Logs.Enqueue(" -> [2/4] Starting Windows Time service & configuring resilient NTP pool (Cloudflare / Pool.ntp / MS)...")
+            Start-Service -Name "W32Time" -WarningAction SilentlyContinue -ErrorAction Stop
+            & w32tm.exe /config /manualpeerlist:"pool.ntp.org,0x8 time.cloudflare.com,0x8 time.windows.com,0x9" /syncfromflags:manual /reliable:yes /update 2>$null | Out-Null
+
+            $UltixSync.Progress = 85
+            $UltixSync.Logs.Enqueue(" -> [3/4] Triggering immediate NTP clock resynchronization (w32tm /resync /rediscover)...")
+            $null = & w32tm.exe /resync /rediscover 2>&1
+            $srcOut = (& w32tm.exe /query /source 2>&1 | Out-String).Trim()
+
+            $UltixSync.Progress = 100
+            $UltixSync.Logs.Enqueue(" -> [4/4] [OK] System clock synchronized (Active NTP Source: $srcOut).")
+        } catch {
+            $UltixSync.Logs.Enqueue(" [!] Time synchronization repair failed: $($_.Exception.Message)")
+        }
+    } -OnComplete {
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI ""
+    }
+}
+
+function Repair-UwpGamingRuntime {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable)
+
+    Write-GUI " -> Initiating UWP Shell, Store & Xbox Gaming Services First-Aid (Background Thread)..."
+    Update-Progress 10
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        try {
+            $UltixSync.Progress = 20
+            $UltixSync.Logs.Enqueue(" -> [1/4] Verifying core UWP licensing & Xbox Gaming Services (AppXSvc, ClipSVC, GamingServices)...")
+            foreach ($svc in @("AppXSvc", "ClipSVC", "StateRepository", "LicenseManager", "GamingServices", "GamingServicesNet")) {
+                $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+                if (Test-Path -LiteralPath $sPath) {
+                    $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
+                    if ($curSt -eq 4) {
+                        Set-ProtectedServiceStart -ServiceName $svc -StartValue 3
+                    }
+                    Start-Service -Name $svc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                }
+            }
+
+            $UltixSync.Progress = 45
+            $UltixSync.Logs.Enqueue(" -> [2/4] Flushing corrupted Microsoft Store LocalCache & running wsreset -i...")
+            Stop-Process -Name "WinStore.App", "StoreExperienceHost" -Force -ErrorAction SilentlyContinue
+            $storeCache = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_*\LocalCache" -Directory -ErrorAction SilentlyContinue
+            foreach ($dir in $storeCache) {
+                Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            $wsProc = Start-Process -FilePath "wsreset.exe" -ArgumentList "-i" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+            if ($null -ne $wsProc) {
+                try { $wsProc.WaitForExit(10000) | Out-Null } finally { $wsProc.Dispose() }
+            }
+
+            $UltixSync.Progress = 75
+            $UltixSync.Logs.Enqueue(" -> [3/4] Re-registering existing Shell, Store & Runtime AppxManifests (Preserving debloat state)...")
+            $corePattern = "WindowsStore|StorePurchaseApp|DesktopAppInstaller|XboxIdentityProvider|XboxGameCallableUI|GamingServices|SecHealthUI|WindowsDefender|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|Microsoft\.VCLibs|Microsoft\.UI\.Xaml|Microsoft\.WindowsAppRuntime"
+            $targetPkgs  = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $corePattern })
+
+            $reRegCount = 0
+            foreach ($pkg in $targetPkgs) {
+                if (-not [string]::IsNullOrWhiteSpace($pkg.InstallLocation)) {
+                    $manifest = Join-Path $pkg.InstallLocation "AppxManifest.xml"
+                    if ([System.IO.File]::Exists($manifest)) {
+                        try {
+                            Add-AppxPackage -DisableDevelopmentMode -Register $manifest -ErrorAction Stop
+                            $reRegCount++
+                        } catch { }
+                    }
+                }
+            }
+
+            $UltixSync.Progress = 100
+            $UltixSync.Logs.Enqueue(" -> [4/4] [OK] Re-registered $reRegCount core UWP/Gaming manifests and flushed Store cache.")
+        } catch {
+            $UltixSync.Logs.Enqueue(" [!] UWP & Gaming runtime repair failed: $($_.Exception.Message)")
         }
     } -OnComplete {
         param($nullOut)
@@ -521,7 +721,7 @@ function Initialize-Z6UI {
     $rowCheckSystem = New-UltixActionRow -Parent $tabWinSXS -Y 20 -MainRGB @(55, 58, 64) `
         -Text "Scan System (ChkDisk + SFC + DISM)" `
         -Description "System First-Aid: Scans core Windows OS files for corruption and replaces damaged components using ChkDisk, DISM RestoreHealth, and SFC." `
-        -AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit, and inspects CBS pending repair flags." `
+        -AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit via fsutil, and inspects CBS pending repair flags." `
         -OnClick ({ Repair-SystemIntegrity -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
         -OnAudit ({ Invoke-SystemHealthAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
@@ -567,19 +767,19 @@ function Initialize-Z6UI {
     # 4. Windows Update & Cryptographic Subsystem First-Aid
     $btnFixWU = New-UltixButton -Parent $tabWinSXS -X 15 -Y 170 -RGB @(55, 58, 64) `
         -Text "Reset Windows Update & CryptSvc" `
-        -Description "WU First-Aid: Stops wuauserv/bits/cryptSvc, purges corrupted qmgr*.dat queues, resets Catroot2 & DataStore, and re-registers core COM DLLs." `
+        -Description "WU First-Aid: Stops wuauserv/bits/cryptSvc, purges corrupted qmgr*.dat queues, resets Catroot2 & DataStore, and batch re-registers 21 core COM DLLs." `
         -OnClick ({ Repair-WindowsUpdateSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     # 5. Network Stack Refresh
     $btnNetFix = New-UltixButton -Parent $tabWinSXS -X 15 -Y 220 -RGB @(55, 58, 64) `
         -Text "Refresh Network Stack (DNS / Winsock)" `
-        -Description "Network First-Aid: Flushes DNS cache, resets Winsock catalog, and resets TCP/IP stack parameters." `
+        -Description "Network First-Aid: Flushes DNS cache, clears ARP tables, resets WinHTTP proxy, resets Winsock catalog, and resets TCP/IPv4 & IPv6 stack." `
         -OnClick ({ Clear-NetworkStack -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     # 6. Print Subsystem First-Aid
     $btnFixPrinters = New-UltixButton -Parent $tabWinSXS -X 15 -Y 270 -RGB @(55, 58, 64) `
         -Text "Reset Print Subsystem (Spooler)" `
-        -Description "Printer First-Aid: Kills deadlocked spoolsv.exe, purges stuck .SPL/.SHD files in System32, restarts PrintWorkflowUserSvc, and resumes Spooler." `
+        -Description "Printer First-Aid: Auto-unlocks Spooler if disabled, kills deadlocked spoolsv.exe, purges stuck .SPL/.SHD files, and restarts PrintWorkflowUserSvc." `
         -OnClick ({ Repair-PrintSubsystem -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     # 7. Shell Icon & Thumbnail Cache First-Aid
@@ -588,11 +788,23 @@ function Initialize-Z6UI {
         -Description "Shell First-Aid: Gracefully cycles Explorer, purges corrupted iconcache_*.db and thumbcache_*.db files, and forces a clean rebuild via ie4uinit." `
         -OnClick ({ Clear-ShellIconCache -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
+    # 8. Time & NTP Clock Sync First-Aid
+    $btnFixTime = New-UltixButton -Parent $tabWinSXS -X 15 -Y 370 -RGB @(55, 58, 64) `
+        -Text "Repair Time & NTP Clock Sync (w32time)" `
+        -Description "Time First-Aid: Enforces UTC hardware RTC clock (fixes dual-boot drift), re-registers W32Time, sets Cloudflare/NTP.org peers, and forces immediate clock resync." `
+        -OnClick ({ Repair-TimeSynchronization -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
+    # 9. UWP Shell, Store & Xbox Gaming Services First-Aid
+    $btnFixUwp = New-UltixButton -Parent $tabWinSXS -X 15 -Y 420 -RGB @(45, 85, 125) `
+        -Text "Repair UWP, Store & Gaming Services" `
+        -Description "UWP & Gaming First-Aid: Unlocks ClipSVC/AppXSvc/GamingServices, runs silent wsreset -i, and re-registers existing Shell, Store & Xbox manifests without restoring bloatware." `
+        -OnClick ({ Repair-UwpGamingRuntime -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
+
     foreach ($row in @($rowCheckSystem, $rowWinSxS, $rowWMI)) {
         $allTabButtons.AddRange($row.Controls)
     }
     $allTabButtons.AddRange([System.Windows.Forms.Control[]]@(
-        $btnFixWU, $btnNetFix, $btnFixPrinters, $btnFixIcons
+        $btnFixWU, $btnNetFix, $btnFixPrinters, $btnFixIcons, $btnFixTime, $btnFixUwp
     ))
 
     $TabControl.Controls.Add($tabWinSXS)

@@ -3,13 +3,29 @@
 # https://github.com/Firever-ultix/WinUltix
 # MODULAR MAIN LAUNCHER
 # ==========================================
-$Global:AppVersion = "v3.1.0"
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -and (Test-Path -LiteralPath $PSCommandPath)) {
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    } else {
+        Write-Warning "WinUltix requires Administrator privileges. Please launch PowerShell / Terminal as Administrator."
+    }
+    return
+}
+
+$Global:AppVersion = "v3.14"
 
 # ------------------------------------------
 # 1. MODULE LOADING (ARCHITECTURE MANIFESTS)
 # ------------------------------------------
 $ScriptDir = Split-Path $script:MyInvocation.MyCommand.Path
 $ModulesDir = Join-Path $ScriptDir "Modules"
+
+# Snapshot built-in PowerShell session functions before loading WinUltix modules
+$baselineFunctions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($fn in (Get-ChildItem -Path Function:\)) {
+    [void]$baselineFunctions.Add($fn.Name)
+}
 
 # Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer/DPC, CfgMgr32 PnpTree), async Runspace engine ($UltixSync), 4-color UI factories, and JSON profile snapshotter.
 . (Join-Path $ModulesDir "Core_Helpers.ps1")
@@ -35,24 +51,25 @@ $ModulesDir = Join-Path $ScriptDir "Modules"
 # Z7_Hardware: Low-level hardware & latency cockpit (Topology-Aware Affinity Lasso, CPPC Unhider + Dead Man's Switch, Pre-Flight Shortcut, Quantum Scheduler Matrix, MSI & Core 0 IRQ Offload, 0.5ms TSC Timer, USB XHCI Topology Mapper, NVMe/PCIe locks, NDIS/TCP Tuner, WHEA Decoder, and 1Hz DPC Monitor).
 . (Join-Path $ModulesDir "Z7_Hardware.ps1")
 
-# Promote all loaded toolkit functions to Global scope so .GetNewClosure() dynamic modules always resolve them
+# Promote only WinUltix toolkit functions to Global scope and register them for Runspace hydration
+$Global:UltixToolkitFunctions = [System.Collections.Generic.List[string]]::new()
 foreach ($fn in (Get-ChildItem -Path Function:\)) {
-    Set-Item -Path "Function:\global:$($fn.Name)" -Value $fn.ScriptBlock -Force -ErrorAction SilentlyContinue
+    if (-not $baselineFunctions.Contains($fn.Name)) {
+        $Global:UltixToolkitFunctions.Add($fn.Name)
+        Set-Item -Path "Function:\global:$($fn.Name)" -Value $fn.ScriptBlock -Force -ErrorAction SilentlyContinue
+    }
 }
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
 
 # ------------------------------------------
 # 2. GLOBAL UI COMPONENTS
 # ------------------------------------------
 [WinUltix.NativeMethods]::EnableGdiDpiScaling()
+[System.Windows.Forms.Application]::EnableVisualStyles()
 
 $global:form = New-Object System.Windows.Forms.Form
 $global:form.Text = "WinUltix - Ultimate System Toolkit $AppVersion"
-$global:form.Size = New-Object System.Drawing.Size(1200, 800)
-$global:form.MinimumSize = New-Object System.Drawing.Size(1200, 800)
+$global:form.Size = New-Object System.Drawing.Size(1280, 800)
+$global:form.MinimumSize = New-Object System.Drawing.Size(1260, 750)
 $global:form.StartPosition = "CenterScreen"
 $global:form.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
 $global:form.FormBorderStyle = "Sizable"
@@ -61,7 +78,7 @@ $global:form.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
 $global:descBox = New-Object System.Windows.Forms.TextBox
 $global:descBox.Multiline = $true; $global:descBox.Location = New-Object System.Drawing.Point(440, 20)
-$global:descBox.Size = New-Object System.Drawing.Size(720, 80)
+$global:descBox.Size = New-Object System.Drawing.Size(800, 80)
 $global:descBox.BackColor = [System.Drawing.Color]::FromArgb(255, 25, 25, 25); $global:descBox.ForeColor = [System.Drawing.Color]::LightSkyBlue; $global:descBox.ReadOnly = $true; $global:descBox.Font = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Italic)
 $global:descBox.Text = "Hover over any button to see operation details."
 $global:descBox.Anchor = 'Top, Left, Right'
@@ -69,7 +86,7 @@ $global:descBox.Anchor = 'Top, Left, Right'
 $global:infoBox = New-Object System.Windows.Forms.RichTextBox
 $global:infoBox.Multiline = $true
 $global:infoBox.Location = New-Object System.Drawing.Point(440, 110)
-$global:infoBox.Size = New-Object System.Drawing.Size(720, 610)
+$global:infoBox.Size = New-Object System.Drawing.Size(800, 610)
 $global:infoBox.BackColor = [System.Drawing.Color]::FromArgb(255, 15, 15, 15)
 $global:infoBox.ForeColor = [System.Drawing.Color]::LightGray
 $global:infoBox.BorderStyle = "FixedSingle"
@@ -78,10 +95,7 @@ $global:infoBox.DetectUrls = $false
 $global:infoBox.ScrollBars = "Vertical"
 $global:infoBox.Font = New-Object System.Drawing.Font("Consolas", 10)
 $global:infoBox.Anchor = 'Top, Bottom, Left, Right'
-$global:infoBox.SelectionColor = [System.Drawing.Color]::Cyan
-$global:infoBox.AppendText("--- WINULTIX $AppVersion ---`r`n`r`n")
-$global:infoBox.SelectionColor = [System.Drawing.Color]::LightGreen
-$global:infoBox.AppendText("Ready for deployment. Modular architecture loaded successfully.`r`n")
+Write-UltixSystemBanner -StatusMessage "Ready for deployment. Modular architecture loaded successfully."
 
 $global:tabControl = New-Object WinUltix.DarkTabControl
 $global:tabControl.Location = New-Object System.Drawing.Point(10, 20)
@@ -90,7 +104,7 @@ $global:tabControl.Anchor = 'Top, Bottom, Left'
 
 $global:progBar = New-Object WinUltix.DarkProgressBar
 $global:progBar.Location = New-Object System.Drawing.Point(440, 725)
-$global:progBar.Size = New-Object System.Drawing.Size(400, 25)
+$global:progBar.Size = New-Object System.Drawing.Size(510, 25)
 $global:progBar.Minimum = 0
 $global:progBar.Maximum = 100
 $global:progBar.Anchor = 'Bottom, Left, Right'
@@ -111,7 +125,7 @@ Initialize-Z7UI -TabControl $global:tabControl
 # ------------------------------------------
 $btnExportLog = New-Object System.Windows.Forms.Button
 $btnExportLog.Text = "Export Log to Desktop"
-$btnExportLog.Location = New-Object System.Drawing.Point(890, 725)
+$btnExportLog.Location = New-Object System.Drawing.Point(970, 725)
 $btnExportLog.Size = New-Object System.Drawing.Size(150, 25)
 $btnExportLog.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
 $btnExportLog.ForeColor = [System.Drawing.Color]::White
@@ -130,7 +144,7 @@ $btnExportLog.Add_Click({
 
 $btnClearLog = New-Object System.Windows.Forms.Button
 $btnClearLog.Text = "[ Clear Log ]"
-$btnClearLog.Location = New-Object System.Drawing.Point(1050, 725)
+$btnClearLog.Location = New-Object System.Drawing.Point(1130, 725)
 $btnClearLog.Size = New-Object System.Drawing.Size(110, 25)
 $btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnClearLog.ForeColor = [System.Drawing.Color]::LightGray
@@ -138,10 +152,7 @@ $btnClearLog.FlatStyle = "Flat"
 $btnClearLog.Anchor = 'Bottom, Right'
 $btnClearLog.Add_Click({ 
     $global:infoBox.Clear()
-    $global:infoBox.SelectionColor = [System.Drawing.Color]::Cyan
-    $global:infoBox.AppendText("--- WINULTIX $AppVersion ---`r`n`r`n")
-    $global:infoBox.SelectionColor = [System.Drawing.Color]::LightGreen
-    $global:infoBox.AppendText("Ready for deployment.`r`n")
+    Write-UltixSystemBanner -StatusMessage "Ready for deployment."
 })
 
 $btnCredits = New-Object System.Windows.Forms.Button
@@ -191,14 +202,14 @@ $btnCredits.Add_Click({
     $lblTitle.Size = New-Object System.Drawing.Size(295, 24)
     $lblTitle.ForeColor = [System.Drawing.Color]::Cyan
     $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-    $lblTitle.Text = "WinUltix Pro $AppVersion"
+    $lblTitle.Text = "WinUltix $AppVersion"
 
     $lblAbout = New-Object System.Windows.Forms.Label
     $lblAbout.Location = New-Object System.Drawing.Point(98, 46)
     $lblAbout.Size = New-Object System.Drawing.Size(295, 65)
     $lblAbout.ForeColor = [System.Drawing.Color]::LightGray
     $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
-    $lblAbout.Text = "Ultimate Windows System & Hardware Toolkit`nConcept, architecture & combat tests: Firever`nCoding assistance: Gemini AI"
+    $lblAbout.Text = "Ultimate Windows System and Hardware Toolkit`nConcept, architecture and combat tests: Firever`nCoding assistance: Gemini AI"
     
     $linkGit = New-Object System.Windows.Forms.LinkLabel
     $linkGit.Location = New-Object System.Drawing.Point(20, 120)
@@ -246,7 +257,7 @@ $btnExportProfile.FlatStyle = "Flat"
 $btnExportProfile.Anchor = 'Bottom, Left'
 $btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, SRP locks, Services state, and Affinity Lasso roster into a portable JSON snapshot." })
 $btnExportProfile.Add_MouseLeave({ Restore-Log })
-$btnExportProfile.Add_Click({ Export-WinUltixProfile })
+$btnExportProfile.Add_Click({ Export-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile) })
 
 $btnImportProfile = New-Object System.Windows.Forms.Button
 $btnImportProfile.Text = "[ Import Profile ]"
@@ -258,7 +269,7 @@ $btnImportProfile.FlatStyle = "Flat"
 $btnImportProfile.Anchor = 'Bottom, Left'
 $btnImportProfile.Add_MouseEnter({ Show-Description "Imports and enforces a previously saved WinUltix JSON configuration snapshot on this machine." })
 $btnImportProfile.Add_MouseLeave({ Restore-Log })
-$btnImportProfile.Add_Click({ Import-WinUltixProfile })
+$btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile) })
 
 $global:form.Controls.AddRange(@(
     $btnClearLog, $btnExportLog, $global:progBar, 
@@ -277,9 +288,26 @@ foreach ($tab in $global:tabControl.TabPages) {
     } 
 }
 
+$global:form.Add_Shown({
+    try {
+        $ev = [System.Threading.EventWaitHandle]::OpenExisting("Local\WinUltix_Splash_Close")
+        [void]$ev.Set()
+        $ev.Dispose()
+    } catch { }
+    $this.Activate()
+})
+
 Update-DNSLabel
 try {
     [void]$global:form.ShowDialog()
 } finally {
     $global:form.Dispose()
+    if ($null -ne $global:UltixHighResLogo) {
+        $global:UltixHighResLogo.Dispose()
+        $global:UltixHighResLogo = $null
+    }
+    if ($null -ne $global:UltixAppIcon) {
+        $global:UltixAppIcon.Dispose()
+        $global:UltixAppIcon = $null
+    }
 }

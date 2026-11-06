@@ -1,9 +1,17 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE (v3.1.0)
+# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE (v3.14)
 # Z2_Bloatware: Multi-profile OneDrive amputation, 64-target UWP Bloatware & Windows Recall/Copilot AI removal, FOD Preset, Appx Framework Garbage Collector, CBS Stubs, and 4 manual package/feature inspector grids.
 # ==========================================
+
+# ------------------------------------------
+# Z2: SHARED PROTECTED APPX WHITELIST (AUTO-HYDRATED INTO RUNSPACES)
+# ------------------------------------------
+function Get-UltixProtectedAppxRegex {
+    # Ironclad whitelist: Core Shell/OS UI (Win10 & Win11 24H2/25H2/26H2), Defender/SecHealth, Gaming/Store Identity, Shared Runtimes, and Hardware Media Codecs
+    return "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
+}
 
 # ------------------------------------------
 # Z2: BLOATWARE AUDITS (PURE RUNSPACE WORKERS)
@@ -13,7 +21,7 @@ function Get-OneDriveState {
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
     $userProfiles = @(Get-UltixUserProfiles)
-    $loadedHives  = @($userProfiles | Where-Object { $_.IsHiveLoaded })
+    $loadedHives  = @($userProfiles | Where-Object { $_.IsHiveLoaded -and -not [string]::IsNullOrWhiteSpace($_.HiveRoot) })
 
     # Fallback to HKCU if no loaded SID hives were returned
     if ($loadedHives.Count -eq 0) {
@@ -30,31 +38,49 @@ function Get-OneDriveState {
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 30 }
 
-    # 1. Core Executables & Multi-Profile Run Keys (SystemRoot stubs are left dormant for SFC/DISM integrity)
-    $localExe  = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
-    $liveProc  = Get-Process -Name "OneDrive", "OneDriveSetup" -ErrorAction SilentlyContinue
+    # 1. Core Executables, Scheduled Tasks & Multi-Profile Run Keys (SystemRoot stubs are left dormant for SFC/DISM integrity)
+    $exeCandidates = @(
+        "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe",
+        "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe",
+        "${env:ProgramFiles(x86)}\Microsoft OneDrive\OneDrive.exe"
+    )
+    foreach ($prof in $userProfiles) {
+        if (-not [string]::IsNullOrWhiteSpace($prof.LocalPath)) {
+            $exeCandidates += (Join-Path -Path $prof.LocalPath -ChildPath "AppData\Local\Microsoft\OneDrive\OneDrive.exe")
+        }
+    }
+
+    $hasBinary = $false
+    foreach ($exePath in ($exeCandidates | Select-Object -Unique)) {
+        if ([System.IO.File]::Exists($exePath)) {
+            $hasBinary = $true
+            break
+        }
+    }
+
+    $liveProc  = Get-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue
+    $odTasks   = @(Get-ScheduledTask -TaskName "*OneDrive*" -ErrorAction SilentlyContinue)
     $hasRunKey = $false
 
+    $runRoots = [System.Collections.Generic.List[string]]::new()
+    $runRoots.Add("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
+    $runRoots.Add("HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
     foreach ($hive in $loadedHives) {
-        $runPath = "$($hive.HiveRoot)\Software\Microsoft\Windows\CurrentVersion\Run"
-        if (Test-Path -Path $runPath) {
-            $runProps = Get-ItemProperty -Path $runPath -ErrorAction SilentlyContinue
-            if ($null -ne $runProps -and ($runProps.PSObject.Properties.Match("OneDriveSetup").Count -gt 0 -or $runProps.PSObject.Properties.Match("OneDrive").Count -gt 0)) {
+        $runRoots.Add("$($hive.HiveRoot)\Software\Microsoft\Windows\CurrentVersion\Run")
+        $runRoots.Add("$($hive.HiveRoot)\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
+    }
+
+    foreach ($runPath in ($runRoots | Select-Object -Unique)) {
+        if (Test-Path -LiteralPath $runPath) {
+            $runProps = Get-ItemProperty -LiteralPath $runPath -ErrorAction SilentlyContinue
+            if ($null -ne $runProps -and ($runProps.PSObject.Properties.Match("OneDrive*").Count -gt 0)) {
                 $hasRunKey = $true
                 break
             }
         }
     }
 
-    foreach ($prof in $userProfiles) {
-        if ($hasRunKey) { break }
-        if (Test-Path -Path (Join-Path -Path $prof.LocalPath -ChildPath "AppData\Local\Microsoft\OneDrive\OneDrive.exe")) {
-            $hasRunKey = $true
-            break
-        }
-    }
-
-    $isCoreDetected = ((Test-Path -Path $localExe) -or $hasRunKey -or ($null -ne $liveProc))
+    $isCoreDetected = ($hasBinary -or $hasRunKey -or ($null -ne $liveProc) -or ($odTasks.Count -gt 0))
 
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Core: OneDrive Setup and Startup Routine"
@@ -64,27 +90,70 @@ function Get-OneDriveState {
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 55 }
 
-    # 2. Multi-Profile Zombie Registry Keys (Inspected across all loaded HKEY_USERS\<SID> hives)
+    # 2. Multi-Profile Zombie Registry Keys & Explorer\Desktop\NameSpace CLSIDs (Inspected across all loaded HKEY_USERS\<SID> hives)
     $zombieSubKeys = @("SyncEngine", "Client_Policy", "Accounts")
+    $knownNsGuids  = @("{018D5C66-4533-4307-9B53-224DE2ED1FE6}", "{04271989-C4D2-430F-9D0E-2A48B44B1A5C}")
+
     foreach ($hive in $loadedHives) {
         foreach ($subKey in $zombieSubKeys) {
             $fullRegPath = "$($hive.HiveRoot)\Software\Microsoft\OneDrive\$subKey"
             $results.Add([PSCustomObject]@{
                 UIDisplayName = "Registry ($($hive.UserName)): $subKey"
-                IsDetected    = (Test-Path -Path $fullRegPath)
+                IsDetected    = (Test-Path -LiteralPath $fullRegPath)
                 ActionData    = @{ Type = "Registry"; Path = $fullRegPath }
+            })
+        }
+
+        # Inspect Explorer\Desktop\NameSpace for residual OneDrive shell folders
+        $nsRoot = "$($hive.HiveRoot)\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace"
+        $foundNsKeys = [System.Collections.Generic.List[string]]::new()
+
+        if (Test-Path -LiteralPath $nsRoot) {
+            foreach ($nsSub in (Get-ChildItem -LiteralPath $nsRoot -ErrorAction SilentlyContinue)) {
+                try {
+                    $childName = $nsSub.PSChildName
+                    $defVal    = [string]$nsSub.GetValue("", "")
+                    if ($childName -in $knownNsGuids -or $defVal -match '(?i)OneDrive') {
+                        $foundNsKeys.Add($childName)
+                    }
+                } catch {
+                } finally {
+                    $nsSub.Dispose()
+                }
+            }
+        }
+
+        if ($foundNsKeys.Count -gt 0) {
+            foreach ($nsGuid in $foundNsKeys) {
+                $results.Add([PSCustomObject]@{
+                    UIDisplayName = "Shell NameSpace ($($hive.UserName)): $nsGuid"
+                    IsDetected    = $true
+                    ActionData    = @{ Type = "Registry"; Path = "$nsRoot\$nsGuid" }
+                })
+            }
+        } else {
+            $results.Add([PSCustomObject]@{
+                UIDisplayName = "Shell NameSpace ($($hive.UserName)): {018D5C66-4533-4307-9B53-224DE2ED1FE6}"
+                IsDetected    = $false
+                ActionData    = @{ Type = "Registry"; Path = "$nsRoot\{018D5C66-4533-4307-9B53-224DE2ED1FE6}" }
             })
         }
     }
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 75 }
 
-    # 3. System Data Folders
-    $staticFolders = @("$env:PROGRAMDATA\Microsoft OneDrive", "$env:SystemDrive\OneDriveTemp")
+    # 3. System Data & Per-Machine Installation Folders
+    $staticFolders = @(
+        "$env:ProgramFiles\Microsoft OneDrive",
+        "${env:ProgramFiles(x86)}\Microsoft OneDrive",
+        "$env:PROGRAMDATA\Microsoft OneDrive",
+        "$env:SystemDrive\OneDriveTemp"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
     foreach ($folder in $staticFolders) {
         $results.Add([PSCustomObject]@{
             UIDisplayName = "Folder: $folder"
-            IsDetected    = (Test-Path -Path $folder)
+            IsDetected    = (Test-Path -LiteralPath $folder)
             ActionData    = @{ Type = "Folder"; Path = $folder }
         })
     }
@@ -94,7 +163,7 @@ function Get-OneDriveState {
         $userPath = Join-Path -Path $prof.LocalPath -ChildPath "AppData\Local\Microsoft\OneDrive"
         $results.Add([PSCustomObject]@{
             UIDisplayName = "User Data: $($prof.UserName)"
-            IsDetected    = (Test-Path -Path $userPath)
+            IsDetected    = (Test-Path -LiteralPath $userPath)
             ActionData    = @{ Type = "Folder"; Path = $userPath }
         })
     }
@@ -143,8 +212,7 @@ function Get-GarbageCollectorState {
     $allPackages = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue)
     if ($null -ne $UltixSync) { $UltixSync.Progress = 35 }
 
-    # Complete protected framework & shared system UI whitelist (Win11 24H2/25H2/26H2 + Gaming Identity)
-    $critical = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client|MicrosoftWindows\.CrossDevice|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension"
+    $critical = Get-UltixProtectedAppxRegex
 
     # 1. Seed active dependencies from all non-framework packages (including NonRemovable SystemApps and ResourcePackages)
     $rootPackages       = @($allPackages | Where-Object { $_.IsFramework -eq $false -or $_.IsResourcePackage -eq $true -or $_.NonRemovable -eq $true -or $_.Name -match $critical })
@@ -207,7 +275,7 @@ function Get-GarbageCollectorState {
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 85 }
 
-    # 4. Inspect Provisioned packages (shielded by $critical regex)
+    # 4. Inspect Provisioned packages (shielded by unified $critical regex)
     $provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
     foreach ($prov in $provisioned) {
         if ($prov.DisplayName -match $critical) { continue }
@@ -301,8 +369,7 @@ function Get-BloatwareState {
         @{ Label = "HP Support Assistant & OEM Stubs";            Pattern = "*HP*" }
     )
 
-    # Ironclad whitelist protecting Xbox/Steam identity, core system applets, and AI Fabric/AugLoop runtimes
-    $protectedRegex = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|WindowsStore|StorePurchaseApp|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|ApplicationCompatibilityEnhancements|MicrosoftEdge\.Stable"
+    $protectedRegex = Get-UltixProtectedAppxRegex
 
     $installedAppx = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.IsFramework -eq $false -and $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedRegex })
     if ($null -ne $UltixSync) { $UltixSync.Progress = 25 }
@@ -316,9 +383,12 @@ function Get-BloatwareState {
 
     $aiPolPathLM = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"
     $aiPolPathCU = "HKCU:\Software\Policies\Microsoft\Windows\WindowsAI"
-    $aiPolValLM  = (Get-ItemProperty -Path $aiPolPathLM -Name "DisableAIDataAnalysis" -ErrorAction SilentlyContinue).DisableAIDataAnalysis
-    $aiPolValCU  = (Get-ItemProperty -Path $aiPolPathCU -Name "DisableAIDataAnalysis" -ErrorAction SilentlyContinue).DisableAIDataAnalysis
-    $isRecallPolicyLocked = ($aiPolValLM -eq 1 -and $aiPolValCU -eq 1)
+    $aiPropsLM   = Get-ItemProperty -LiteralPath $aiPolPathLM -Name "DisableAIDataAnalysis", "TurnOffSavingSnapshots" -ErrorAction SilentlyContinue
+    $aiPropsCU   = Get-ItemProperty -LiteralPath $aiPolPathCU -Name "DisableAIDataAnalysis", "TurnOffSavingSnapshots" -ErrorAction SilentlyContinue
+    $isRecallPolicyLocked = (
+        $null -ne $aiPropsLM -and $aiPropsLM.DisableAIDataAnalysis -eq 1 -and $aiPropsLM.TurnOffSavingSnapshots -eq 1 -and
+        $null -ne $aiPropsCU -and $aiPropsCU.DisableAIDataAnalysis -eq 1 -and $aiPropsCU.TurnOffSavingSnapshots -eq 1
+    )
 
     $seenInstalled = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $seenProv      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -455,100 +525,203 @@ function Invoke-RemoveOneDrive {
         $total   = $Items.Count
         $current = 0
 
+        function Remove-UltixOneDriveDirectory {
+            param([string]$TargetDir)
+            if ([string]::IsNullOrWhiteSpace($TargetDir) -or -not (Test-Path -LiteralPath $TargetDir)) { return }
+
+            & takeown.exe /F "$TargetDir" /R /A /D Y 2>$null | Out-Null
+            & icacls.exe "$TargetDir" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+
+            # Evacuate memory-mapped shell extensions & binaries (e.g., FileSyncShell64.dll locked by explorer.exe)
+            $binFiles = @(Get-ChildItem -LiteralPath $TargetDir -Include "*.dll", "*.exe" -Recurse -File -Force -ErrorAction SilentlyContinue)
+            foreach ($bin in $binFiles) {
+                $binPath = $bin.FullName
+                $binName = $bin.Name
+                if ([string]::IsNullOrWhiteSpace($binPath)) { continue }
+                try {
+                    $bin.Attributes = 'Normal'
+                    Remove-Item -LiteralPath $binPath -Force -ErrorAction Stop
+                } catch {
+                    $trashPath = Join-Path -Path $env:TEMP -ChildPath "WinUltix_Locked_${binName}_$([guid]::NewGuid().ToString('N')).tmp"
+                    Move-Item -LiteralPath $binPath -Destination $trashPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            Get-ChildItem -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                try { $_.Attributes = 'Normal' } catch {}
+            }
+            Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
+
+            if (Test-Path -LiteralPath $TargetDir) {
+                if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [*] Releasing Shell Extension lock via Explorer refresh...") }
+                Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Milliseconds 600
+                Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+                    Start-Process "explorer.exe"
+                }
+            }
+        }
+
         # Pre-kill all OneDrive and companion processes holding file/registry handles
         Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
+        Start-Sleep -Milliseconds 600
+
+        $userProfiles = @(Get-UltixUserProfiles)
+        $loadedHives  = @($userProfiles | Where-Object { $_.IsHiveLoaded -and -not [string]::IsNullOrWhiteSpace($_.HiveRoot) })
+        if ($loadedHives.Count -eq 0) {
+            $loadedHives = @([PSCustomObject]@{ SID = "CurrentUser"; UserName = $env:USERNAME; LocalPath = $env:USERPROFILE; HiveRoot = "HKCU:"; IsHiveLoaded = $true })
+        }
+
+        $registryTargetsToVerify = [System.Collections.Generic.List[string]]::new()
 
         foreach ($item in $Items) {
             $current++
             if ($null -ne $UltixSync) {
-                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Progress = [int](($current / $total) * 90)
                 $UltixSync.Logs.Enqueue(" -> Purging: $($item.UIDisplayName)")
             }
 
             $data = $item.ActionData
             try {
                 if ($data.Type -eq "Core") {
-                    $setupX64 = "$env:SystemRoot\SysWOW64\OneDriveSetup.exe"
-                    $setupX86 = "$env:SystemRoot\System32\OneDriveSetup.exe"
-
-                    if (Test-Path -Path $setupX64) {
-                        Start-Process -FilePath $setupX64 -ArgumentList "/uninstall" -NoNewWindow -Wait
-                    } elseif (Test-Path -Path $setupX86) {
-                        Start-Process -FilePath $setupX86 -ArgumentList "/uninstall" -NoNewWindow -Wait
+                    # 1. Unregister all OneDrive scheduled tasks so they cannot respawn OneDriveSetup/Updater
+                    Get-ScheduledTask -TaskName "*OneDrive*" -ErrorAction SilentlyContinue | ForEach-Object {
+                        Stop-ScheduledTask -InputObject $_ -ErrorAction SilentlyContinue | Out-Null
+                        Unregister-ScheduledTask -InputObject $_ -Confirm:$false -ErrorAction SilentlyContinue
                     }
 
-                    Start-Sleep -Seconds 2
-                    Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+                    # 2. Check if any actual OneDrive installation binary exists before invoking OneDriveSetup.exe
+                    # (Running OneDriveSetup.exe when already uninstalled needlessly recreates HKCU\...\OneDrive\Accounts!)
+                    $installDirs = [System.Collections.Generic.List[string]]::new()
+                    foreach ($d in @("$env:ProgramFiles\Microsoft OneDrive", "${env:ProgramFiles(x86)}\Microsoft OneDrive", "$env:LOCALAPPDATA\Microsoft\OneDrive")) {
+                        if (-not [string]::IsNullOrWhiteSpace($d)) { $installDirs.Add($d) }
+                    }
+                    foreach ($prof in $userProfiles) {
+                        if (-not [string]::IsNullOrWhiteSpace($prof.LocalPath)) {
+                            $installDirs.Add((Join-Path -Path $prof.LocalPath -ChildPath "AppData\Local\Microsoft\OneDrive"))
+                        }
+                    }
 
-                    # Neutralize Run keys across HKCU, HKLM, and all loaded HKEY_USERS\<SID> hives while keeping SystemRoot stub for SFC/DISM
+                    $activeExeFound = $false
+                    foreach ($dir in ($installDirs | Select-Object -Unique)) {
+                        if ([System.IO.File]::Exists((Join-Path $dir "OneDrive.exe"))) {
+                            $activeExeFound = $true
+                            break
+                        }
+                    }
+
+                    if ($activeExeFound) {
+                        $setupCandidates = [System.Collections.Generic.List[string]]::new()
+                        foreach ($dir in ($installDirs | Select-Object -Unique)) {
+                            if ([System.IO.Directory]::Exists($dir)) {
+                                Get-ChildItem -LiteralPath $dir -Filter "OneDriveSetup.exe" -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                                    $setupCandidates.Add($_.FullName)
+                                }
+                            }
+                        }
+                        $setupCandidates.Add("$env:SystemRoot\SysWOW64\OneDriveSetup.exe")
+                        $setupCandidates.Add("$env:SystemRoot\System32\OneDriveSetup.exe")
+
+                        foreach ($setupExe in ($setupCandidates | Select-Object -Unique)) {
+                            if ([System.IO.File]::Exists($setupExe)) {
+                                Start-Process -FilePath $setupExe -ArgumentList "/uninstall" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+                                Start-Process -FilePath $setupExe -ArgumentList "/uninstall /allusers" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+                                break
+                            }
+                        }
+
+                        # Wait for any detached child OneDriveSetup.exe processes to finish writing teardown keys, then kill
+                        $childProcs = @(Get-Process -Name "OneDriveSetup", "OneDrive", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue)
+                        if ($childProcs.Count -gt 0) {
+                            $childProcs | Wait-Process -Timeout 8 -ErrorAction SilentlyContinue
+                            Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+                        }
+                        Start-Sleep -Milliseconds 500
+                    }
+
+                    # 3. Physically eradicate remaining OneDrive.exe binaries across Program Files & user profiles
+                    foreach ($dir in ($installDirs | Select-Object -Unique)) {
+                        if ($dir -like "$env:ProgramFiles*" -or $dir -like "${env:ProgramFiles(x86)}*") {
+                            if (Test-Path -LiteralPath $dir) {
+                                Remove-UltixOneDriveDirectory -TargetDir $dir
+                            }
+                        } elseif ([System.IO.File]::Exists((Join-Path $dir "OneDrive.exe"))) {
+                            Remove-UltixOneDriveDirectory -TargetDir $dir
+                        }
+                    }
+
+                    # 4. Neutralize Run keys across HKCU, HKLM, and all loaded HKEY_USERS\<SID> hives (including WOW6432Node)
                     $runTargets = [System.Collections.Generic.List[string]]::new()
                     $runTargets.Add("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run")
                     $runTargets.Add("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
                     $runTargets.Add("HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
 
-                    foreach ($prof in (Get-UltixUserProfiles)) {
-                        if ($prof.IsHiveLoaded) {
-                            $sidRun = "$($prof.HiveRoot)\Software\Microsoft\Windows\CurrentVersion\Run"
-                            if (Test-Path -Path $sidRun) { $runTargets.Add($sidRun) }
-                        }
+                    $nsRoots = [System.Collections.Generic.List[string]]::new()
+                    $nsRoots.Add("HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace")
+
+                    foreach ($prof in $loadedHives) {
+                        $runTargets.Add("$($prof.HiveRoot)\Software\Microsoft\Windows\CurrentVersion\Run")
+                        $runTargets.Add("$($prof.HiveRoot)\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
+                        $nsRoots.Add("$($prof.HiveRoot)\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace")
                     }
 
                     foreach ($rPath in ($runTargets | Select-Object -Unique)) {
-                        if (Test-Path -Path $rPath) {
-                            Remove-ItemProperty -Path $rPath -Name "OneDriveSetup" -Force -ErrorAction SilentlyContinue
-                            Remove-ItemProperty -Path $rPath -Name "OneDrive" -Force -ErrorAction SilentlyContinue
+                        if (Test-Path -LiteralPath $rPath) {
+                            $rKey = Get-Item -LiteralPath $rPath -ErrorAction SilentlyContinue
+                            if ($null -ne $rKey) {
+                                try {
+                                    foreach ($valName in $rKey.Property) {
+                                        if ($valName -like "OneDrive*") {
+                                            Remove-ItemProperty -LiteralPath $rPath -Name $valName -Force -ErrorAction SilentlyContinue
+                                        }
+                                    }
+                                } finally {
+                                    $rKey.Dispose()
+                                }
+                            }
+                        }
+                    }
+
+                    # 5. Sweep residual Explorer\Desktop\NameSpace OneDrive CLSIDs across all loaded hives
+                    $knownNsGuids = @("{018D5C66-4533-4307-9B53-224DE2ED1FE6}", "{04271989-C4D2-430F-9D0E-2A48B44B1A5C}")
+                    foreach ($nsPath in ($nsRoots | Select-Object -Unique)) {
+                        if (Test-Path -LiteralPath $nsPath) {
+                            foreach ($sub in (Get-ChildItem -LiteralPath $nsPath -ErrorAction SilentlyContinue)) {
+                                $shouldRemove = $false
+                                $cName = ""
+                                try {
+                                    $cName  = $sub.PSChildName
+                                    $defVal = [string]$sub.GetValue("", "")
+                                    if ($cName -in $knownNsGuids -or $defVal -match '(?i)OneDrive') {
+                                        $shouldRemove = $true
+                                    }
+                                } catch {
+                                } finally {
+                                    $sub.Dispose()
+                                }
+                                if ($shouldRemove -and -not [string]::IsNullOrWhiteSpace($cName)) {
+                                    Remove-Item -LiteralPath "$nsPath\$cName" -Recurse -Force -ErrorAction SilentlyContinue
+                                }
+                            }
                         }
                     }
 
                     if ($null -ne $UltixSync) {
-                        $UltixSync.Logs.Enqueue("    [+] Core installation payloads purged. Multi-profile Run hooks neutralized (SystemRoot stub preserved for SFC).")
+                        $UltixSync.Logs.Enqueue("    [+] Core installation payloads, tasks & multi-profile Run/NameSpace hooks neutralized (SystemRoot stub preserved for SFC).")
                     }
                 }
                 elseif ($data.Type -eq "Registry") {
-                    if (Test-Path -Path $data.Path) {
-                        Remove-Item -Path $data.Path -Recurse -Force -ErrorAction Stop
+                    $registryTargetsToVerify.Add([string]$data.Path)
+                    if (Test-Path -LiteralPath $data.Path) {
+                        Remove-Item -LiteralPath $data.Path -Recurse -Force -ErrorAction Stop
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Registry key removed: $($data.Path)") }
                     }
                 }
                 elseif ($data.Type -eq "Folder") {
                     $targetDir = $data.Path
                     if (-not [string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) {
-                        & takeown.exe /F "$targetDir" /R /A /D Y 2>$null | Out-Null
-                        & icacls.exe "$targetDir" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
-
-                        # Evacuate memory-mapped shell extensions (e.g., FileSyncShell64.dll locked by explorer.exe)
-                        $dllFiles = @(Get-ChildItem -LiteralPath $targetDir -Filter "*.dll" -Recurse -File -Force -ErrorAction SilentlyContinue)
-                        foreach ($dll in $dllFiles) {
-                            $dllPath = $dll.FullName
-                            $dllName = $dll.Name
-                            if ([string]::IsNullOrWhiteSpace($dllPath)) { continue }
-
-                            try {
-                                $dll.Attributes = 'Normal'
-                                Remove-Item -LiteralPath $dllPath -Force -ErrorAction Stop
-                            } catch {
-                                $trashPath = Join-Path -Path $env:TEMP -ChildPath "WinUltix_Locked_${dllName}_$([guid]::NewGuid().ToString('N')).tmp"
-                                Move-Item -LiteralPath $dllPath -Destination $trashPath -Force -ErrorAction SilentlyContinue
-                            }
-                        }
-
-                        # Strip ReadOnly/Hidden/System attributes from remaining items and wipe directory
-                        Get-ChildItem -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                            try { $_.Attributes = 'Normal' } catch {}
-                        }
-                        Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
-
-                        # Final fallback: if directory still exists due to an open directory handle in Explorer, cycle explorer.exe
-                        if (Test-Path -LiteralPath $targetDir) {
-                            if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [*] Releasing Shell Extension lock via Explorer refresh...") }
-                            Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
-                            Start-Sleep -Milliseconds 600
-                            Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction Stop
-                            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
-                                Start-Process "explorer.exe"
-                            }
-                        }
+                        Remove-UltixOneDriveDirectory -TargetDir $targetDir
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Folder eradicated: $targetDir") }
                     }
                 }
@@ -558,6 +731,15 @@ function Invoke-RemoveOneDrive {
                 }
             }
         }
+
+        # Final post-kill sweep: ensure any OneDriveSetup teardown thread that exited late cannot leave recreated Accounts keys
+        Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+        foreach ($regPath in ($registryTargetsToVerify | Select-Object -Unique)) {
+            if (-not [string]::IsNullOrWhiteSpace($regPath) -and (Test-Path -LiteralPath $regPath)) {
+                Remove-Item -LiteralPath $regPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
     } -OnComplete {
         param($nullOut)
         Update-Progress 0
@@ -659,8 +841,17 @@ function Invoke-RemoveBloatware {
         $total   = $Items.Count
         $current = 0
 
-        Stop-Process -Name "Widgets", "WidgetService", "StoreExperienceHost", "WinStore.App", "Copilot", "msteams", "olk", "aixhost" -Force -ErrorAction SilentlyContinue
-        Stop-Service -Name "ClipSVC" -Force -ErrorAction SilentlyContinue
+        Stop-Process -Name "Widgets", "WidgetService", "StoreExperienceHost", "WinStore.App", "Copilot", "msteams", "olk", "aixhost", "GameBar" -Force -ErrorAction SilentlyContinue
+
+        # Query online DISM image ONCE before the loop and track provisioned state via HashSet
+        $provisionedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($p in (Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)) {
+            if (-not [string]::IsNullOrWhiteSpace($p.PackageName)) {
+                [void]$provisionedSet.Add($p.PackageName)
+            }
+        }
+
+        $loadedHives = @(Get-UltixUserProfiles | Where-Object { $_.IsHiveLoaded -and -not [string]::IsNullOrWhiteSpace($_.HiveRoot) })
 
         foreach ($item in $Items) {
             $current++
@@ -669,19 +860,22 @@ function Invoke-RemoveBloatware {
                 $UltixSync.Logs.Enqueue(" -> Purging: $($item.UIDisplayName)")
             }
 
-            # Handle Windows Recall & AI Data Analysis (24H2/25H2/26H2)
+            # Handle Windows Recall & AI Data Analysis (24H2/25H2/26H2) across HKLM, HKCU, and loaded user hives
             if ($item.ActionData.IsRecall -eq $true -or $item.UIDisplayName -match "(?i)Recall") {
                 if ($null -ne $UltixSync) {
                     $UltixSync.Logs.Enqueue("    [*] Enforcing DisableAIDataAnalysis & TurnOffSavingSnapshots GPO locks...")
                 }
-                $aiPolicies = @(
-                    "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI",
-                    "HKCU:\Software\Policies\Microsoft\Windows\WindowsAI"
-                )
-                foreach ($pol in $aiPolicies) {
-                    if (-not (Test-Path -Path $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
-                    Set-ItemProperty -Path $pol -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-                    Set-ItemProperty -Path $pol -Name "TurnOffSavingSnapshots" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                $aiPolicies = [System.Collections.Generic.List[string]]::new()
+                $aiPolicies.Add("HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI")
+                $aiPolicies.Add("HKCU:\Software\Policies\Microsoft\Windows\WindowsAI")
+                foreach ($h in $loadedHives) {
+                    $aiPolicies.Add("$($h.HiveRoot)\Software\Policies\Microsoft\Windows\WindowsAI")
+                }
+
+                foreach ($pol in ($aiPolicies | Select-Object -Unique)) {
+                    if (-not (Test-Path -LiteralPath $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
+                    Set-ItemProperty -LiteralPath $pol -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -LiteralPath $pol -Name "TurnOffSavingSnapshots" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
                 }
 
                 if ($item.ActionData.RecallFeature -eq $true) {
@@ -702,18 +896,21 @@ function Invoke-RemoveBloatware {
                 }
             }
 
-            # Handle Copilot GPO constraints
+            # Handle Copilot GPO constraints across HKLM, HKCU, and loaded user hives
             if ($item.UIDisplayName -match "(?i)Copilot") {
                 if ($null -ne $UltixSync) {
                     $UltixSync.Logs.Enqueue("    [*] Applying local policy constraints for Windows Copilot...")
                 }
-                $policies = @(
-                    "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot",
-                    "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"
-                )
-                foreach ($pol in $policies) {
-                    if (-not (Test-Path -Path $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
-                    Set-ItemProperty -Path $pol -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                $policies = [System.Collections.Generic.List[string]]::new()
+                $policies.Add("HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot")
+                $policies.Add("HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot")
+                foreach ($h in $loadedHives) {
+                    $policies.Add("$($h.HiveRoot)\Software\Policies\Microsoft\Windows\WindowsCopilot")
+                }
+
+                foreach ($pol in ($policies | Select-Object -Unique)) {
+                    if (-not (Test-Path -LiteralPath $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
+                    Set-ItemProperty -LiteralPath $pol -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
                 }
             }
 
@@ -724,6 +921,7 @@ function Invoke-RemoveBloatware {
                 try {
                     try {
                         Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
+                        [void]$provisionedSet.Remove($pkg.PackageFullName)
                     } catch {
                         Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
                     }
@@ -731,7 +929,7 @@ function Invoke-RemoveBloatware {
                     # Register in Deprovisioned store to prevent Windows Update from reinstalling it
                     if (-not [string]::IsNullOrWhiteSpace($pfn)) {
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$pfn"
-                        if (-not (Test-Path -Path $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
                     }
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Removed Appx: $($pkg.Name)") }
                 } catch {
@@ -743,16 +941,25 @@ function Invoke-RemoveBloatware {
                 }
             }
 
-            # 2. Process Provisioned Packages (Only if still present after Remove-AppxPackage -AllUsers)
-            $remainingProv = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
+            # 2. Process Provisioned Packages (O(1) HashSet lookup, zero repeated DISM enumeration)
             foreach ($prov in $item.ActionData.Provisioned) {
-                $stillProvisioned = $remainingProv | Where-Object { $_.PackageName -eq $prov.PackageName }
-                if ($null -eq $stillProvisioned) { continue }
+                if (-not $provisionedSet.Contains($prov.PackageName)) { continue }
 
                 try {
                     Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop | Out-Null
+                    [void]$provisionedSet.Remove($prov.PackageName)
+
+                    # Lock Deprovisioned registry key even for provisioned-only packages
+                    $pkgParts = $prov.PackageName -split '_'
+                    if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
+                        $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
+                        $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
+                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                    }
+
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Deprovisioned base image: $($prov.DisplayName)") }
                 } catch {
+                    [void]$provisionedSet.Remove($prov.PackageName)
                     if ($_.Exception.Message -notmatch "(?i)nie można odnaleźć|cannot find|0x80070002|0x80070003") {
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [-] Error deprovisioning $($prov.DisplayName): $($_.Exception.Message)") }
                     }
@@ -811,7 +1018,7 @@ function Show-AppxGrid {
     Update-Progress 20
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender"
+        $protectedPattern = Get-UltixProtectedAppxRegex
         
         $pkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
             Where-Object { $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedPattern } |
@@ -859,7 +1066,7 @@ function Show-AppxGrid {
                     }
                     if (-not [string]::IsNullOrWhiteSpace($app.PackageFamilyName)) {
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$($app.PackageFamilyName)"
-                        if (-not (Test-Path $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
                     }
                     $UltixSync.Logs.Enqueue("    [OK] $($app.Name) removed and deprovisioned.")
                 } catch {
@@ -881,7 +1088,7 @@ function Show-AppxProvGrid {
     Update-Progress 20
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $protectedPattern = "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop"
+        $protectedPattern = Get-UltixProtectedAppxRegex
         
         $pkgs = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -notmatch $protectedPattern } |
@@ -922,6 +1129,12 @@ function Show-AppxProvGrid {
                 $UltixSync.Logs.Enqueue(" -> Deprovisioning: $($app.DisplayName)")
                 try {
                     Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
+                    $pkgParts = $app.PackageName -split '_'
+                    if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
+                        $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
+                        $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
+                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                    }
                     $UltixSync.Logs.Enqueue("    [OK] $($app.DisplayName) deprovisioned.")
                 } catch {
                     $UltixSync.Logs.Enqueue("    [!] Error deprovisioning $($app.DisplayName): $($_.Exception.Message)")
@@ -942,10 +1155,20 @@ function Show-CapsGrid {
     Update-Progress 25
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        # Lock critical DirectX database, Ethernet NDIS client drivers, and Defender Sense core
+        $criticalFodRegex = '^(?i)(DirectX\.Configuration\.Database|Microsoft\.Windows\.Ethernet\.Client|Microsoft\.Windows\.Sense\.Client)'
+
         $caps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue |
             Where-Object { $_.State -eq 'Installed' } |
-            Select-Object Name, State |
-            Sort-Object Name)
+            ForEach-Object {
+                $isCrit = ($_.Name -match $criticalFodRegex)
+                $stateDisp = if ($isCrit) { "Installed [CRITICAL - LOCKED]" } else { [string]$_.State }
+                [PSCustomObject]@{
+                    Name     = $_.Name
+                    State    = $stateDisp
+                    IsLocked = $isCrit
+                }
+            } | Sort-Object IsLocked, Name)
         return $caps
     } -OnComplete ({
         param($output)
@@ -957,12 +1180,12 @@ function Show-CapsGrid {
         }
 
         $cols = @(
-            @{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 680 }
-            @{ Header = "State";                 Property = "State"; Width = 160 }
+            @{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 650 }
+            @{ Header = "State";                 Property = "State"; Width = 190 }
         )
 
         $res = Show-UltixGridModal -Title "WinUltix - Windows Capabilities (FOD)" `
-            -Description "Select installed Features on Demand (FOD) to uninstall from the OS image." `
+            -Description "Select installed Features on Demand (FOD) to uninstall. Critical DirectX, Ethernet LAN, and Defender FODs (Red) are locked." `
             -Data $caps -Columns $cols -PrimaryButtonText "Uninstall Selected FODs"
 
         if ($null -eq $res -or $res.Items.Count -eq 0) {
@@ -977,6 +1200,8 @@ function Show-CapsGrid {
             foreach ($cap in $Selected) {
                 $current++
                 $UltixSync.Progress = [int](($current / $total) * 100)
+                if ($cap.IsLocked) { continue }
+
                 $UltixSync.Logs.Enqueue(" -> Removing capability: $($cap.Name)")
                 try {
                     Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null

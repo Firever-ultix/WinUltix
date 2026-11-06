@@ -1,12 +1,12 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z5_UTILITIES.PS1 - SECURITY, PRIVACY & CONTROL MODULE (v3.1.0)
+# Z5_UTILITIES.PS1 - SECURITY, PRIVACY & CONTROL MODULE (v3.14)
 # Z5_Utilities: Security & Control module. Privacy & UWP AppPrivacy, Boot & UEFI WPBT block, 4-Layer USB Storage & BadUSB/DMA Perimeter Guard, Dual-Layer SRP+IFEO Execution Locks, Hardened DNS + Native DoH Enforcer, and classic Win32 applets.
 # ==========================================
 
 # ------------------------------------------
-# Z5: USB MASS STORAGE & BADUSB / DMA PERIMETER GUARD
+# Z5: USB MASS STORAGE, WPD/MTP & BADUSB / DMA PERIMETER GUARD
 # ------------------------------------------
 function Get-UsbSecurityState {
     if ($null -ne $UltixSync) { $UltixSync.Progress = 20 }
@@ -14,28 +14,28 @@ function Get-UsbSecurityState {
 
     $remGuidKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\RemovableStorageDevices\{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}"
 
-    # 1. USB Write-Protection (Read-Only Mode for Pendrives & External Disks)
-    $wpVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\StorageDevicePolicies" -Name "WriteProtect" -ErrorAction SilentlyContinue).WriteProtect
-    $denyWritePol = (Get-ItemProperty -Path $remGuidKey -Name "Deny_Write" -ErrorAction SilentlyContinue).Deny_Write
+    # 1. USB & WPD/MTP Write-Protection (Read-Only Mode for Pendrives, External Disks & Smartphones)
+    $wpVal = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\StorageDevicePolicies" -Name "WriteProtect" -ErrorAction SilentlyContinue).WriteProtect
+    $denyWritePol = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -ErrorAction SilentlyContinue).Deny_Write
     $isReadOnlyActive = ($wpVal -eq 1 -and $denyWritePol -eq 1)
     $results.Add([PSCustomObject]@{
-        UIDisplayName = "USB Read-Only Guard: Block Writing to USB Drives (Prevents Ransomware/Data Leak)"
+        UIDisplayName = "USB Read-Only Guard: Block Writing to USB Drives & MTP Phones (Prevents Data Leak)"
         IsDetected    = (-not $isReadOnlyActive)
         ActionData    = @{ Layer = "WriteProtect" }
     })
 
     # 2. USB Execute-Deny Policy (Blocks launching .exe payloads from USB sticks)
-    $denyExecPol = (Get-ItemProperty -Path $remGuidKey -Name "Deny_Execute" -ErrorAction SilentlyContinue).Deny_Execute
+    $denyExecPol = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Execute" -ErrorAction SilentlyContinue).Deny_Execute
     $results.Add([PSCustomObject]@{
         UIDisplayName = "USB Execution Guard: Block Running Executables (.exe) from Removable Drives"
         IsDetected    = ($denyExecPol -ne 1)
         ActionData    = @{ Layer = "DenyExecute" }
     })
 
-    # 3. Hard Lock: Disable USBSTOR & UASPStor Kernel Drivers + Full Removable Storage Policy
-    $usbstorStart  = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
-    $uaspstorStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor" -Name "Start" -ErrorAction SilentlyContinue).Start
-    $denyReadPol   = (Get-ItemProperty -Path $remGuidKey -Name "Deny_Read" -ErrorAction SilentlyContinue).Deny_Read
+    # 3. Hard Lock: Disable USBSTOR & UASPStor Kernel Drivers + Full Removable Storage & WPD Policy
+    $usbstorStart  = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
+    $uaspstorStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor" -Name "Start" -ErrorAction SilentlyContinue).Start
+    $denyReadPol   = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -ErrorAction SilentlyContinue).Deny_Read
     $isHardLocked  = ($usbstorStart -eq 4 -and $uaspstorStart -eq 4 -and $denyReadPol -eq 1)
     $results.Add([PSCustomObject]@{
         UIDisplayName = "USB Total Blackout: Disable USBSTOR + UASPStor Drivers (Blocks all USB Sticks & SSDs)"
@@ -44,8 +44,8 @@ function Get-UsbSecurityState {
     })
 
     # 4. Anti-BadUSB / Lock-Screen Enumeration & Kernel DMA Guard
-    $dmaLock = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\FVE" -Name "DisableExternalDMAUnderLock" -ErrorAction SilentlyContinue).DisableExternalDMAUnderLock
-    $usbLock = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "DisableUsbEnumerationOnLock" -ErrorAction SilentlyContinue).DisableUsbEnumerationOnLock
+    $dmaLock = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\FVE" -Name "DisableExternalDMAUnderLock" -ErrorAction SilentlyContinue).DisableExternalDMAUnderLock
+    $usbLock = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "DisableUsbEnumerationOnLock" -ErrorAction SilentlyContinue).DisableUsbEnumerationOnLock
     $isBadUsbLocked = ($dmaLock -eq 1 -and $usbLock -eq 1)
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Anti-BadUSB & DMA Guard: Block New USB/PCIe Device Enumeration While Screen is Locked"
@@ -67,63 +67,114 @@ function Invoke-ApplyUsbSecurity {
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $Operation) -ScriptBlock {
         param([array]$Items, [string]$Op)
-        $remGuidKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\RemovableStorageDevices\{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}"
+        $remBase    = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\RemovableStorageDevices"
+        $remGuidKey = "$remBase\{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}"
+        $wpdGuids   = @(
+            "$remBase\{6ac27878-a6fa-4155-ba85-f98f491d4f33}",
+            "$remBase\{f33fdc04-d1ac-4e8e-9a30-19bbd4b108ae}"
+        )
         $storPolKey = "HKLM:\SYSTEM\CurrentControlSet\Control\StorageDevicePolicies"
         $fveKey     = "HKLM:\SOFTWARE\Policies\Microsoft\FVE"
         $pwrKey     = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"
 
-        $verb = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
+        $verb    = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
+        $total   = [math]::Max(1, $Items.Count)
+        $current = 0
 
-        foreach ($item in $Items) {
+        # Ensure WriteProtect is processed before TotalBlock during Revert so StorageDevicePolicies reflects the final state
+        $orderedItems = if ($Op -eq 'Revert') {
+            @($Items | Sort-Object { if ($_.ActionData.Layer -eq 'WriteProtect') { 0 } else { 1 } })
+        } else {
+            $Items
+        }
+
+        foreach ($item in $orderedItems) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> $verb USB Security Layer: $($item.UIDisplayName)")
+            }
+
             $layer = $item.ActionData.Layer
-            $UltixSync.Logs.Enqueue(" -> $verb USB Security Layer: $($item.UIDisplayName)")
-
-            if (-not (Test-Path $remGuidKey)) { New-Item -Path $remGuidKey -Force | Out-Null }
-            if (-not (Test-Path $storPolKey)) { New-Item -Path $storPolKey -Force | Out-Null }
+            if (-not (Test-Path -LiteralPath $remGuidKey)) { New-Item -Path $remGuidKey -Force | Out-Null }
+            if (-not (Test-Path -LiteralPath $storPolKey)) { New-Item -Path $storPolKey -Force | Out-Null }
 
             switch ($layer) {
                 "WriteProtect" {
                     if ($Op -eq 'Apply') {
-                        Set-ItemProperty -Path $storPolKey -Name "WriteProtect" -Value 1 -Type DWord -Force
-                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $storPolKey -Name "WriteProtect" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                        foreach ($wpdKey in $wpdGuids) {
+                            if (-not (Test-Path -LiteralPath $wpdKey)) { New-Item -Path $wpdKey -Force | Out-Null }
+                            Set-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                        }
                     } else {
-                        Set-ItemProperty -Path $storPolKey -Name "WriteProtect" -Value 0 -Type DWord -Force
-                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                        Set-ItemProperty -LiteralPath $storPolKey -Name "WriteProtect" -Value 0 -Type DWord -Force
+                        # Only remove Deny_Write if TotalBlock (Deny_Read) is not currently active
+                        $denyReadActive = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -ErrorAction SilentlyContinue).Deny_Read
+                        if ($denyReadActive -ne 1) {
+                            Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                            foreach ($wpdKey in $wpdGuids) {
+                                if (Test-Path -LiteralPath $wpdKey) {
+                                    Remove-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                                }
+                            }
+                        }
                     }
                 }
                 "DenyExecute" {
                     if ($Op -eq 'Apply') {
-                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Execute" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Execute" -Value 1 -Type DWord -Force
                     } else {
-                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Execute" -Force -ErrorAction SilentlyContinue
+                        Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Execute" -Force -ErrorAction SilentlyContinue
                     }
                 }
                 "TotalBlock" {
                     if ($Op -eq 'Apply') {
                         Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 4
                         Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 4
-                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Read" -Value 1 -Type DWord -Force
-                        Set-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                        foreach ($wpdKey in $wpdGuids) {
+                            if (-not (Test-Path -LiteralPath $wpdKey)) { New-Item -Path $wpdKey -Force | Out-Null }
+                            Set-ItemProperty -LiteralPath $wpdKey -Name "Deny_Read" -Value 1 -Type DWord -Force
+                            Set-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+                        }
                     } else {
                         Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 3
                         Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 3
-                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Read" -Force -ErrorAction SilentlyContinue
-                        Remove-ItemProperty -Path $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                        Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -Force -ErrorAction SilentlyContinue
+                        foreach ($wpdKey in $wpdGuids) {
+                            if (Test-Path -LiteralPath $wpdKey) {
+                                Remove-ItemProperty -LiteralPath $wpdKey -Name "Deny_Read" -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+
+                        # Symmetric check: only delete Deny_Write if Layer 1 (WriteProtect) is 0 or not set
+                        $wpActive = (Get-ItemProperty -LiteralPath $storPolKey -Name "WriteProtect" -ErrorAction SilentlyContinue).WriteProtect
+                        if ($null -eq $wpActive -or $wpActive -eq 0) {
+                            Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                            foreach ($wpdKey in $wpdGuids) {
+                                if (Test-Path -LiteralPath $wpdKey) {
+                                    Remove-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+                                }
+                            }
+                        }
                     }
                 }
                 "LockScreenGuard" {
-                    if (-not (Test-Path $fveKey)) { New-Item -Path $fveKey -Force | Out-Null }
+                    if (-not (Test-Path -LiteralPath $fveKey)) { New-Item -Path $fveKey -Force | Out-Null }
                     if ($Op -eq 'Apply') {
-                        Set-ItemProperty -Path $fveKey -Name "DisableExternalDMAUnderLock" -Value 1 -Type DWord -Force
-                        Set-ItemProperty -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $fveKey -Name "DisableExternalDMAUnderLock" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $pwrKey -Name "DisableUsbEnumerationOnLock" -Value 1 -Type DWord -Force
                     } else {
-                        Remove-ItemProperty -Path $fveKey -Name "DisableExternalDMAUnderLock" -Force -ErrorAction SilentlyContinue
-                        Remove-ItemProperty -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -Force -ErrorAction SilentlyContinue
+                        Remove-ItemProperty -LiteralPath $fveKey -Name "DisableExternalDMAUnderLock" -Force -ErrorAction SilentlyContinue
+                        Remove-ItemProperty -LiteralPath $pwrKey -Name "DisableUsbEnumerationOnLock" -Force -ErrorAction SilentlyContinue
                     }
                 }
             }
         }
-        $UltixSync.Progress = 100
+        if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
     } -OnComplete ({
         param($nullOut)
         Update-Progress 0
@@ -132,7 +183,7 @@ function Invoke-ApplyUsbSecurity {
 }
 
 # ------------------------------------------
-# Z5: DNS ENFORCER (IPV4 + IPV6 + NATIVE WINDOWS 11 DOH)
+# Z5: DNS ENFORCER (ZERO-WMI .NET ADAPTER DISCOVERY + IPV4/IPV6 + NATIVE DOH)
 # ------------------------------------------
 function Set-CustomDNS {
     param(
@@ -143,7 +194,7 @@ function Set-CustomDNS {
     )
 
     Write-GUI " -> Applying DNS profile '$Provider' (DoH: $EnableDoH, IPv6: $EnableIPv6)..."
-    Update-Progress 25
+    Update-Progress 20
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($Provider, $EnableDoH, $EnableIPv6) -ScriptBlock {
         param([string]$TargetProvider, [bool]$UseDoH, [bool]$UseIPv6)
@@ -176,28 +227,55 @@ function Set-CustomDNS {
             }
         }
 
-        $routedIndices = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty InterfaceIndex -Unique)
+        # Fast native Win32 GetAdaptersAddresses enumeration via .NET (~2ms, zero Get-NetRoute / Get-NetAdapter CIM overhead)
+        $routedAdapters = [System.Collections.Generic.List[PSCustomObject]]::new()
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            if ($nic.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
 
-        if ($routedIndices.Count -eq 0) {
+            try {
+                $ipProps = $nic.GetIPProperties()
+                if ($null -eq $ipProps -or $ipProps.GatewayAddresses.Count -eq 0) { continue }
+
+                $v4Props = $ipProps.GetIPv4Properties()
+                if ($null -eq $v4Props -or $v4Props.Index -le 0) { continue }
+
+                $routedAdapters.Add([PSCustomObject]@{
+                    InterfaceIndex = [int]$v4Props.Index
+                    InterfaceGuid  = [string]$nic.Id
+                    InterfaceName  = [string]$nic.Description
+                    InterfaceAlias = [string]$nic.Name
+                })
+            } catch { }
+        }
+
+        if ($routedAdapters.Count -eq 0) {
             $UltixSync.Logs.Enqueue(" [!] No active network adapters with a default gateway found.")
             return
         }
 
         $wellKnownBase = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers"
         $ifSpecBase    = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters"
+        $hasDohCmd     = ($null -ne (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue))
 
-        foreach ($ifIndex in $routedIndices) {
-            $adapter = Get-NetAdapter -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue
-            if ($null -eq $adapter) { continue }
-            $ifGuid  = $adapter.InterfaceGuid
-            $ifName  = $adapter.InterfaceDescription
+        $totalNics = $routedAdapters.Count
+        $nicIdx    = 0
+
+        foreach ($nicInfo in $routedAdapters) {
+            $nicIdx++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = 20 + [int](($nicIdx / $totalNics) * 70)
+            }
+
+            $ifIndex = $nicInfo.InterfaceIndex
+            $ifGuid  = $nicInfo.InterfaceGuid
+            $ifName  = $nicInfo.InterfaceName
 
             $dohV4Root = "$ifSpecBase\$ifGuid\DohInterfaceSettings\Doh"
             $dohV6Root = "$ifSpecBase\$ifGuid\DohInterfaceSettings\Doh6"
 
-            if (Test-Path $dohV4Root) { Remove-Item -Path $dohV4Root -Recurse -Force -ErrorAction SilentlyContinue }
-            if (Test-Path $dohV6Root) { Remove-Item -Path $dohV6Root -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $dohV4Root) { Remove-Item -LiteralPath $dohV4Root -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $dohV6Root) { Remove-Item -LiteralPath $dohV6Root -Recurse -Force -ErrorAction SilentlyContinue }
 
             if ($TargetProvider -eq "Default (DHCP)") {
                 try {
@@ -221,7 +299,11 @@ function Set-CustomDNS {
             try {
                 Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($allServers) -ErrorAction Stop
                 if (-not $UseIPv6) {
-                    netsh.exe interface ipv6 set dnsservers name="$($adapter.Name)" source=dhcp 2>$null | Out-Null
+                    # Clear static IPv6 NameServer directly in Tcpip6 registry without spawning external netsh.exe
+                    $tcp6IfKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$ifGuid"
+                    if (Test-Path -LiteralPath $tcp6IfKey) {
+                        Set-ItemProperty -LiteralPath $tcp6IfKey -Name "NameServer" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+                    }
                 }
                 $UltixSync.Logs.Enqueue(" -> [$ifName]: Enforced servers: $($allServers -join ', ')")
             } catch {
@@ -229,29 +311,29 @@ function Set-CustomDNS {
             }
 
             if ($UseDoH) {
-                if (-not (Test-Path $wellKnownBase)) { New-Item -Path $wellKnownBase -Force | Out-Null }
+                if (-not (Test-Path -LiteralPath $wellKnownBase)) { New-Item -Path $wellKnownBase -Force | Out-Null }
 
                 foreach ($ip in $allServers) {
                     $wkKey = "$wellKnownBase\$ip"
-                    if (-not (Test-Path $wkKey)) { New-Item -Path $wkKey -Force | Out-Null }
-                    Set-ItemProperty -Path $wkKey -Name "Template" -Value $cfg.Template -Type String -Force -ErrorAction SilentlyContinue
+                    if (-not (Test-Path -LiteralPath $wkKey)) { New-Item -Path $wkKey -Force | Out-Null }
+                    Set-ItemProperty -LiteralPath $wkKey -Name "Template" -Value $cfg.Template -Type String -Force -ErrorAction SilentlyContinue
 
-                    if (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
+                    if ($hasDohCmd) {
                         Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
                         Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
                     }
 
                     $isV6 = ($ip -match ":")
                     $targetDohKey = if ($isV6) { "$dohV6Root\$ip" } else { "$dohV4Root\$ip" }
-                    if (-not (Test-Path $targetDohKey)) { New-Item -Path $targetDohKey -Force | Out-Null }
-                    Set-ItemProperty -Path $targetDohKey -Name "DohFlags" -Value ([uint64]1) -Type QWord -Force -ErrorAction SilentlyContinue
+                    if (-not (Test-Path -LiteralPath $targetDohKey)) { New-Item -Path $targetDohKey -Force | Out-Null }
+                    Set-ItemProperty -LiteralPath $targetDohKey -Name "DohFlags" -Value ([uint64]1) -Type QWord -Force -ErrorAction SilentlyContinue
                 }
                 $UltixSync.Logs.Enqueue("    [+] Native DoH encryption activated ($($cfg.Template)).")
             }
         }
 
         Clear-DnsClientCache -ErrorAction SilentlyContinue
-        $UltixSync.Progress = 100
+        if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
     } -OnComplete ({
         param($nullOut)
         Update-Progress 0
@@ -269,6 +351,14 @@ function Start-ClassicSound    { Start-Process "mmsys.cpl" }
 function Start-ClassicPrinters { Start-Process "explorer.exe" -ArgumentList "shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{A8A91A66-3A7D-4424-8D24-04E180695C7A}" }
 function Start-ClassicSysProp  { Start-Process "SystemPropertiesAdvanced.exe" }
 function Start-ClassicPower    { Start-Process "powercfg.cpl" }
+function Start-ClassicGpoOrReg {
+    if ([System.IO.File]::Exists("$env:windir\System32\gpedit.msc")) {
+        Start-Process "mmc.exe" -ArgumentList "`"$env:windir\System32\gpedit.msc`""
+    } else {
+        Start-Process "regedit.exe"
+    }
+}
+function Start-ClassicCompMgmt { Start-Process "compmgmt.msc" }
 
 # ------------------------------------------
 # Z5: UI INITIALIZATION (SECURITY, PRIVACY, DNS & APPLETS)
@@ -290,24 +380,20 @@ function Initialize-Z5UI {
             [string]$AuditHeader,
             [switch]$AuditOnly
         )
-        $auditData = & $ScannerFn
-        if ($AuditOnly) {
-            Write-GUI "--- AUDIT: $AuditHeader ---"
-            $detected = @($auditData | Where-Object { $_.IsDetected })
-            if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" }
-            } else {
-                Write-GUI "  [OK] Optimized."
-            }
-            Write-GUI ""
-            return
-        }
-
-        $modalOutput = Show-ActionModal -Title $ModalTitle -Description "Select security & privacy policies to apply or revert." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
-            Invoke-ApplyRegistry -SelectedItems $modalOutput.Items -CategoryName $CategoryName -Operation $modalOutput.Action
-            Write-GUI ""
-        }
+        Invoke-UltixAuditFlow `
+            -ScannerFunction $ScannerFn `
+            -AuditLabel $AuditHeader `
+            -ModalTitle $ModalTitle `
+            -ModalDescription "Select security & privacy policies to apply or revert." `
+            -ExecutorFunction "Invoke-ApplyRegistry" `
+            -ExecutorExtraParams @{
+                CategoryName = $CategoryName
+                RefreshShell = $true
+            } `
+            -ControlsToDisable $allTabButtons.ToArray() `
+            -AuditOnly:$AuditOnly.IsPresent `
+            -AuditPrefix "To Optimize" `
+            -EnableRevert
     }.GetNewClosure())
 
     # 1. Privacy & Background Apps (AppPrivacy)
@@ -329,8 +415,8 @@ function Initialize-Z5UI {
     # 3. USB Storage & BadUSB Perimeter Guard
     $rowUsbGuard = New-UltixActionRow -Parent $tabSec -Y 120 -MainRGB @(135, 50, 50) `
         -Text "USB Storage & BadUSB Guard (Lockdown)" `
-        -Description "4-Layer USB perimeter defense: Read-Only Write Protection, Execute-Deny (.exe), Full USBSTOR + UASPStor driver blackout, and Lock-Screen BadUSB/DMA guard." `
-        -AuditDescription "AUDIT: Checks USB Write-Protect, USBSTOR/UASPStor driver states, and Lock-Screen DMA/BadUSB policies." `
+        -Description "4-Layer USB & MTP perimeter defense: Read-Only Write Protection, Execute-Deny (.exe), Full USBSTOR + UASPStor driver blackout, and Lock-Screen BadUSB/DMA guard." `
+        -AuditDescription "AUDIT: Checks USB/MTP Write-Protect, USBSTOR/UASPStor driver states, and Lock-Screen DMA/BadUSB policies." `
         -OnClick ({
             Invoke-UltixAuditFlow -ScannerFunction "Get-UsbSecurityState" -AuditLabel "USB Perimeter Security" -ModalTitle "WinUltix - USB Storage & BadUSB Guard" -ModalDescription "Select USB protection layers to enforce (Apply = Lock, Revert = Unlock to Windows Defaults)." -ExecutorFunction "Invoke-ApplyUsbSecurity" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
         }.GetNewClosure()) `
@@ -341,64 +427,77 @@ function Initialize-Z5UI {
     # 4. Dual-Layer Execution Blocks (SRP + IFEO Kernel Lock) — Aligned to X = 345 for [?]
     $btnRegSRP = New-UltixButton -Parent $tabSec -X 15 -Y 170 -Width 235 -Height 40 -RGB @(135, 50, 50) `
         -Text "Execution Blocks (SRP + IFEO)" `
-        -Description "DUAL-LAYER KERNEL LOCK: Combines Software Restriction Policies (Safer API) with Image File Execution Options (IFEO) to permanently block telemetry or custom .exe files."
+        -Description "DUAL-LAYER KERNEL LOCK: Combines Software Restriction Policies (Safer API) with Image File Execution Options (IFEO) to permanently block telemetry or custom .exe files." `
+        -OnClick ({
+            Invoke-UltixAuditFlow `
+                -ScannerFunction "Get-RegState_SRP" `
+                -AuditLabel "Dual-Layer Execution Locks (SRP + IFEO)" `
+                -ModalTitle "WinUltix - SRP & IFEO Lockdown" `
+                -ModalDescription "Select executables to permanently block via OS policies (Apply = Lock, Revert = Unlock)." `
+                -ExecutorFunction "Invoke-ApplySRP" `
+                -ControlsToDisable $allTabButtons.ToArray() `
+                -EnableRevert
+        }.GetNewClosure())
 
     $btnAddSRP = New-UltixButton -Parent $tabSec -X 255 -Y 170 -Width 40 -Height 40 -RGB @(45, 95, 60) `
         -Text "+" `
         -Description "ADD CUSTOM TARGET: Browse for an .exe file to add to your custom SRP+IFEO block list." `
-        -OnClick {
+        -OnClick ({
             $dlg = New-Object System.Windows.Forms.OpenFileDialog
             $dlg.Filter = "Executables (*.exe)|*.exe"
             $dlg.Title = "Select Executable to Block (SRP+IFEO)"
             $dlg.InitialDirectory = "$env:ProgramFiles"
             try {
                 if ($dlg.ShowDialog($global:form) -eq [System.Windows.Forms.DialogResult]::OK) {
+                    $exeName = [System.IO.Path]::GetFileName($dlg.FileName)
+                    $protectedCoreBins = '^(?i)(explorer|svchost|lsass|csrss|smss|wininit|winlogon|services|dwm|sihost|taskhostw|conhost|cmd|powershell|pwsh|regedit|mmc|taskmgr|systray|gpupdate|WinUltix)\.exe$'
+                    if ($exeName -match $protectedCoreBins) {
+                        [System.Windows.Forms.MessageBox]::Show("Blocking core Windows shell/kernel binary '$exeName' is forbidden to prevent OS lockout.", "WinUltix - Safety Guard", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                        return
+                    }
                     $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
                     if (-not (Test-Path -LiteralPath $regKey)) { New-Item -Path $regKey -Force | Out-Null }
-                    $exeName = [System.IO.Path]::GetFileName($dlg.FileName)
                     Set-ItemProperty -LiteralPath $regKey -Name $exeName -Value $dlg.FileName -Type String -Force
-                    Write-GUI " -> Added custom SRP+IFEO target: $exeName"
+                    Write-GUI " -> Added custom SRP+IFEO target: $exeName ($($dlg.FileName))"
                 }
             } finally {
                 $dlg.Dispose()
             }
-        }
+        }.GetNewClosure())
 
     $btnClrSRP = New-UltixButton -Parent $tabSec -X 300 -Y 170 -Width 40 -Height 40 -RGB @(55, 58, 64) `
         -Text "-" `
-        -Description "CLEAR CUSTOM TARGETS: Removes all custom executables from the WinUltix tracking list." `
-        -OnClick {
+        -Description "CLEAR CUSTOM TARGETS: Unlocks any active custom SRP+IFEO blocks and purges the custom tracking list." `
+        -OnClick ({
             $regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-            if (Test-Path -LiteralPath $regKey) {
-                Remove-Item -LiteralPath $regKey -Force -Recurse | Out-Null
-                Write-GUI " -> Custom SRP+IFEO tracking database purged."
-            } else {
-                Write-GUI " -> Custom SRP+IFEO roster is already empty."
+            if (-not (Test-Path -LiteralPath $regKey)) {
+                Write-GUI " -> Custom SRP+IFEO roster is already empty.`n"
+                return
             }
-        }
+
+            # Symmetrically unlock any active custom SRP+IFEO rules before deleting the tracking key
+            $customItems = @(Get-RegState_SRP | Where-Object { $_.ActionData.IsCustom -eq $true })
+            Remove-Item -LiteralPath $regKey -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+
+            if ($customItems.Count -gt 0) {
+                Write-GUI " -> Purging custom SRP+IFEO tracking list and reverting $($customItems.Count) custom rule(s)..."
+                Invoke-ApplySRP -SelectedItems $customItems -Operation "Revert" -ControlsToDisable $allTabButtons.ToArray()
+            } else {
+                Write-GUI " -> Custom SRP+IFEO tracking database purged.`n"
+            }
+        }.GetNewClosure())
 
     $btnAudSRP = New-UltixButton -Parent $tabSec -X 345 -Y 170 -Width 40 -Height 40 -RGB @(72, 76, 82) `
         -Text "?" `
         -Description "AUDIT: Verifies active Software Restriction Policies (SRP) and IFEO kernel locks." `
-        -OnClick {
-            Write-GUI "--- AUDIT: Dual-Layer Execution Locks (SRP + IFEO) ---"
-            $state = Get-RegState_SRP
-            $detected = @($state | Where-Object { $_.IsDetected })
-            if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] To Block: $($d.UIDisplayName)" }
-            } else {
-                Write-GUI "  [OK] All target executables are locked."
-            }
-            Write-GUI ""
-        }
-
-    $btnRegSRP.Add_Click({
-        $auditData = Get-RegState_SRP
-        $modalOutput = Show-ActionModal -Title "WinUltix - SRP & IFEO Lockdown" -Description "Select executables to permanently block via OS policies (Apply = Lock, Revert = Unlock)." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
-            Invoke-ApplySRP -SelectedItems $modalOutput.Items -Operation $modalOutput.Action -ControlsToDisable $allTabButtons.ToArray()
-        }
-    }.GetNewClosure())
+        -OnClick ({
+            Invoke-UltixAuditFlow `
+                -ScannerFunction "Get-RegState_SRP" `
+                -AuditLabel "Dual-Layer Execution Locks (SRP + IFEO)" `
+                -ControlsToDisable $allTabButtons.ToArray() `
+                -AuditOnly `
+                -AuditPrefix "To Block"
+        }.GetNewClosure())
 
     # 5. Hardened DNS & Native DoH Enforcer (IPv4 + IPv6)
     $lblDNS = New-Object System.Windows.Forms.Label
@@ -432,22 +531,30 @@ function Initialize-Z5UI {
     $chkIPv6.ForeColor = [System.Drawing.Color]::LightGray
     $chkIPv6.Checked = $true
 
+    $comboDNS.Add_SelectedIndexChanged({
+        $isStatic = ([string]$comboDNS.SelectedItem -ne "Default (DHCP)")
+        $chkDoH.Enabled  = $isStatic
+        $chkIPv6.Enabled = $isStatic
+    }.GetNewClosure())
+
     $btnApplyDNS = New-UltixButton -Parent $tabSec -X 265 -Y 251 -Width 120 -Height 27 -RGB @(45, 85, 125) `
         -Text "Apply DNS" `
-        -Description "Enforces IPv4/IPv6 DNS servers, injects kernel Dnscache DoH encryption flags, and flushes resolver cache."
-    $btnApplyDNS.Add_Click({
-        Set-CustomDNS -Provider $comboDNS.SelectedItem -EnableDoH $chkDoH.Checked -EnableIPv6 $chkIPv6.Checked -ControlsToDisable $allTabButtons.ToArray()
-    }.GetNewClosure())
+        -Description "Enforces IPv4/IPv6 DNS servers, injects kernel Dnscache DoH encryption flags, and flushes resolver cache." `
+        -OnClick ({
+            Set-CustomDNS -Provider ([string]$comboDNS.SelectedItem) -EnableDoH $chkDoH.Checked -EnableIPv6 $chkIPv6.Checked -ControlsToDisable $allTabButtons.ToArray()
+        }.GetNewClosure())
 
     $global:lblCurrentDNS = New-Object System.Windows.Forms.Label
     $global:lblCurrentDNS.Text = "Current DNS: Reading from active route..."
     $global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 310)
     $global:lblCurrentDNS.Size = New-Object System.Drawing.Size(370, 22)
     $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $global:lblCurrentDNS.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $global:lblCurrentDNS.Add_Click({ Update-DNSLabel })
 
-    # 6. Classic Windows Control Applets
+    # 6. Classic Windows Control Applets (8 Tools)
     $lblClassic = New-Object System.Windows.Forms.Label
-    $lblClassic.Text = "Classic Win32 Control Applets"
+    $lblClassic.Text = "Classic Win32 Control & Admin Applets"
     $lblClassic.Location = New-Object System.Drawing.Point(15, 345)
     $lblClassic.Size = New-Object System.Drawing.Size(370, 20)
     $lblClassic.ForeColor = [System.Drawing.Color]::DarkGray
@@ -483,12 +590,23 @@ function Initialize-Z5UI {
         -Description "Opens the classic Power Options applet to inspect unhidden CPPC parameters." `
         -OnClick { Start-ClassicPower }
 
+    $btnGpoCpl = New-UltixButton -Parent $tabSec -X 15 -Y 520 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Group Policy / RegEdit" `
+        -Description "Opens Local Group Policy Editor (gpedit.msc) or falls back to Registry Editor (regedit.exe) on Home SKUs." `
+        -OnClick { Start-ClassicGpoOrReg }
+
+    $btnMgmtCpl = New-UltixButton -Parent $tabSec -X 205 -Y 520 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+        -Text "Computer Mgmt (MSC)" `
+        -Description "Opens Computer Management (compmgmt.msc) for Disk Management, Local Users, Event Viewer, and Device Manager." `
+        -OnClick { Start-ClassicCompMgmt }
+
     foreach ($row in @($rowPrivacy, $rowBoot, $rowUsbGuard)) {
         $allTabButtons.AddRange($row.Controls)
     }
     $allTabButtons.AddRange([System.Windows.Forms.Control[]]@(
-        $btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP, $btnApplyDNS,
-        $btnNetCpl, $btnSndCpl, $btnAppCpl, $btnPrnCpl, $btnSysCpl, $btnPwrCpl
+        $btnRegSRP, $btnAddSRP, $btnClrSRP, $btnAudSRP,
+        $comboDNS, $chkDoH, $chkIPv6, $btnApplyDNS,
+        $btnNetCpl, $btnSndCpl, $btnAppCpl, $btnPrnCpl, $btnSysCpl, $btnPwrCpl, $btnGpoCpl, $btnMgmtCpl
     ))
 
     $tabSec.Controls.AddRange(@(

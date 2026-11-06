@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE (v3.1.0)
+# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE (v3.14)
 # Z3_Registry: OS Tweaks, Taskbar (with UCPD.sys bypass), native 3-icon Start Menu compiler (with 26H2 Classic List view), File Explorer, Modern Standby S0, 7-Point Power & Display Optimizer, 1:1 Raw Mouse Input, and Extreme Gaming Registry.
 # ==========================================
 
@@ -178,12 +178,7 @@ function Get-RegState_Privacy {
 }
 
 function Get-RegState_SystemBoot {
-    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -Property TotalPhysicalMemory -ErrorAction SilentlyContinue
-    $ramKB = if ($null -ne $cs -and $cs.TotalPhysicalMemory -gt 0) {
-        [int][math]::Min([int]::MaxValue, [math]::Round($cs.TotalPhysicalMemory / 1KB))
-    } else {
-        16777216
-    }
+    $ramKB = [WinUltix.NativeMethods]::GetTotalPhysicalMemoryKB()
 
     $rules = @(
         @{ UIDisplayName = "Boot: Disable Fast Startup (Prevents kernel hibernation bugs)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"; Name = "HiberbootEnabled"; Expected = 0; Default = 1; Type = "DWord" }
@@ -220,7 +215,7 @@ function Get-RegState_Gaming {
         @{ UIDisplayName = "Kernel: Disable Paging Executive (Keeps core system in RAM)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS: System Responsiveness (Allocate 100% CPU to Games)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Expected = 0; Default = 20; Type = "DWord" }
         @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; ValidValues = @(4294967295, -1); Type = "DWord" }
-        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(40, 38, 42, 22, 24); Type = "DWord" }
+        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(38, 40, 42, 22, 24); Type = "DWord" }
         @{ UIDisplayName = "Power: Disable Windows Power Throttling globally"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; Name = "PowerThrottlingOff"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
@@ -316,317 +311,430 @@ function Invoke-ApplySRP {
         [System.Windows.Forms.Control[]]$ControlsToDisable = @()
     )
     
-    $total = $SelectedItems.Count
-    if ($total -eq 0) { Write-GUI " -> No execution locks selected."; return }
-    $current = 0
-
-    $srpRoot  = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers"
-    $srpPaths = "$srpRoot\0\Paths"
-    $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
-    $nullStub = "$env:SystemRoot\System32\systray.exe"
-    
-    if ($Operation -eq 'Apply') {
-        if (-not (Test-Path -LiteralPath $srpRoot)) { New-Item -Path $srpRoot -Force | Out-Null }
-        
-        $srpSettings = @{
-            "AuthenticodeEnabled" = 0
-            "DefaultLevel"        = 262144
-            "TransparentEnabled"  = 1
-            "PolicyScope"         = 0
-        }
-        foreach ($kvp in $srpSettings.GetEnumerator()) {
-            Set-ItemProperty -LiteralPath $srpRoot -Name $kvp.Key -Value $kvp.Value -Type DWord -Force
-        }
-        
-        $exeTypes = [string[]]@("BAT","CMD","COM","EXE","HTA","LNK","MSI","OCX","PIF","REG","SCR","VBS","WSF")
-        Set-ItemProperty -LiteralPath $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Force
-        
-        if (-not (Test-Path -LiteralPath "$srpRoot\0"))      { New-Item -Path "$srpRoot\0" -Force | Out-Null }
-        if (-not (Test-Path -LiteralPath "$srpRoot\262144")) { New-Item -Path "$srpRoot\262144" -Force | Out-Null }
-        if (-not (Test-Path -LiteralPath $srpPaths))         { New-Item -Path $srpPaths -Force | Out-Null }
+    if ($SelectedItems.Count -eq 0) {
+        Write-GUI " -> No execution locks selected."
+        return
     }
 
-    $actionVerb = if ($Operation -eq 'Apply') { "Enforcing" } else { "Removing" }
-    $policyChanged = $false
+    Update-Progress 5
 
-    foreach ($item in $SelectedItems) {
-        $current++
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 75)) }
-        Write-GUI " -> $($actionVerb) Execution Lock: $($item.UIDisplayName)"
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $Operation) -ScriptBlock {
+        param([array]$Items, [string]$Op)
+
+        $total   = $Items.Count
+        $current = 0
+
+        $srpRoot  = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers"
+        $srpPaths = "$srpRoot\0\Paths"
+        $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+        $nullStub = "$env:SystemRoot\System32\systray.exe"
         
-        $target       = $item.ActionData
-        $guid         = Get-DeterministicSrpGuid -InputString $target.TargetPath
-        $ruleKey      = "$srpPaths\$guid"
-        $ifeoKey      = "$ifeoBase\$($target.ExeName)"
-        $filterSubKey = "$ifeoKey\$guid"
-        
-        try {
-            if ($Operation -eq 'Apply') {
-                if (Test-Path -LiteralPath $srpPaths) {
-                    foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
-                        $existingData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
-                        if ($existingData -eq $target.TargetPath -and $subKey.PSChildName -ne $guid) {
-                            Remove-Item -LiteralPath $subKey.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+        if ($Op -eq 'Apply') {
+            if (-not (Test-Path -LiteralPath $srpRoot)) { New-Item -Path $srpRoot -Force | Out-Null }
+            
+            $srpSettings = @{
+                "AuthenticodeEnabled" = 0
+                "DefaultLevel"        = 262144
+                "TransparentEnabled"  = 1
+                "PolicyScope"         = 0
+            }
+            foreach ($kvp in $srpSettings.GetEnumerator()) {
+                Set-ItemProperty -LiteralPath $srpRoot -Name $kvp.Key -Value $kvp.Value -Type DWord -Force
+            }
+            
+            $exeTypes = [string[]]@("BAT","CMD","COM","EXE","HTA","LNK","MSI","OCX","PIF","REG","SCR","VBS","WSF")
+            Set-ItemProperty -LiteralPath $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Force
+            
+            if (-not (Test-Path -LiteralPath "$srpRoot\0"))      { New-Item -Path "$srpRoot\0" -Force | Out-Null }
+            if (-not (Test-Path -LiteralPath "$srpRoot\262144")) { New-Item -Path "$srpRoot\262144" -Force | Out-Null }
+            if (-not (Test-Path -LiteralPath $srpPaths))         { New-Item -Path $srpPaths -Force | Out-Null }
+        }
+
+        $actionVerb    = if ($Op -eq 'Apply') { "Enforcing" } else { "Removing" }
+        $policyChanged = $false
+
+        foreach ($item in $Items) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 75)
+                $UltixSync.Logs.Enqueue(" -> $($actionVerb) Execution Lock: $($item.UIDisplayName)")
+            }
+            
+            $target       = $item.ActionData
+            $guid         = Get-DeterministicSrpGuid -InputString $target.TargetPath
+            $ruleKey      = "$srpPaths\$guid"
+            $ifeoKey      = "$ifeoBase\$($target.ExeName)"
+            $filterSubKey = "$ifeoKey\$guid"
+            
+            try {
+                if ($Op -eq 'Apply') {
+                    if (Test-Path -LiteralPath $srpPaths) {
+                        foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
+                            $existingData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
+                            if ($existingData -eq $target.TargetPath -and $subKey.PSChildName -ne $guid) {
+                                Remove-Item -LiteralPath $subKey.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                            }
                         }
                     }
-                }
 
-                New-Item -Path $ruleKey -Force | Out-Null
-                Set-ItemProperty -LiteralPath $ruleKey -Name "Description" -Value "WinUltix SRP Lockdown" -Type String -Force
-                Set-ItemProperty -LiteralPath $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String -Force
-                Set-ItemProperty -LiteralPath $ruleKey -Name "SaferFlags" -Value 0 -Type DWord -Force
+                    New-Item -Path $ruleKey -Force | Out-Null
+                    Set-ItemProperty -LiteralPath $ruleKey -Name "Description" -Value "WinUltix SRP Lockdown" -Type String -Force
+                    Set-ItemProperty -LiteralPath $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String -Force
+                    Set-ItemProperty -LiteralPath $ruleKey -Name "SaferFlags" -Value 0 -Type DWord -Force
 
-                if (-not (Test-Path -LiteralPath $ifeoKey)) { New-Item -Path $ifeoKey -Force | Out-Null }
+                    if (-not (Test-Path -LiteralPath $ifeoKey)) { New-Item -Path $ifeoKey -Force | Out-Null }
 
-                if ($target.IsCustom -and $target.TargetPath -notmatch '[\*\?]') {
-                    # Scoped kernel filter (FilterFullPath) so custom .exe blocks do not collide with other apps sharing the same filename
-                    Set-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Value 1 -Type DWord -Force
-                    Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
-                    if (-not (Test-Path -LiteralPath $filterSubKey)) { New-Item -Path $filterSubKey -Force | Out-Null }
-                    Set-ItemProperty -LiteralPath $filterSubKey -Name "FilterFullPath" -Value $target.TargetPath -Type String -Force
-                    Set-ItemProperty -LiteralPath $filterSubKey -Name "Debugger" -Value $nullStub -Type String -Force
-                    Set-ItemProperty -LiteralPath $filterSubKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+                    if ($target.IsCustom -and $target.TargetPath -notmatch '[\*\?]') {
+                        # Scoped kernel filter (FilterFullPath) so custom .exe blocks do not collide with other apps sharing the same filename
+                        Set-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Value 1 -Type DWord -Force
+                        Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+                        if (-not (Test-Path -LiteralPath $filterSubKey)) { New-Item -Path $filterSubKey -Force | Out-Null }
+                        Set-ItemProperty -LiteralPath $filterSubKey -Name "FilterFullPath" -Value $target.TargetPath -Type String -Force
+                        Set-ItemProperty -LiteralPath $filterSubKey -Name "Debugger" -Value $nullStub -Type String -Force
+                        Set-ItemProperty -LiteralPath $filterSubKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+                    } else {
+                        # Global kernel image lock (intercepts wildcard paths such as WindowsApps\...\Widgets.exe across updates)
+                        Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
+                        Set-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Value $nullStub -Type String -Force
+                        Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+                    }
+                    
+                    $procName = [System.IO.Path]::GetFileNameWithoutExtension($target.ExeName)
+                    $activeProc = Get-Process -Name $procName -ErrorAction SilentlyContinue
+                    if ($activeProc) { 
+                        $activeProc | Stop-Process -Force -ErrorAction SilentlyContinue
+                        if ($null -ne $UltixSync) {
+                            $UltixSync.Logs.Enqueue("    [OK] Flushed active process ($procName) from memory.")
+                        }
+                    }
+                    $policyChanged = $true
                 } else {
-                    # Global kernel image lock (intercepts wildcard paths such as WindowsApps\...\Widgets.exe across updates)
-                    Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
-                    Set-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Value $nullStub -Type String -Force
-                    Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
-                }
-                
-                $procName = [System.IO.Path]::GetFileNameWithoutExtension($target.ExeName)
-                $activeProc = Get-Process -Name $procName -ErrorAction SilentlyContinue
-                if ($activeProc) { 
-                    $activeProc | Stop-Process -Force -ErrorAction SilentlyContinue
-                    Write-GUI "    [OK] Flushed active process ($procName) from memory."
-                }
-                $policyChanged = $true
-            } else {
-                if (Test-Path -LiteralPath $srpPaths) {
-                    foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
-                        $itemData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
-                        if ($subKey.PSChildName -eq $guid -or $itemData -eq $target.TargetPath) {
-                            Remove-Item -LiteralPath $subKey.PSPath -Force -Recurse -ErrorAction Stop
+                    if (Test-Path -LiteralPath $srpPaths) {
+                        foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
+                            $itemData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
+                            if ($subKey.PSChildName -eq $guid -or $itemData -eq $target.TargetPath) {
+                                Remove-Item -LiteralPath $subKey.PSPath -Force -Recurse -ErrorAction Stop
+                                $policyChanged = $true
+                            }
+                        }
+                    }
+
+                    if (Test-Path -LiteralPath $ifeoKey) {
+                        if (Test-Path -LiteralPath $filterSubKey) {
+                            Remove-Item -LiteralPath $filterSubKey -Recurse -Force -ErrorAction SilentlyContinue
+                            $policyChanged = $true
+                        }
+
+                        $isManaged = (Get-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -ErrorAction SilentlyContinue).WinUltixManaged
+                        $dbgVal    = (Get-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -ErrorAction SilentlyContinue).Debugger
+                        if ($isManaged -eq 1 -or $dbgVal -match "systray\.exe") {
+                            if (-not $target.IsCustom -or $dbgVal -match "systray\.exe") {
+                                Remove-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Force -ErrorAction SilentlyContinue
+                            }
+                            $remainingSubKeys = @(Get-ChildItem -LiteralPath $ifeoKey -ErrorAction SilentlyContinue)
+                            if ($remainingSubKeys.Count -eq 0) {
+                                Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
+                                Remove-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Force -ErrorAction SilentlyContinue
+                            }
+
+                            $remainingProps = @()
+                            $ifeoItem = Get-Item -LiteralPath $ifeoKey -ErrorAction SilentlyContinue
+                            if ($null -ne $ifeoItem) {
+                                try { $remainingProps = @($ifeoItem.Property) } finally { $ifeoItem.Dispose() }
+                            }
+                            if ($remainingSubKeys.Count -eq 0 -and $remainingProps.Count -eq 0) {
+                                Remove-Item -LiteralPath $ifeoKey -Force -ErrorAction SilentlyContinue
+                            }
                             $policyChanged = $true
                         }
                     }
-                }
-
-                if (Test-Path -LiteralPath $ifeoKey) {
-                    if (Test-Path -LiteralPath $filterSubKey) {
-                        Remove-Item -LiteralPath $filterSubKey -Recurse -Force -ErrorAction SilentlyContinue
-                        $policyChanged = $true
-                    }
-
-                    $isManaged = (Get-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -ErrorAction SilentlyContinue).WinUltixManaged
-                    $dbgVal    = (Get-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -ErrorAction SilentlyContinue).Debugger
-                    if ($isManaged -eq 1 -or $dbgVal -match "systray\.exe") {
-                        if (-not $target.IsCustom -or $dbgVal -match "systray\.exe") {
-                            Remove-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Force -ErrorAction SilentlyContinue
-                        }
-                        $remainingSubKeys = @(Get-ChildItem -LiteralPath $ifeoKey -ErrorAction SilentlyContinue)
-                        if ($remainingSubKeys.Count -eq 0) {
-                            Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
-                            Remove-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Force -ErrorAction SilentlyContinue
-                        }
-                        $remainingProps = (Get-Item -LiteralPath $ifeoKey -ErrorAction SilentlyContinue).Property
-                        if ($remainingSubKeys.Count -eq 0 -and (-not $remainingProps -or $remainingProps.Count -eq 0)) {
-                            Remove-Item -LiteralPath $ifeoKey -Force -ErrorAction SilentlyContinue
-                        }
-                        $policyChanged = $true
+                    if ($null -ne $UltixSync) {
+                        $UltixSync.Logs.Enqueue("    [OK] SRP & IFEO restriction rules purged from registry.")
                     }
                 }
-                Write-GUI "    [OK] SRP & IFEO restriction rules purged from registry."
+            } catch {
+                if ($null -ne $UltixSync) {
+                    $UltixSync.Logs.Enqueue("    [!] Failed to modify execution lock: $($_.Exception.Message)")
+                }
             }
-        } catch { Write-GUI "    [!] Failed to modify execution lock: $($_.Exception.Message)" }
-    }
-
-    if ($Operation -eq 'Revert' -and (Test-Path -LiteralPath $srpPaths)) {
-        $remainingSrp = @(Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)
-        if ($remainingSrp.Count -eq 0) {
-            Remove-Item -LiteralPath $srpRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
-    }
-    
-    if ($policyChanged) {
-        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-            $UltixSync.Logs.Enqueue(" -> Refreshing Safer API policy tokens (gpupdate.exe /force in background)...")
-            $UltixSync.Progress = 85
 
+        if ($Op -eq 'Revert' -and (Test-Path -LiteralPath $srpPaths)) {
+            $remainingSrp = @(Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)
+            if ($remainingSrp.Count -eq 0) {
+                Remove-Item -LiteralPath $srpRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $exitCode = $null
+        if ($policyChanged) {
+            if ($null -ne $UltixSync) {
+                $UltixSync.Logs.Enqueue(" -> Refreshing Safer API policy tokens (gpupdate.exe /force in background)...")
+                $UltixSync.Progress = 85
+            }
             $gpProc = Start-Process -FilePath "gpupdate.exe" -ArgumentList "/force" -WindowStyle Hidden -PassThru
             $gpProc.WaitForExit()
             $exitCode = $gpProc.ExitCode
             $gpProc.Dispose()
-
-            $UltixSync.Progress = 100
-            return $exitCode
-        } -OnComplete {
-            param($exitCode)
-            Update-Progress 0
-            Write-GUI "    [OK] Kernel IFEO and AuthZ policy tokens updated (ExitCode: $exitCode).`n"
         }
-    } else {
+
+        if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+        return [PSCustomObject]@{
+            PolicyChanged = $policyChanged
+            ExitCode      = $exitCode
+            Operation     = $Op
+        }
+    } -OnComplete ({
+        param($res)
         Update-Progress 0
-        Write-GUI " -> Execution lock operation completed ($Operation).`n"
-    }
+        if ($null -ne $res -and $res.PolicyChanged) {
+            Write-GUI "    [OK] Kernel IFEO and AuthZ policy tokens updated (ExitCode: $($res.ExitCode)).`n"
+        } else {
+            Write-GUI " -> Execution lock operation completed ($Operation).`n"
+        }
+    }.GetNewClosure())
 }
 
 # ------------------------------------------
-# Z3: REGISTRY ENGINE
+# Z3: REGISTRY ENGINE (ASYNC RUNSPACE + RE-ENTRANCY SAFE)
 # ------------------------------------------
 function Invoke-ApplyRegistry {
     param(
         [Parameter(Mandatory=$true)][array]$SelectedItems,
         [Parameter(Mandatory=$true)][string]$CategoryName,
-        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply'
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @(),
+        [switch]$RefreshShell
     )
-    $total = $SelectedItems.Count
-    if ($total -eq 0) { Write-GUI " -> No tweaks selected."; return }
-    $current = 0
 
-    $actionVerb = if ($Operation -eq 'Apply') { "Enforcing" } else { "Reverting" }
-
-    foreach ($item in $SelectedItems) {
-        $current++
-        if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress ([int](($current / $total) * 100)) }
-        Write-GUI " -> $($actionVerb): $($item.UIDisplayName)"
-        $reg = $item.ActionData
-        
-        $targetValue = if ($Operation -eq 'Apply') { $reg.Expected } else { $reg.Default }
-
-        if ($null -eq $targetValue -and $Operation -eq 'Revert') {
-            Write-GUI "    [!] Missing 'Default' property in array definition. Skipping."
-            continue
-        }
-
-        try {
-            if ($targetValue -eq 'DELETE_KEY') {
-                if (Test-Path -LiteralPath $reg.Path) { 
-                    Remove-Item -LiteralPath $reg.Path -Recurse -Force -ErrorAction Stop | Out-Null 
-                    $parentKey = Split-Path -Path $reg.Path -Parent
-                    if ($parentKey -match "\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2\}$" -and (Test-Path -LiteralPath $parentKey)) {
-                        Remove-Item -LiteralPath $parentKey -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
-                    }
-                }
-                continue
-            }
-
-            if ($targetValue -eq 'DELETE_VALUE') {
-                if (Test-Path -LiteralPath $reg.Path) {
-                    if ($reg.Name -eq "DirectXUserGlobalSettings") {
-                        $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
-                        $cleanedDx  = ($existingDx -replace "SwapEffectUpgradeEnable=\d+;?", "").Trim()
-                        if ([string]::IsNullOrWhiteSpace($cleanedDx)) {
-                            Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction SilentlyContinue | Out-Null
-                        } else {
-                            Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $cleanedDx -Type String -Force -ErrorAction Stop | Out-Null
-                        }
-                    } else {
-                        Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction Stop | Out-Null
-                    }
-                }
-                continue
-            }
-
-            if (-not (Test-Path -LiteralPath $reg.Path)) { New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null }
-
-            # Sync 25H2/26H2 DisableWidgetsBoard policy alongside AllowNewsAndInterests
-            if ($reg.ContainsKey("AltName")) {
-                if ($Operation -eq 'Apply') {
-                    Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                    Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                } else {
-                    Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
-                    Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
-                }
-            }
-            
-            if ($reg.Name -eq "" -or $reg.Name -eq "(Default)") {
-                # Explicitly write empty or target string into unnamed (Default) value
-                Set-Item -LiteralPath $reg.Path -Value ([string]$targetValue) -Force -ErrorAction Stop | Out-Null
-            } elseif ($reg.Name -eq "DirectXUserGlobalSettings" -and $Operation -eq 'Apply') {
-                $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
-                if ([string]::IsNullOrWhiteSpace($existingDx)) {
-                    $newDx = "SwapEffectUpgradeEnable=1;"
-                } elseif ($existingDx -match "SwapEffectUpgradeEnable=\d+") {
-                    $newDx = $existingDx -replace "SwapEffectUpgradeEnable=\d+", "SwapEffectUpgradeEnable=1"
-                } else {
-                    $sep   = if ($existingDx.EndsWith(";")) { "" } else { ";" }
-                    $newDx = "$existingDx${sep}SwapEffectUpgradeEnable=1;"
-                }
-                Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $newDx -Type String -Force -ErrorAction Stop | Out-Null
-            } else { 
-                Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $targetValue -Type $reg.Type -Force -ErrorAction Stop | Out-Null 
-            }
-        } catch {
-            # Handle Windows 11 24H2/25H2/26H2 UCPD.sys kernel filter blocking AllowNewsAndInterests
-            if ($reg.ContainsKey("AltName")) {
-                try {
-                    if ($Operation -eq 'Apply') {
-                        Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction Stop | Out-Null
-                        Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                        if (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\UCPD") {
-                            Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4
-                            Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
-                        }
-                        Write-GUI "    [+] Bypassed UCPD.sys filter via $($reg.AltName)=1 & disarmed UCPD driver."
-                    } else {
-                        Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
-                        Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
-                        Write-GUI "    [+] Reverted $($reg.AltName) policy."
-                    }
-                } catch {
-                    Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
-                }
-            } else {
-                Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
-            }
-        }
-    }
-    if (Get-Command Update-Progress -ErrorAction SilentlyContinue) { Update-Progress 0 }
-    Write-GUI " -> $CategoryName registry modifications completed ($Operation)."
-}
-# ------------------------------------------
-# Z3: START MENU NATIVE COMPILATION & POWER/DISPLAY TUNER (MOVED FROM Z4)
-# ------------------------------------------
-function Invoke-StartMenuAudit {
-    Write-GUI "--- AUDIT: Start Menu Pins & Layout Mode ---"
-    $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-    
-    if ($null -eq $pkgDir) {
-        Write-GUI "  [OK] StartMenuExperienceHost package not found in current user profile."
+    if ($SelectedItems.Count -eq 0) {
+        Write-GUI " -> No tweaks selected."
         return
     }
 
-    $localState = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
-    $binFile    = Get-Item -Path (Join-Path $localState "start2.bin") -Force -ErrorAction SilentlyContinue
-    $clearedSz  = (Get-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -ErrorAction SilentlyContinue).StartMenuClearedSize
+    $doShellRefresh = $RefreshShell.IsPresent
 
-    if ($null -ne $binFile) {
-        $szKB = [math]::Round($binFile.Length / 1KB, 2)
-        if ($null -ne $clearedSz -and [math]::Abs($binFile.Length - $clearedSz) -le 512) {
-            Write-GUI "  [OK] Clean minimal layout active: start2.bin ($szKB KB - Edge, Settings, Explorer)."
-        } else {
-            Write-GUI "  [!] Active layout database detected: $($binFile.Name) ($szKB KB)."
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($SelectedItems, $CategoryName, $Operation) -ScriptBlock {
+        param([array]$Items, [string]$CatName, [string]$Op)
+
+        $total        = $Items.Count
+        $current      = 0
+        $touchedMouse = $false
+        $actionVerb   = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
+
+        foreach ($item in $Items) {
+            $current++
+            if ($null -ne $UltixSync) {
+                $UltixSync.Progress = [int](($current / $total) * 100)
+                $UltixSync.Logs.Enqueue(" -> $($actionVerb): $($item.UIDisplayName)")
+            } else {
+                Update-Progress ([int](($current / $total) * 100))
+                Write-GUI " -> $($actionVerb): $($item.UIDisplayName)"
+            }
+
+            $reg = $item.ActionData
+            if ($reg.Path -eq "HKCU:\Control Panel\Mouse") {
+                $touchedMouse = $true
+            }
+
+            $targetValue = if ($Op -eq 'Apply') { $reg.Expected } else { $reg.Default }
+            if ($null -eq $targetValue -and $Op -eq 'Revert') {
+                Write-GUI "    [!] Missing 'Default' property in array definition. Skipping."
+                continue
+            }
+
+            try {
+                if ($targetValue -eq 'DELETE_KEY') {
+                    if (Test-Path -LiteralPath $reg.Path) {
+                        Remove-Item -LiteralPath $reg.Path -Recurse -Force -ErrorAction Stop | Out-Null
+                        $parentKey = Split-Path -Path $reg.Path -Parent
+                        if ($parentKey -match "\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2\}$" -and (Test-Path -LiteralPath $parentKey)) {
+                            Remove-Item -LiteralPath $parentKey -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+                        }
+                    }
+                    continue
+                }
+
+                if ($targetValue -eq 'DELETE_VALUE') {
+                    if (Test-Path -LiteralPath $reg.Path) {
+                        if ($reg.Name -eq "DirectXUserGlobalSettings") {
+                            $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
+                            $cleanedDx  = ($existingDx -replace "SwapEffectUpgradeEnable=\d+;?", "").Trim()
+                            if ([string]::IsNullOrWhiteSpace($cleanedDx)) {
+                                Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction SilentlyContinue | Out-Null
+                            } else {
+                                Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $cleanedDx -Type String -Force -ErrorAction Stop | Out-Null
+                            }
+                        } else {
+                            Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction Stop | Out-Null
+                        }
+                    }
+                    continue
+                }
+
+                if (-not (Test-Path -LiteralPath $reg.Path)) { New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null }
+
+                # Preserve custom optimized values (e.g., Z7 Quantum Scheduler presets in Win32PrioritySeparation)
+                if ($Op -eq 'Apply' -and $reg.ContainsKey("ValidValues")) {
+                    $curRaw = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
+                    if ($null -ne $curRaw) {
+                        $curNorm = if ($reg.Type -eq "DWord" -and $curRaw -is [int] -and $curRaw -lt 0) {
+                            [BitConverter]::ToUInt32([BitConverter]::GetBytes($curRaw), 0)
+                        } else {
+                            $curRaw
+                        }
+                        if ($reg.ValidValues -contains $curNorm -or $reg.ValidValues -contains $curRaw) {
+                            if ($reg.Name -eq "Win32PrioritySeparation" -and $curNorm -ne $reg.Expected) {
+                                Write-GUI ("    [OK] Preserved active Quantum Scheduler preset (0x{0:X2} / {0} dec)." -f [int]$curNorm)
+                            }
+                            continue
+                        }
+                    }
+                }
+
+                # Sync 25H2/26H2 DisableWidgetsBoard policy alongside AllowNewsAndInterests
+                if ($reg.ContainsKey("AltName")) {
+                    if ($Op -eq 'Apply') {
+                        Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                        Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                    } else {
+                        Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
+                        Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
+                    }
+                }
+
+                if ($reg.Name -eq "" -or $reg.Name -eq "(Default)") {
+                    Set-Item -LiteralPath $reg.Path -Value ([string]$targetValue) -Force -ErrorAction Stop | Out-Null
+                } elseif ($reg.Name -eq "DirectXUserGlobalSettings" -and $Op -eq 'Apply') {
+                    $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
+                    if ([string]::IsNullOrWhiteSpace($existingDx)) {
+                        $newDx = "SwapEffectUpgradeEnable=1;"
+                    } elseif ($existingDx -match "SwapEffectUpgradeEnable=\d+") {
+                        $newDx = $existingDx -replace "SwapEffectUpgradeEnable=\d+", "SwapEffectUpgradeEnable=1"
+                    } else {
+                        $sep   = if ($existingDx.EndsWith(";")) { "" } else { ";" }
+                        $newDx = "$existingDx${sep}SwapEffectUpgradeEnable=1;"
+                    }
+                    Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $newDx -Type String -Force -ErrorAction Stop | Out-Null
+                } else {
+                    $writeVal = $targetValue
+                    if ($reg.Type -eq "DWord" -and $writeVal -is [long] -and $writeVal -gt [int]::MaxValue) {
+                        $writeVal = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$writeVal), 0)
+                    }
+                    Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $writeVal -Type $reg.Type -Force -ErrorAction Stop | Out-Null
+                }
+            } catch {
+                # Symmetric UCPD.sys kernel filter bypass for both Apply and Revert on Windows 11 24H2/25H2/26H2
+                if ($reg.ContainsKey("AltName")) {
+                    try {
+                        if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UCPD") {
+                            Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4
+                            Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
+                        }
+
+                        if ($Op -eq 'Apply') {
+                            Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction Stop | Out-Null
+                            Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                            Write-GUI "    [+] Bypassed UCPD.sys filter via $($reg.AltName)=1 & disarmed UCPD driver."
+                        } else {
+                            Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
+                            Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
+                            Write-GUI "    [+] Reverted $($reg.AltName) policy & disarmed UCPD filter (Reboot unlocks $($reg.Name))."
+                        }
+                    } catch {
+                        Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+                    }
+                } else {
+                    Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+                }
+            }
         }
-    } else {
-        Write-GUI "  [OK] Start Menu binary database is not present."
-    }
 
-    $viewMode  = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -ErrorAction SilentlyContinue).AllAppsViewMode
-    $trackDocs = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -ErrorAction SilentlyContinue).Start_TrackDocs
-    if ($viewMode -eq 2 -and $trackDocs -eq 0) {
-        Write-GUI "  [OK] All Apps View: Classic Alphabetical List (AllAppsViewMode=2) & Recent Files hidden."
-    } else {
-        Write-GUI "  [!] All Apps View / Recent Files not yet locked to Classic List (Current ViewMode: $(if($null -ne $viewMode){$viewMode}else{'0 - Category Tiles'}))."
-    }
+        # Live win32kfull.sys mouse acceleration reload via user32!SystemParametersInfoW (SPI_SETMOUSE)
+        if ($touchedMouse) {
+            try {
+                $mProps = Get-ItemProperty -LiteralPath "HKCU:\Control Panel\Mouse" -Name "MouseThreshold1", "MouseThreshold2", "MouseSpeed" -ErrorAction SilentlyContinue
+                $t1 = if ($null -ne $mProps -and $mProps.MouseThreshold1 -match '^\d+$') { [int]$mProps.MouseThreshold1 } else { 0 }
+                $t2 = if ($null -ne $mProps -and $mProps.MouseThreshold2 -match '^\d+$') { [int]$mProps.MouseThreshold2 } else { 0 }
+                $sp = if ($null -ne $mProps -and $mProps.MouseSpeed -match '^\d+$')      { [int]$mProps.MouseSpeed }      else { 0 }
+                if ([WinUltix.NativeMethods]::ApplyLiveMouseParams($t1, $t2, $sp)) {
+                    Write-GUI "    [OK] Live-reloaded win32kfull.sys pointer acceleration table (SPI_SETMOUSE: $t1/$t2/$sp)."
+                }
+            } catch { }
+        }
+    } -OnComplete ({
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI " -> $CategoryName registry modifications completed ($Operation)."
+        if ($doShellRefresh) {
+            Update-ShellEnvironment -ModifiedItems $SelectedItems
+        }
+        if ($null -eq $UltixSync) {
+            Write-GUI ""
+        }
+    }.GetNewClosure())
+}
 
-    $policyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
-    $mdmLock = (Get-ItemProperty -Path $policyPath -Name "ConfigureStartPins_ProviderSet" -ErrorAction SilentlyContinue).ConfigureStartPins_ProviderSet
-    if ($mdmLock -eq 1) {
-        Write-GUI "  [!] Residual MDM Start Menu lock detected in PolicyManager."
-    } else {
-        Write-GUI "  [OK] No residual MDM Start Menu locks found."
-    }
+# ------------------------------------------
+# Z3: START MENU NATIVE COMPILATION & POWER/DISPLAY TUNER
+# ------------------------------------------
+function Invoke-StartMenuAudit {
+    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+
+    Write-GUI "--- AUDIT: Start Menu Pins & Layout Mode (Background Thread) ---"
+    Update-Progress 15
+
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $UltixSync.Progress = 35
+        $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        if ($null -eq $pkgDir) {
+            $UltixSync.Logs.Enqueue("  [OK] StartMenuExperienceHost package not found in current user profile.")
+            $UltixSync.Progress = 100
+            return
+        }
+
+        $localState = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
+        $binFile    = Get-Item -Path (Join-Path $localState "start2.bin") -Force -ErrorAction SilentlyContinue
+        $clearedSz  = (Get-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -ErrorAction SilentlyContinue).StartMenuClearedSize
+
+        if ($null -ne $binFile) {
+            $szKB = [math]::Round($binFile.Length / 1KB, 2)
+            if ($null -ne $clearedSz -and [math]::Abs($binFile.Length - $clearedSz) -le 512) {
+                $UltixSync.Logs.Enqueue("  [OK] Clean minimal layout active: start2.bin ($szKB KB - Edge, Settings, Explorer).")
+            } else {
+                $UltixSync.Logs.Enqueue("  [!] Active layout database detected: $($binFile.Name) ($szKB KB).")
+            }
+        } else {
+            $UltixSync.Logs.Enqueue("  [OK] Start Menu binary database is not present.")
+        }
+
+        $UltixSync.Progress = 70
+        $viewMode  = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -ErrorAction SilentlyContinue).AllAppsViewMode
+        $trackDocs = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -ErrorAction SilentlyContinue).Start_TrackDocs
+        if ($viewMode -eq 2 -and $trackDocs -eq 0) {
+            $UltixSync.Logs.Enqueue("  [OK] All Apps View: Classic Alphabetical List (AllAppsViewMode=2) & Recent Files hidden.")
+        } else {
+            $UltixSync.Logs.Enqueue("  [!] All Apps View / Recent Files not yet locked to Classic List (Current ViewMode: $(if($null -ne $viewMode){$viewMode}else{'0 - Category Tiles'})).")
+        }
+
+        $provGuid   = "B5292708-1619-419B-9923-E5D9F3925E71"
+        $policyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
+        $mdmLock    = (Get-ItemProperty -LiteralPath $policyPath -Name "ConfigureStartPins_ProviderSet" -ErrorAction SilentlyContinue).ConfigureStartPins_ProviderSet
+        $hasProvKey = (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid") -or
+                      (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Enrollments\$provGuid")
+
+        if ($mdmLock -eq 1 -or $hasProvKey) {
+            $UltixSync.Logs.Enqueue("  [!] Residual MDM Start Menu provider/lock detected in PolicyManager ($provGuid).")
+        } else {
+            $UltixSync.Logs.Enqueue("  [OK] No residual MDM Start Menu locks or orphaned provider keys found.")
+        }
+        $UltixSync.Progress = 100
+    } -OnComplete ({
+        param($nullOut)
+        Update-Progress 0
+        Write-GUI ""
+    }.GetNewClosure())
 }
 
 function Clear-StartMenu {
@@ -649,7 +757,7 @@ function Clear-StartMenu {
         $providerPath     = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid\default\Device\Start"
         $policyDevicePath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start"
         $policyLegacyPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\device\Start"
-        $policyUserPath   = "HKCU:\Software\Microsoft\PolicyManager\current\user\Start"
+        $policyUserPath   = "HKCU:\Software\Microsoft\Windows\CurrentVersion\PolicyManager\current\user\Start"
 
         # Minimal 3-icon layout: Microsoft Edge, Windows Settings, File Explorer
         $cleanPinsJson = '{"pinnedList":[{"desktopAppId":"MSEdge"},{"packagedAppId":"windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"},{"desktopAppId":"Microsoft.Windows.Explorer"}]}'
@@ -663,34 +771,36 @@ function Clear-StartMenu {
                 $UltixSync.Logs.Enqueue(" -> [1/7] Disabling ContentDeliveryManager, Recent Files & forcing Classic Alphabetical List...")
             }
             $cdmPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-            if (Test-Path $cdmPath) {
+            if (Test-Path -LiteralPath $cdmPath) {
                 foreach ($cdmName in @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "SubscribedContentEnabled")) {
-                    Set-ItemProperty -Path $cdmPath -Name $cdmName -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -LiteralPath $cdmPath -Name $cdmName -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
                 }
-                if (Test-Path "$cdmPath\SuggestedApps") {
-                    Remove-Item -Path "$cdmPath\SuggestedApps" -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath "$cdmPath\SuggestedApps") {
+                    Remove-Item -LiteralPath "$cdmPath\SuggestedApps" -Recurse -Force -ErrorAction SilentlyContinue
                 }
             }
 
             $advPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-            if (Test-Path $advPath) {
-                Set-ItemProperty -Path $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $advPath -Name "Start_Layout" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $advPath) {
+                Set-ItemProperty -LiteralPath $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -LiteralPath $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -LiteralPath $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -LiteralPath $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -LiteralPath $advPath -Name "Start_Layout" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
             }
 
             $expPolPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
-            if (-not (Test-Path $expPolPath)) { New-Item -Path $expPolPath -Force -ErrorAction SilentlyContinue | Out-Null }
-            Set-ItemProperty -Path $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $expPolPath)) { New-Item -Path $expPolPath -Force -ErrorAction SilentlyContinue | Out-Null }
+            Set-ItemProperty -LiteralPath $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
 
             # Purge Recent JumpList AutomaticDestinations & Recent shortcuts
             $recentDir = "$env:APPDATA\Microsoft\Windows\Recent"
-            if (Test-Path $recentDir) {
+            if (Test-Path -LiteralPath $recentDir) {
                 Get-ChildItem -LiteralPath $recentDir -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                Get-ChildItem -LiteralPath "$recentDir\AutomaticDestinations" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath "$recentDir\AutomaticDestinations") {
+                    Get-ChildItem -LiteralPath "$recentDir\AutomaticDestinations" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                }
             }
 
             # Stage 2: Temporary MDM Provider Registration
@@ -698,27 +808,27 @@ function Clear-StartMenu {
                 $UltixSync.Progress = 30
                 $UltixSync.Logs.Enqueue(" -> [2/7] Injecting temporary MDM PolicyManager provider context...")
             }
-            if (-not (Test-Path $enrollmentPath)) {
+            if (-not (Test-Path -LiteralPath $enrollmentPath)) {
                 New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
                 $createdEnrollment = $true
             }
-            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
-            Set-ItemProperty -Path $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
-            Set-ItemProperty -Path $enrollmentPath -Name "IsFederated" -Value 0 -Type DWord -Force
-            Set-ItemProperty -Path $enrollmentPath -Name "ProviderID" -Value "MS DM Server" -Type String -Force
+            Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
+            Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
+            Set-ItemProperty -LiteralPath $enrollmentPath -Name "IsFederated" -Value 0 -Type DWord -Force
+            Set-ItemProperty -LiteralPath $enrollmentPath -Name "ProviderID" -Value "MS DM Server" -Type String -Force
 
-            if (-not (Test-Path $providerPath)) {
+            if (-not (Test-Path -LiteralPath $providerPath)) {
                 New-Item -Path $providerPath -Force -ErrorAction Stop | Out-Null
             }
-            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
-            Set-ItemProperty -Path $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
+            Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
+            Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
 
-            if (-not (Test-Path $policyDevicePath)) {
+            if (-not (Test-Path -LiteralPath $policyDevicePath)) {
                 New-Item -Path $policyDevicePath -Force -ErrorAction Stop | Out-Null
             }
-            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
-            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
-            Set-ItemProperty -Path $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
+            Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
+            Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
+            Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
 
             # Stage 3: Purge CloudStore caches & lock AllAppsViewMode = 2 (Classic Alphabetical List)
             if ($null -ne $UltixSync) {
@@ -726,37 +836,44 @@ function Clear-StartMenu {
                 $UltixSync.Logs.Enqueue(" -> [3/7] Purging CloudStore tile grid and enforcing AllAppsViewMode=2 (List View)...")
             }
             $cloudStoreRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
-            if (Test-Path $cloudStoreRoot) {
-                Get-ChildItem -Path $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
+            if (Test-Path -LiteralPath $cloudStoreRoot) {
+                Get-ChildItem -LiteralPath $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
                     $_.PSChildName -match "start\.tilegrid|unifiedtile|start\.allapps|start\.properties"
                 } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
             }
 
             $startRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
-            if (Test-Path $startRegPath) {
-                Remove-Item -Path $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $startRegPath) {
+                Remove-Item -LiteralPath $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
             }
             New-Item -Path $startRegPath -Force -ErrorAction SilentlyContinue | Out-Null
             # 2 = Classic Alphabetical List View (replaces Windows 11 25H2/26H2 Category Tiles = 0)
-            Set-ItemProperty -Path $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
 
-            # Stage 4: Stop shell processes and wipe start*.bin
+            # Stage 4: Stop shell processes and wipe start*.bin (with attribute reset & locked-handle evacuation)
             if ($null -ne $UltixSync) {
                 $UltixSync.Progress = 60
                 $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
             }
-            Stop-Process -Name "StartMenuExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
             Start-Sleep -Milliseconds 300
 
             for ($attempt = 1; $attempt -le 6; $attempt++) {
                 Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
                 Get-ChildItem -Path $startStatePath -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                    $binFull = $_.FullName
+                    try {
+                        $_.Attributes = 'Normal'
+                        Remove-Item -LiteralPath $binFull -Force -ErrorAction Stop
+                    } catch {
+                        $trashBin = Join-Path -Path $env:TEMP -ChildPath "WinUltix_StartBin_$([guid]::NewGuid().ToString('N')).tmp"
+                        Move-Item -LiteralPath $binFull -Destination $trashBin -Force -ErrorAction SilentlyContinue
+                    }
                 }
-                if (-not (Test-Path (Join-Path $startStatePath "start2.bin"))) { break }
-                Start-Sleep -Milliseconds 50
+                if (-not (Test-Path -LiteralPath (Join-Path $startStatePath "start2.bin"))) { break }
+                Start-Sleep -Milliseconds 60
             }
 
             if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
@@ -769,12 +886,17 @@ function Clear-StartMenu {
                 $UltixSync.Progress = 75
                 $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
             }
+            $appActivator = $null
             try {
                 $appActivator = New-Object WinUltix.AppActivator
                 [uint32]$activatedPid = 0
                 [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
-                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($appActivator)
-            } catch {}
+            } catch {
+            } finally {
+                if ($null -ne $appActivator -and [System.Runtime.InteropServices.Marshal]::IsComObject($appActivator)) {
+                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($appActivator)
+                }
+            }
 
             $compiledBinPath = Join-Path $startStatePath "start2.bin"
             $elapsed = 0
@@ -792,8 +914,8 @@ function Clear-StartMenu {
 
             if (Test-Path -LiteralPath $compiledBinPath) {
                 $newBinSize = (Get-Item -LiteralPath $compiledBinPath -Force).Length
-                if (-not (Test-Path "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
-                Set-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
+                if (-not (Test-Path -LiteralPath "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
+                Set-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
             }
 
             if ($null -ne $UltixSync) {
@@ -809,18 +931,18 @@ function Clear-StartMenu {
                 $UltixSync.Progress = 90
                 $UltixSync.Logs.Enqueue(" -> [6/7] Stripping temporary MDM PolicyManager locks...")
             }
-            foreach ($polPath in @($policyDevicePath, $policyLegacyPath, $policyUserPath)) {
-                if (Test-Path -Path $polPath) {
-                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_ProviderSet" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $polPath -Name "ConfigureStartPins_WinningProvider" -Force -ErrorAction SilentlyContinue
+            foreach ($polPath in @($policyDevicePath, $policyLegacyPath, $policyUserPath, "HKCU:\Software\Microsoft\PolicyManager\current\user\Start")) {
+                if (Test-Path -LiteralPath $polPath) {
+                    Remove-ItemProperty -LiteralPath $polPath -Name "ConfigureStartPins" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -LiteralPath $polPath -Name "ConfigureStartPins_ProviderSet" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -LiteralPath $polPath -Name "ConfigureStartPins_WinningProvider" -Force -ErrorAction SilentlyContinue
                 }
             }
-            if (Test-Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid") {
-                Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid" -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid") {
+                Remove-Item -LiteralPath "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$provGuid" -Recurse -Force -ErrorAction SilentlyContinue
             }
-            if ($createdEnrollment -and (Test-Path $enrollmentPath)) {
-                Remove-Item -Path $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
+            if ($createdEnrollment -and (Test-Path -LiteralPath $enrollmentPath)) {
+                Remove-Item -LiteralPath $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
             }
             Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
             if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
@@ -834,15 +956,15 @@ function Clear-StartMenu {
             $UltixSync.Logs.Enqueue(" -> [7/7] Provisioning Default User profile LayoutModification.json...")
         }
         $defaultShellPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell"
-        if (-not (Test-Path -Path $defaultShellPath)) {
+        if (-not (Test-Path -LiteralPath $defaultShellPath)) {
             New-Item -Path $defaultShellPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
         }
 
         $defaultJsonPath = Join-Path -Path $defaultShellPath -ChildPath "LayoutModification.json"
-        Set-Content -Path $defaultJsonPath -Value $cleanPinsJson -Encoding UTF8 -Force -ErrorAction SilentlyContinue
+        Set-Content -LiteralPath $defaultJsonPath -Value $cleanPinsJson -Encoding UTF8 -Force -ErrorAction SilentlyContinue
 
         $defaultPkgPath = "$env:SystemDrive\Users\Default\AppData\Local\Packages"
-        if (Test-Path -Path $defaultPkgPath) {
+        if (Test-Path -LiteralPath $defaultPkgPath) {
             Get-ChildItem -Path $defaultPkgPath -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
                 Get-ChildItem -Path (Join-Path $_.FullName "LocalState") -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
             }
@@ -862,7 +984,7 @@ function Get-PowerDisplayState {
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
     # 1. System Hibernation (hiberfil.sys)
-    $hiberVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue).HibernateEnabled
+    $hiberVal = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue).HibernateEnabled
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Power: Disable Hibernation & Purge hiberfil.sys"
         IsDetected    = ($null -eq $hiberVal -or $hiberVal -ne 0)
@@ -919,12 +1041,12 @@ function Get-PowerDisplayState {
 
     # 7. Display Content Adaptive Brightness Control (CABC / Adaptive Dimming = 0)
     $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
-    $cabcReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
+    $cabcReg = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
     $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming)"
         IsDetected    = (-not $isCabcOpt)
-        ActionData    = @{ Type = "CABC"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "aded5e82-b909-4619-9949-f5d71dac0bcb" }
+        ActionData    = @{ Type = "CABC"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "aded5e82-b909-4619-9949-f5d71dac0bcb"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 1 }
     })
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
@@ -968,11 +1090,14 @@ function Invoke-ApplyPowerDisplay {
                 } elseif ($d.Type -eq "CABC") {
                     $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
                     if ($Op -eq 'Apply') {
-                        powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid 0 2>$null
-                        powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid 0 2>$null
-                        Set-ItemProperty -Path $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                        powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.OptAC 2>$null
+                        powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.OptDC 2>$null
+                        if (-not (Test-Path -LiteralPath $gfxKey)) { New-Item -Path $gfxKey -Force -ErrorAction SilentlyContinue | Out-Null }
+                        Set-ItemProperty -LiteralPath $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
                     } else {
-                        Remove-ItemProperty -Path $gfxKey -Name "DisableCABC" -Force -ErrorAction SilentlyContinue
+                        powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.DefAC 2>$null
+                        powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.DefDC 2>$null
+                        Remove-ItemProperty -LiteralPath $gfxKey -Name "DisableCABC" -Force -ErrorAction SilentlyContinue
                     }
                 }
             } catch {
@@ -1012,27 +1137,20 @@ function Initialize-Z3UI {
             [switch]$RefreshShell,
             [switch]$AuditOnly
         )
-        $auditData = & $ScannerFn
-        if ($AuditOnly) {
-            Write-GUI "--- AUDIT: $AuditHeader ---"
-            $detected = @($auditData | Where-Object { $_.IsDetected })
-            if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] To Optimize: $($d.UIDisplayName)" }
-            } else {
-                Write-GUI "  [OK] Optimized."
-            }
-            Write-GUI ""
-            return
-        }
-
-        $modalOutput = Show-ActionModal -Title $ModalTitle -Description "Select tweaks to apply or revert." -AuditResults $auditData -EnableRevert
-        if ($null -ne $modalOutput -and $null -ne $modalOutput.Items -and $modalOutput.Items.Count -gt 0) {
-            Invoke-ApplyRegistry -SelectedItems $modalOutput.Items -CategoryName $CategoryName -Operation $modalOutput.Action
-            if ($RefreshShell) {
-                Update-ShellEnvironment -ModifiedItems $modalOutput.Items
-            }
-            Write-GUI ""
-        }
+        Invoke-UltixAuditFlow `
+            -ScannerFunction $ScannerFn `
+            -AuditLabel $AuditHeader `
+            -ModalTitle $ModalTitle `
+            -ModalDescription "Select tweaks to apply or revert." `
+            -ExecutorFunction "Invoke-ApplyRegistry" `
+            -ExecutorExtraParams @{
+                CategoryName = $CategoryName
+                RefreshShell = $RefreshShell.IsPresent
+            } `
+            -ControlsToDisable $allTabButtons.ToArray() `
+            -AuditOnly:$AuditOnly.IsPresent `
+            -AuditPrefix "To Optimize" `
+            -EnableRevert
     }.GetNewClosure())
 
     # 1. Taskbar & Start Menu
@@ -1057,7 +1175,7 @@ function Initialize-Z3UI {
                 Write-GUI " -> Start Menu reset aborted by user.`n"
             }
         }.GetNewClosure()) `
-        -OnAudit ({ Invoke-StartMenuAudit; Write-GUI "" }.GetNewClosure())
+        -OnAudit ({ Invoke-StartMenuAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     # 3. File Explorer & Context Menu
     $rowExplorer = New-UltixActionRow -Parent $tabReg -Y 120 -MainRGB @(55, 58, 64) `

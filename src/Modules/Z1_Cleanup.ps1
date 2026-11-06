@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z1_CLEANUP.PS1 - CLEANUP MODULE (v3.1.0)
+# Z1_CLEANUP.PS1 - CLEANUP MODULE (v3.14)
 # Z1_Cleanup: Deep disk & orphan hygiene (WU/CBS cache, Temp/Dumps, 3rd-party/GPU shader caches, Event Logs, DriverStore OEM INF Sweeper, Windows Installer MSI/MSP Sweeper, Surgical Registry Orphan Sweeper, Ghost Services, and NTFS Recycle Bin).
 # ==========================================
 
@@ -50,7 +50,6 @@ function Get-CleanupState {
 
     if ($Category -eq "Temp") {
         $rules.Add(@{ UIDisplayName = "Windows System Temp"; Path = "$env:windir\Temp"; Paths = @("$env:windir\Temp"); Type = "Files" })
-        $rules.Add(@{ UIDisplayName = "Global User Temp"; Path = "$env:TEMP"; Paths = @("$env:TEMP"); Type = "Files" })
         $rules.Add(@{ UIDisplayName = "Windows Prefetch"; Path = "$env:windir\Prefetch"; Paths = @("$env:windir\Prefetch"); Type = "Files" })
         $rules.Add(@{ UIDisplayName = "WER Report Archive (Global)"; Path = "$env:ProgramData\Microsoft\Windows\WER\ReportArchive"; Paths = @("$env:ProgramData\Microsoft\Windows\WER\ReportArchive"); Type = "Files" })
         $rules.Add(@{ UIDisplayName = "WER Report Queue (Global)"; Path = "$env:ProgramData\Microsoft\Windows\WER\ReportQueue"; Paths = @("$env:ProgramData\Microsoft\Windows\WER\ReportQueue"); Type = "Files" })
@@ -62,10 +61,21 @@ function Get-CleanupState {
             $rules.Add(@{ UIDisplayName = "Minidump Files"; Path = "$env:windir\Minidump"; Paths = @("$env:windir\Minidump"); Type = "Files" })
         }
 
-        foreach ($prof in (Get-UltixUserProfiles)) {
+        $userProfiles    = @(Get-UltixUserProfiles)
+        $profileTempDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        foreach ($prof in $userProfiles) {
             $userName = $prof.UserName
             $base     = $prof.LocalPath
-            $rules.Add(@{ UIDisplayName = "User Temp ($userName)"; Path = "$base\AppData\Local\Temp"; Paths = @("$base\AppData\Local\Temp"); Type = "Files" })
+            $uTemp    = "$base\AppData\Local\Temp"
+
+            try {
+                [void]$profileTempDirs.Add([System.IO.Path]::GetFullPath($uTemp).TrimEnd('\'))
+            } catch {
+                [void]$profileTempDirs.Add($uTemp.TrimEnd('\'))
+            }
+
+            $rules.Add(@{ UIDisplayName = "User Temp ($userName)"; Path = $uTemp; Paths = @($uTemp); Type = "Files" })
             
             $userWerPaths = @(
                 "$base\AppData\Local\Microsoft\Windows\WER\ReportArchive",
@@ -73,6 +83,14 @@ function Get-CleanupState {
             )
             if ([System.IO.Directory]::Exists($userWerPaths[0]) -or [System.IO.Directory]::Exists($userWerPaths[1])) {
                 $rules.Add(@{ UIDisplayName = "User WER Reports ($userName)"; Path = $userWerPaths[0]; Paths = $userWerPaths; Type = "Files" })
+            }
+        }
+
+        # Only add $env:TEMP if it points to a custom non-profile path (e.g., RAMDisk or dedicated scratch volume)
+        if (-not [string]::IsNullOrWhiteSpace($env:TEMP)) {
+            $envTempNorm = try { [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') } catch { $env:TEMP.TrimEnd('\') }
+            if (-not $profileTempDirs.Contains($envTempNorm) -and [System.IO.Directory]::Exists($envTempNorm)) {
+                $rules.Add(@{ UIDisplayName = "Custom Environment Temp ($envTempNorm)"; Path = $envTempNorm; Paths = @($envTempNorm); Type = "Files" })
             }
         }
     }
@@ -90,33 +108,102 @@ function Get-CleanupState {
             @{ Name = "Vivaldi"; RelUserData = "AppData\Local\Vivaldi\User Data" }
         )
 
-        # Static single-path per-user caches
+        # Consolidated per-user app & GPU shader caches (only added if DetectDir or any cache path exists)
         $userCaches = @(
-            @{ Name = "Opera Cache";       Path = "AppData\Local\Opera Software\Opera Stable\Cache" }
-            @{ Name = "Opera Code";        Path = "AppData\Local\Opera Software\Opera Stable\Code Cache" }
-            @{ Name = "Opera GPU";         Path = "AppData\Local\Opera Software\Opera Stable\GPUCache" }
-            @{ Name = "Opera GX Cache";    Path = "AppData\Local\Opera Software\Opera GX Stable\Cache" }
-            @{ Name = "Opera GX Code";     Path = "AppData\Local\Opera Software\Opera GX Stable\Code Cache" }
-            @{ Name = "Opera GX GPU";      Path = "AppData\Local\Opera Software\Opera GX Stable\GPUCache" }
-            @{ Name = "Discord Cache";     Path = "AppData\Roaming\discord\Cache" }
-            @{ Name = "Discord Code";      Path = "AppData\Roaming\discord\Code Cache" }
-            @{ Name = "Discord GPU";       Path = "AppData\Roaming\discord\GPUCache" }
-            @{ Name = "Steam HTML";        Path = "AppData\Local\Steam\htmlcache" }
-            @{ Name = "Epic Games Web";    Path = "AppData\Local\EpicGamesLauncher\Saved\webcache" }
-            @{ Name = "Epic Games Http";   Path = "AppData\Local\EpicGamesLauncher\Saved\HttpCache" }
-            @{ Name = "Spotify Data";      Path = "AppData\Local\Spotify\Data" }
-            @{ Name = "Spotify Browser";   Path = "AppData\Local\Spotify\Browser\Cache" }
-            @{ Name = "Deezer";            Path = "AppData\Roaming\deezer-desktop\Cache" }
-            @{ Name = "VLC Art";           Path = "AppData\Roaming\vlc\art" }
-            @{ Name = "DirectX D3DSCache"; Path = "AppData\Local\D3DSCache" }
-            @{ Name = "NVIDIA DXCache";    Path = "AppData\Local\NVIDIA\DXCache" }
-            @{ Name = "NVIDIA GLCache";    Path = "AppData\Local\NVIDIA\GLCache" }
-            @{ Name = "AMD DxCache";       Path = "AppData\Local\AMD\DxCache" }
+            @{
+                Name      = "Opera Cache"
+                DetectDir = "AppData\Local\Opera Software\Opera Stable"
+                RelPaths  = @(
+                    "AppData\Local\Opera Software\Opera Stable\Cache",
+                    "AppData\Local\Opera Software\Opera Stable\Cache\Cache_Data",
+                    "AppData\Local\Opera Software\Opera Stable\Network\Cache",
+                    "AppData\Local\Opera Software\Opera Stable\Code Cache",
+                    "AppData\Local\Opera Software\Opera Stable\GPUCache"
+                )
+            }
+            @{
+                Name      = "Opera GX Cache"
+                DetectDir = "AppData\Local\Opera Software\Opera GX Stable"
+                RelPaths  = @(
+                    "AppData\Local\Opera Software\Opera GX Stable\Cache",
+                    "AppData\Local\Opera Software\Opera GX Stable\Cache\Cache_Data",
+                    "AppData\Local\Opera Software\Opera GX Stable\Network\Cache",
+                    "AppData\Local\Opera Software\Opera GX Stable\Code Cache",
+                    "AppData\Local\Opera Software\Opera GX Stable\GPUCache"
+                )
+            }
+            @{
+                Name      = "Discord Cache"
+                DetectDir = "AppData\Roaming\discord"
+                RelPaths  = @(
+                    "AppData\Roaming\discord\Cache",
+                    "AppData\Roaming\discord\Cache\Cache_Data",
+                    "AppData\Roaming\discord\Code Cache",
+                    "AppData\Roaming\discord\GPUCache"
+                )
+            }
+            @{
+                Name      = "Steam HTML Cache"
+                DetectDir = "AppData\Local\Steam"
+                RelPaths  = @("AppData\Local\Steam\htmlcache")
+            }
+            @{
+                Name      = "Epic Games Cache"
+                DetectDir = "AppData\Local\EpicGamesLauncher"
+                RelPaths  = @(
+                    "AppData\Local\EpicGamesLauncher\Saved\webcache",
+                    "AppData\Local\EpicGamesLauncher\Saved\webcache_4430",
+                    "AppData\Local\EpicGamesLauncher\Saved\HttpCache"
+                )
+            }
+            @{
+                Name      = "Spotify Cache"
+                DetectDir = "AppData\Local\Spotify"
+                RelPaths  = @(
+                    "AppData\Local\Spotify\Data",
+                    "AppData\Local\Spotify\Browser\Cache"
+                )
+            }
+            @{
+                Name      = "Deezer Cache"
+                DetectDir = "AppData\Roaming\deezer-desktop"
+                RelPaths  = @("AppData\Roaming\deezer-desktop\Cache")
+            }
+            @{
+                Name      = "VLC Art Cache"
+                DetectDir = "AppData\Roaming\vlc"
+                RelPaths  = @("AppData\Roaming\vlc\art")
+            }
+            @{
+                Name      = "DirectX D3DSCache"
+                DetectDir = "AppData\Local\D3DSCache"
+                RelPaths  = @("AppData\Local\D3DSCache")
+            }
+            @{
+                Name      = "NVIDIA DX & GL Shader Cache"
+                DetectDir = "AppData\Local\NVIDIA"
+                RelPaths  = @(
+                    "AppData\Local\NVIDIA\DXCache",
+                    "AppData\LocalLow\NVIDIA\PerDriverVersion\DXCache",
+                    "AppData\Local\NVIDIA\GLCache",
+                    "AppData\Roaming\NVIDIA\ComputeCache"
+                )
+            }
+            @{
+                Name      = "AMD DX & Vulkan Shader Cache"
+                DetectDir = "AppData\Local\AMD"
+                RelPaths  = @(
+                    "AppData\Local\AMD\DxCache",
+                    "AppData\Local\AMD\DxcCache",
+                    "AppData\Local\AMD\VkCache",
+                    "AppData\Local\AMD\GLCache"
+                )
+            }
         )
 
         $globalCaches = @(
-            @{ Name = "Battle.net"; Path = "$env:ProgramData\Battle.net\Cache" }
-            @{ Name = "GOG Galaxy"; Path = "$env:ProgramData\GOG.com\Galaxy\webcache" }
+            @{ Name = "Battle.net"; DetectDir = "$env:ProgramData\Battle.net";     Path = "$env:ProgramData\Battle.net\Cache" }
+            @{ Name = "GOG Galaxy"; DetectDir = "$env:ProgramData\GOG.com\Galaxy"; Path = "$env:ProgramData\GOG.com\Galaxy\webcache" }
         )
 
         # Dynamic profile resolution via Core_Helpers Get-UltixUserProfiles (Zero hardcoded C:\Users)
@@ -124,48 +211,84 @@ function Get-CleanupState {
             $usr  = $prof.UserName
             $base = $prof.LocalPath
 
-            # 1. Multi-profile Chromium enumeration (Default + Profile *)
+            # 1. Multi-profile Chromium enumeration (only when browser User Data exists)
             foreach ($browser in $chromiumBrowsers) {
                 $userDataDir = Join-Path -Path $base -ChildPath $browser.RelUserData
-                if ([System.IO.Directory]::Exists($userDataDir)) {
-                    $profDirs = @(Get-ChildItem -LiteralPath $userDataDir -Directory -Force -ErrorAction SilentlyContinue |
-                        Where-Object { $_.Name -eq "Default" -or $_.Name -like "Profile *" })
+                if (-not [System.IO.Directory]::Exists($userDataDir)) { continue }
 
-                    if ($profDirs.Count -gt 0) {
-                        foreach ($profDir in $profDirs) {
-                            $pName = $profDir.Name
-                            $pFull = $profDir.FullName
-                            $rules.Add(@{ UIDisplayName = "$($browser.Name) Cache ($usr - $pName)";      Path = "$pFull\Cache";      Paths = @("$pFull\Cache");      Type = "Files" })
-                            $rules.Add(@{ UIDisplayName = "$($browser.Name) Code Cache ($usr - $pName)"; Path = "$pFull\Code Cache"; Paths = @("$pFull\Code Cache"); Type = "Files" })
-                            $rules.Add(@{ UIDisplayName = "$($browser.Name) GPUCache ($usr - $pName)";   Path = "$pFull\GPUCache";   Paths = @("$pFull\GPUCache");   Type = "Files" })
+                $profDirs = @(Get-ChildItem -LiteralPath $userDataDir -Directory -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq "Default" -or $_.Name -like "Profile *" })
+
+                if ($profDirs.Count -gt 0) {
+                    $isFirstProf = $true
+                    foreach ($profDir in $profDirs) {
+                        $pName = $profDir.Name
+                        $pFull = $profDir.FullName
+                        $cPaths = [System.Collections.Generic.List[string]]::new()
+                        foreach ($relSub in @("Cache", "Network\Cache", "Code Cache", "GPUCache", "Service Worker\CacheStorage", "Service Worker\ScriptCache")) {
+                            $cPaths.Add("$pFull\$relSub")
                         }
-                    } else {
-                        $rules.Add(@{ UIDisplayName = "$($browser.Name) Cache ($usr)"; Path = "$userDataDir\Default\Cache"; Paths = @("$userDataDir\Default\Cache"); Type = "Files" })
+                        if ($isFirstProf) {
+                            $cPaths.Add("$userDataDir\ShaderCache")
+                            $cPaths.Add("$userDataDir\GrShaderCache")
+                            $isFirstProf = $false
+                        }
+                        $rules.Add(@{
+                            UIDisplayName = "$($browser.Name) Cache ($usr - $pName)"
+                            Path          = "$pFull\Cache"
+                            Paths         = @($cPaths)
+                            Type          = "Files"
+                        })
                     }
-                } else {
-                    $rules.Add(@{ UIDisplayName = "$($browser.Name) Cache ($usr)"; Path = "$userDataDir\Default\Cache"; Paths = @("$userDataDir\Default\Cache"); Type = "Files" })
                 }
             }
 
-            # 2. Standard per-user app & shader caches
+            # 2. Consolidated per-user app & GPU shader caches (filtered by installation presence)
             foreach ($app in $userCaches) {
-                $fullAppPath = "$base\$($app.Path)"
-                $rules.Add(@{ UIDisplayName = "$($app.Name) ($usr)"; Path = $fullAppPath; Paths = @($fullAppPath); Type = "Files" })
+                $detectFull = Join-Path -Path $base -ChildPath $app.DetectDir
+                $fullPaths  = @($app.RelPaths | ForEach-Object { Join-Path -Path $base -ChildPath $_ })
+
+                $isInstalled = [System.IO.Directory]::Exists($detectFull)
+                if (-not $isInstalled) {
+                    foreach ($fp in $fullPaths) {
+                        if ([System.IO.Directory]::Exists($fp)) { $isInstalled = $true; break }
+                    }
+                }
+
+                if ($isInstalled) {
+                    $rules.Add(@{
+                        UIDisplayName = "$($app.Name) ($usr)"
+                        Path          = $fullPaths[0]
+                        Paths         = $fullPaths
+                        Type          = "Files"
+                    })
+                }
             }
             
-            # 3. Firefox multi-profile enumeration
+            # 3. Firefox multi-profile enumeration (consolidated per profile)
             $ffProfilesPath = "$base\AppData\Local\Mozilla\Firefox\Profiles"
             if ([System.IO.Directory]::Exists($ffProfilesPath)) {
-                $ffFolders = Get-ChildItem -LiteralPath $ffProfilesPath -Directory -Force -ErrorAction SilentlyContinue
+                $ffFolders = @(Get-ChildItem -LiteralPath $ffProfilesPath -Directory -Force -ErrorAction SilentlyContinue)
                 foreach ($ff in $ffFolders) {
-                    $rules.Add(@{ UIDisplayName = "Firefox Cache ($usr - $($ff.Name))";   Path = "$($ff.FullName)\cache2";       Paths = @("$($ff.FullName)\cache2");       Type = "Files" })
-                    $rules.Add(@{ UIDisplayName = "Firefox Startup ($usr - $($ff.Name))"; Path = "$($ff.FullName)\startupCache"; Paths = @("$($ff.FullName)\startupCache"); Type = "Files" })
+                    $ffPaths = @(
+                        "$($ff.FullName)\cache2",
+                        "$($ff.FullName)\startupCache",
+                        "$($ff.FullName)\jumpListCache"
+                    )
+                    $rules.Add(@{
+                        UIDisplayName = "Firefox Cache ($usr - $($ff.Name))"
+                        Path          = $ffPaths[0]
+                        Paths         = $ffPaths
+                        Type          = "Files"
+                    })
                 }
             }
         }
 
         foreach ($app in $globalCaches) {
-            $rules.Add(@{ UIDisplayName = "$($app.Name) Cache (Global)"; Path = $app.Path; Paths = @($app.Path); Type = "Files" })
+            if ([System.IO.Directory]::Exists($app.DetectDir) -or [System.IO.Directory]::Exists($app.Path)) {
+                $rules.Add(@{ UIDisplayName = "$($app.Name) Cache (Global)"; Path = $app.Path; Paths = @($app.Path); Type = "Files" })
+            }
         }
     }
 
@@ -300,13 +423,14 @@ function Invoke-InteractiveCleanup {
                             }
                         }
 
+                        # Release CBS.log file handle held by background TiWorker.exe process
+                        if ($svcGroup -eq "CBS") {
+                            Stop-Process -Name "TiWorker" -Force -ErrorAction SilentlyContinue
+                            Start-Sleep -Milliseconds 300
+                        }
+
                         foreach ($tPath in $targetPaths) {
                             if ([string]::IsNullOrWhiteSpace($tPath) -or -not (Test-Path -LiteralPath $tPath)) { continue }
-
-                            if ($servicesToManage.Count -gt 0) {
-                                & takeown.exe /F "$tPath\*" /R /A /D Y 2>$null | Out-Null
-                                & icacls.exe "$tPath\*" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
-                            }
 
                             if (Test-Path -LiteralPath $tPath -PathType Leaf) {
                                 Remove-Item -LiteralPath $tPath -Force -ErrorAction SilentlyContinue
@@ -356,63 +480,111 @@ function Get-DriverStoreOrphans_Worker {
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 30 }
 
-    # 2. Cross-check all buses in HKLM:\SYSTEM\CurrentControlSet\Enum (including ROOT, SWD, USB, PCI, HID)
+    # 2. Fast native Win32 Registry traversal across HKLM\SYSTEM\CurrentControlSet\Enum (ROOT, SWD, USB, PCI, HID)
     $boundDeviceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $enumBase = "HKLM:\SYSTEM\CurrentControlSet\Enum"
-    if (Test-Path -LiteralPath $enumBase) {
-        foreach ($busKey in (Get-ChildItem -LiteralPath $enumBase -ErrorAction SilentlyContinue)) {
-            foreach ($devKey in (Get-ChildItem -LiteralPath $busKey.PSPath -ErrorAction SilentlyContinue)) {
-                foreach ($instKey in (Get-ChildItem -LiteralPath $devKey.PSPath -ErrorAction SilentlyContinue)) {
-                    $drvLink = (Get-ItemProperty -LiteralPath $instKey.PSPath -Name "Driver" -ErrorAction SilentlyContinue).Driver
-                    if (-not [string]::IsNullOrWhiteSpace($drvLink)) {
-                        [void]$boundDeviceIds.Add($drvLink)
+    $enumRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum", $false)
+    if ($null -ne $enumRoot) {
+        try {
+            foreach ($busName in $enumRoot.GetSubKeyNames()) {
+                $busKey = $enumRoot.OpenSubKey($busName, $false)
+                if ($null -eq $busKey) { continue }
+                try {
+                    foreach ($devName in $busKey.GetSubKeyNames()) {
+                        $devKey = $busKey.OpenSubKey($devName, $false)
+                        if ($null -eq $devKey) { continue }
+                        try {
+                            foreach ($instName in $devKey.GetSubKeyNames()) {
+                                $instKey = $devKey.OpenSubKey($instName, $false)
+                                if ($null -eq $instKey) { continue }
+                                try {
+                                    $drvLink = [string]$instKey.GetValue("Driver", "")
+                                    if (-not [string]::IsNullOrWhiteSpace($drvLink)) {
+                                        [void]$boundDeviceIds.Add($drvLink)
+                                    }
+                                } finally {
+                                    $instKey.Dispose()
+                                }
+                            }
+                        } finally {
+                            $devKey.Dispose()
+                        }
                     }
+                } finally {
+                    $busKey.Dispose()
                 }
             }
+        } finally {
+            $enumRoot.Dispose()
         }
     }
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 45 }
 
     # 3. Inspect Control\Class bindings + unconditionally lock active Extension & SoftwareComponent classes
-    $alwaysLockClasses = @(
-        "{e2f84ce7-8efa-411c-aa69-97454ca4cb57}", # Extension INF Class (e.g. lgmonitorappextension, rzs3ext)
-        "{5c4c3332-344d-483c-8739-259e934c9cc8}"  # SoftwareComponent Class
-    )
-    $classRoot = "HKLM:\SYSTEM\CurrentControlSet\Control\Class"
-    foreach ($clsKey in (Get-ChildItem -LiteralPath $classRoot -ErrorAction SilentlyContinue)) {
-        $clsGuid = $clsKey.PSChildName
-        $isAlwaysLockedClass = ($alwaysLockClasses -contains $clsGuid)
-        foreach ($subKey in (Get-ChildItem -LiteralPath $clsKey.PSPath -ErrorAction SilentlyContinue)) {
-            if ($subKey.PSChildName -notmatch '^\d{4}$') { continue }
-            $infPath = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "InfPath" -ErrorAction SilentlyContinue).InfPath
-            if ($infPath -match '^(?i)(oem\d+\.inf)$') {
-                $relDrv = "$clsGuid\$($subKey.PSChildName)"
-                if ($isAlwaysLockedClass -or $boundDeviceIds.Contains($relDrv)) {
-                    [void]$activeOemInfs.Add($matches[1].ToLowerInvariant())
+    $alwaysLockClasses = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    [void]$alwaysLockClasses.Add("{e2f84ce7-8efa-411c-aa69-97454ca4cb57}") # Extension INF Class
+    [void]$alwaysLockClasses.Add("{5c4c3332-344d-483c-8739-259e934c9cc8}") # SoftwareComponent Class
+
+    $classRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Class", $false)
+    if ($null -ne $classRoot) {
+        try {
+            foreach ($clsGuid in $classRoot.GetSubKeyNames()) {
+                $clsKey = $classRoot.OpenSubKey($clsGuid, $false)
+                if ($null -eq $clsKey) { continue }
+                try {
+                    $isAlwaysLockedClass = $alwaysLockClasses.Contains($clsGuid)
+                    foreach ($subName in $clsKey.GetSubKeyNames()) {
+                        if ($subName -notmatch '^\d{4}$') { continue }
+                        $subKey = $clsKey.OpenSubKey($subName, $false)
+                        if ($null -eq $subKey) { continue }
+                        try {
+                            $infPath = [string]$subKey.GetValue("InfPath", "")
+                            if ($infPath -match '^(?i)(oem\d+\.inf)$') {
+                                $relDrv = "$clsGuid\$subName"
+                                if ($isAlwaysLockedClass -or $boundDeviceIds.Contains($relDrv)) {
+                                    [void]$activeOemInfs.Add($matches[1].ToLowerInvariant())
+                                }
+                            }
+                        } finally {
+                            $subKey.Dispose()
+                        }
+                    }
+                } finally {
+                    $clsKey.Dispose()
                 }
             }
+        } finally {
+            $classRoot.Dispose()
         }
     }
 
     if ($null -ne $UltixSync) { $UltixSync.Progress = 60 }
 
-    # 4. Map oemXX.inf -> FileRepository folder paths via HKLM:\SYSTEM\DriverDatabase\DriverPackages + directory fallback
+    # 4. Map oemXX.inf -> FileRepository folder paths via HKLM\SYSTEM\DriverDatabase\DriverPackages + directory fallback
     $repoBase  = "$env:SystemRoot\System32\DriverStore\FileRepository"
     $oemToRepo = @{}
-    $drvDbPath = "HKLM:\SYSTEM\DriverDatabase\DriverPackages"
-    if (Test-Path -LiteralPath $drvDbPath) {
-        foreach ($pkgKey in (Get-ChildItem -LiteralPath $drvDbPath -ErrorAction SilentlyContinue)) {
-            try {
-                $oemVal = [string]$pkgKey.GetValue("")
-                if ($oemVal -match '^(?i)(oem\d+\.inf)$') {
-                    $oemToRepo[$matches[1].ToLowerInvariant()] = Join-Path $repoBase $pkgKey.PSChildName
+    $drvDbRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\DriverDatabase\DriverPackages", $false)
+    if ($null -ne $drvDbRoot) {
+        try {
+            foreach ($pkgName in $drvDbRoot.GetSubKeyNames()) {
+                $pkgKey = $drvDbRoot.OpenSubKey($pkgName, $false)
+                if ($null -eq $pkgKey) { continue }
+                try {
+                    $oemVal = [string]$pkgKey.GetValue("", "")
+                    if ($oemVal -match '^(?i)(oem\d+\.inf)$') {
+                        $oemToRepo[$matches[1].ToLowerInvariant()] = Join-Path $repoBase $pkgName
+                    }
+                } catch {
+                } finally {
+                    $pkgKey.Dispose()
                 }
-            } catch { }
+            }
+        } finally {
+            $drvDbRoot.Dispose()
         }
     }
 
-    # 5. Parse pnputil.exe /enum-drivers in a 100% locale-independent positional manner
+    # 5. Parse pnputil.exe /enum-drivers in a 100% locale-independent manner (supports MM/dd/yyyy, dd.MM.yyyy, yyyy-MM-dd)
     $rawPnp = (pnputil.exe /enum-drivers 2>$null) -join "`n"
     $blocks = $rawPnp -split "(?:\r?\n){2,}"
     $parsedDrivers = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -423,18 +595,22 @@ function Get-DriverStoreOrphans_Worker {
 
         $lines = @($blk -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match ':' })
         $origInf   = "Unknown.inf"
-        $provider  = "Unknown"
-        $className = "System"
+        $provider  = ""
+        $className = ""
         $verDate   = "N/A"
 
         foreach ($ln in $lines) {
             $val = ($ln -split ':\s*', 2)[1].Trim()
-            if ($val -eq $oemInf) { continue }
+            if ([string]::IsNullOrWhiteSpace($val) -or $val -eq $oemInf) { continue }
+            elseif ($val -match '^\{[0-9a-fA-F\-]{36}\}$') { continue }
             elseif ($origInf -eq "Unknown.inf" -and $val -match '(?i)^[a-z0-9_\-\.]+\.inf$') { $origInf = $val }
-            elseif ($val -match '^\d{2}/\d{2}/\d{4}\s+[\d\.]+$') { $verDate = $val }
-            elseif ($provider -eq "Unknown") { $provider = $val }
-            elseif ($className -eq "System") { $className = $val }
+            elseif ($val -match '^\d{1,4}[/\.\-]\d{1,2}[/\.\-]\d{1,4}\s+[\d\.]+$') { $verDate = $val }
+            elseif ([string]::IsNullOrEmpty($provider))  { $provider  = $val }
+            elseif ([string]::IsNullOrEmpty($className)) { $className = $val }
         }
+
+        if ([string]::IsNullOrEmpty($provider))  { $provider  = "Unknown" }
+        if ([string]::IsNullOrEmpty($className)) { $className = "System" }
 
         $repoDir = $oemToRepo[$oemInf]
         if ([string]::IsNullOrWhiteSpace($repoDir) -and $origInf -ne "Unknown.inf") {
@@ -563,53 +739,93 @@ function Get-InstallerOrphans_Worker {
     $installerDir = "$env:windir\Installer"
     if (-not [System.IO.Directory]::Exists($installerDir)) { return @() }
 
-    # 1. Build map of all active .msi / .msp LocalPackage paths referenced by installed products & patches
+    # 1. Build map of all active .msi / .msp LocalPackage paths via native Win32 Registry API
     $activePackages = @{}
     $patchLookup    = @{}
     $activePatchIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    $userDataRoot = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData"
-    if (Test-Path -LiteralPath $userDataRoot) {
-        foreach ($sidKey in (Get-ChildItem -LiteralPath $userDataRoot -ErrorAction SilentlyContinue)) {
-            # Collect registered patches metadata first
-            $patchesRoot = "$($sidKey.PSPath)\Patches"
-            if (Test-Path -LiteralPath $patchesRoot) {
-                foreach ($pKey in (Get-ChildItem -LiteralPath $patchesRoot -ErrorAction SilentlyContinue)) {
-                    $pProps = Get-ItemProperty -LiteralPath $pKey.PSPath -Name "LocalPackage", "DisplayName" -ErrorAction SilentlyContinue
-                    if ($null -ne $pProps -and -not [string]::IsNullOrWhiteSpace($pProps.LocalPackage)) {
-                        $patchLookup[$pKey.PSChildName] = [PSCustomObject]@{
-                            Path = $pProps.LocalPackage.Trim()
-                            Name = if ($pProps.DisplayName) { $pProps.DisplayName } else { "Registered OS/App Patch" }
+    $userDataRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData", $false)
+    if ($null -ne $userDataRoot) {
+        try {
+            foreach ($sidName in $userDataRoot.GetSubKeyNames()) {
+                $sidKey = $userDataRoot.OpenSubKey($sidName, $false)
+                if ($null -eq $sidKey) { continue }
+                try {
+                    # Collect registered patches metadata first
+                    $patchesKey = $sidKey.OpenSubKey("Patches", $false)
+                    if ($null -ne $patchesKey) {
+                        try {
+                            foreach ($patchId in $patchesKey.GetSubKeyNames()) {
+                                $pKey = $patchesKey.OpenSubKey($patchId, $false)
+                                if ($null -eq $pKey) { continue }
+                                try {
+                                    $lp = [string]$pKey.GetValue("LocalPackage", "")
+                                    if (-not [string]::IsNullOrWhiteSpace($lp)) {
+                                        $dn = [string]$pKey.GetValue("DisplayName", "")
+                                        $patchLookup[$patchId] = [PSCustomObject]@{
+                                            Path = $lp.Trim()
+                                            Name = if (-not [string]::IsNullOrWhiteSpace($dn)) { $dn } else { "Registered OS/App Patch" }
+                                        }
+                                    }
+                                } finally {
+                                    $pKey.Dispose()
+                                }
+                            }
+                        } finally {
+                            $patchesKey.Dispose()
                         }
                     }
+
+                    # Collect installed products and their active patch bindings
+                    $prodsKey = $sidKey.OpenSubKey("Products", $false)
+                    if ($null -ne $prodsKey) {
+                        try {
+                            foreach ($prodGuid in $prodsKey.GetSubKeyNames()) {
+                                $prodKey = $prodsKey.OpenSubKey($prodGuid, $false)
+                                if ($null -eq $prodKey) { continue }
+                                try {
+                                    $instPropKey = $prodKey.OpenSubKey("InstallProperties", $false)
+                                    if ($null -ne $instPropKey) {
+                                        try {
+                                            $lp = [string]$instPropKey.GetValue("LocalPackage", "")
+                                            if (-not [string]::IsNullOrWhiteSpace($lp)) {
+                                                $dn   = [string]$instPropKey.GetValue("DisplayName", "")
+                                                $pub  = [string]$instPropKey.GetValue("Publisher", "")
+                                                $leaf = [System.IO.Path]::GetFileName($lp.Trim()).ToLowerInvariant()
+                                                $activePackages[$leaf] = [PSCustomObject]@{
+                                                    ProductName = if (-not [string]::IsNullOrWhiteSpace($dn))  { $dn }  else { "Installed MSI Product" }
+                                                    Publisher   = if (-not [string]::IsNullOrWhiteSpace($pub)) { $pub } else { "Microsoft / OEM" }
+                                                }
+                                            }
+                                        } finally {
+                                            $instPropKey.Dispose()
+                                        }
+                                    }
+
+                                    $prodPatchesKey = $prodKey.OpenSubKey("Patches", $false)
+                                    if ($null -ne $prodPatchesKey) {
+                                        try {
+                                            foreach ($boundPatchId in $prodPatchesKey.GetSubKeyNames()) {
+                                                [void]$activePatchIds.Add($boundPatchId)
+                                            }
+                                        } finally {
+                                            $prodPatchesKey.Dispose()
+                                        }
+                                    }
+                                } finally {
+                                    $prodKey.Dispose()
+                                }
+                            }
+                        } finally {
+                            $prodsKey.Dispose()
+                        }
+                    }
+                } finally {
+                    $sidKey.Dispose()
                 }
             }
-
-            # Collect installed products and their active patch bindings
-            $prodsRoot = "$($sidKey.PSPath)\Products"
-            if (Test-Path -LiteralPath $prodsRoot) {
-                foreach ($prodKey in (Get-ChildItem -LiteralPath $prodsRoot -ErrorAction SilentlyContinue)) {
-                    $instPropPath = "$($prodKey.PSPath)\InstallProperties"
-                    $props = Get-ItemProperty -LiteralPath $instPropPath -Name "LocalPackage", "DisplayName", "Publisher", "DisplayVersion" -ErrorAction SilentlyContinue
-                    $prodName = if ($props.DisplayName) { [string]$props.DisplayName } else { "Installed MSI Product" }
-                    $prodPub  = if ($props.Publisher)   { [string]$props.Publisher }   else { "Microsoft / OEM" }
-
-                    if ($null -ne $props -and -not [string]::IsNullOrWhiteSpace($props.LocalPackage)) {
-                        $leaf = [System.IO.Path]::GetFileName($props.LocalPackage).ToLowerInvariant()
-                        $activePackages[$leaf] = [PSCustomObject]@{
-                            ProductName = $prodName
-                            Publisher   = $prodPub
-                        }
-                    }
-
-                    $prodPatchesPath = "$($prodKey.PSPath)\Patches"
-                    if (Test-Path -LiteralPath $prodPatchesPath) {
-                        foreach ($ppKey in (Get-ChildItem -LiteralPath $prodPatchesPath -ErrorAction SilentlyContinue)) {
-                            [void]$activePatchIds.Add($ppKey.PSChildName)
-                        }
-                    }
-                }
-            }
+        } finally {
+            $userDataRoot.Dispose()
         }
     }
 
@@ -626,20 +842,33 @@ function Get-InstallerOrphans_Worker {
         }
     }
 
-    # Cross-check standard Uninstall keys for any direct LocalPackage references
-    foreach ($uninstRoot in @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
-        if (-not (Test-Path -LiteralPath $uninstRoot)) { continue }
-        foreach ($uKey in (Get-ChildItem -LiteralPath $uninstRoot -ErrorAction SilentlyContinue)) {
-            $uProps = Get-ItemProperty -LiteralPath $uKey.PSPath -Name "LocalPackage", "DisplayName", "Publisher" -ErrorAction SilentlyContinue
-            if ($null -ne $uProps -and -not [string]::IsNullOrWhiteSpace($uProps.LocalPackage)) {
-                $leaf = [System.IO.Path]::GetFileName($uProps.LocalPackage).ToLowerInvariant()
-                if (-not $activePackages.ContainsKey($leaf)) {
-                    $activePackages[$leaf] = [PSCustomObject]@{
-                        ProductName = if ($uProps.DisplayName) { $uProps.DisplayName } else { $uKey.PSChildName }
-                        Publisher   = if ($uProps.Publisher)   { $uProps.Publisher }   else { "Installed App" }
+    # Cross-check standard Uninstall keys (x64 & WOW6432Node) via native Registry API
+    foreach ($uninstSubPath in @("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
+        $uninstRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($uninstSubPath, $false)
+        if ($null -eq $uninstRoot) { continue }
+        try {
+            foreach ($uName in $uninstRoot.GetSubKeyNames()) {
+                $uKey = $uninstRoot.OpenSubKey($uName, $false)
+                if ($null -eq $uKey) { continue }
+                try {
+                    $lp = [string]$uKey.GetValue("LocalPackage", "")
+                    if (-not [string]::IsNullOrWhiteSpace($lp)) {
+                        $leaf = [System.IO.Path]::GetFileName($lp.Trim()).ToLowerInvariant()
+                        if (-not $activePackages.ContainsKey($leaf)) {
+                            $dn  = [string]$uKey.GetValue("DisplayName", "")
+                            $pub = [string]$uKey.GetValue("Publisher", "")
+                            $activePackages[$leaf] = [PSCustomObject]@{
+                                ProductName = if (-not [string]::IsNullOrWhiteSpace($dn))  { $dn }  else { $uName }
+                                Publisher   = if (-not [string]::IsNullOrWhiteSpace($pub)) { $pub } else { "Installed App" }
+                            }
+                        }
                     }
+                } finally {
+                    $uKey.Dispose()
                 }
             }
+        } finally {
+            $uninstRoot.Dispose()
         }
     }
 
@@ -1021,21 +1250,35 @@ function Get-RegistryOrphans_Worker {
         foreach ($sub in (Get-ChildItem -LiteralPath $apRoot -ErrorAction SilentlyContinue)) {
             try {
                 $defVal = [string]$sub.GetValue("")
-                if (-not [string]::IsNullOrWhiteSpace($defVal) -and (Test-IsOrphanedDiskPath -RawPath $defVal)) {
+                if ([string]::IsNullOrWhiteSpace($defVal)) { continue }
+
+                $exePath = [System.Environment]::ExpandEnvironmentVariables($defVal.Trim()).Trim()
+                if ($exePath -match '^"([^"]+)"') {
+                    $exePath = $matches[1]
+                } elseif ($exePath -match '(?i)^(.+?\.(?:exe|com|bat|cmd|msc))(?:$|\s)') {
+                    $exePath = $matches[1]
+                } else {
+                    $exePath = $exePath.Trim('"')
+                }
+
+                if (Test-IsOrphanedDiskPath -RawPath $exePath) {
                     $orphans.Add([PSCustomObject]@{
                         Category      = "[App Paths]"
                         TargetName    = $sub.PSChildName
-                        MissingPath   = $defVal.Trim('"')
+                        MissingPath   = $exePath
                         RegPath       = $sub.PSPath
                         ValueName     = "(Default)"
                         RawValueData  = $defVal
                         ValueKind     = "String"
                         EntryType     = "SubKey"
                         IsDetected    = $true
-                        UIDisplayName = "[App Paths] $($sub.PSChildName) -> $defVal"
+                        UIDisplayName = "[App Paths] $($sub.PSChildName) -> $exePath"
                     })
                 }
-            } catch { }
+            } catch {
+            } finally {
+                $sub.Dispose()
+            }
         }
     }
 
@@ -1077,37 +1320,46 @@ function Show-RegistryOrphanSweeper {
             return
         }
 
-        $backupFile = "$env:LOCALAPPDATA\WinUltix\RegOrphans_LastBackup.json"
-        $hasBackup  = (Test-Path -LiteralPath $backupFile)
-
-        if ($orphans.Count -eq 0 -and -not $hasBackup) {
-            Write-GUI "  [OK] Registry is completely clean. Zero orphaned path references found.`n"
-            return
-        }
-
         $cols = @(
             @{ Header = "Category";            Property = "Category";    Width = 145 }
             @{ Header = "Application / Entry"; Property = "TargetName";  Width = 210 }
             @{ Header = "Missing Disk Path";   Property = "MissingPath"; Width = 500 }
         )
 
-        $secBtn = if ($hasBackup) { "Restore Last Backup (JSON)" } else { "" }
-
         $res = Show-UltixGridModal -Title "WinUltix - Surgical Registry Orphan Sweeper ($($orphans.Count) Orphans)" `
-            -Description "100% path-verified registry orphans left behind by uninstalled apps/games. Click 'Restore Last Backup' at any time to undo." `
-            -Data $orphans -Columns $cols -PrimaryButtonText "Purge Selected Orphans" -SecondaryButtonText $secBtn -SecondaryAlwaysEnabled:$hasBackup
+            -Description "100% path-verified registry orphans left behind by uninstalled apps/games. You will choose where to save the JSON backup before purging, or click 'Restore Backup (JSON)...' to import an existing backup." `
+            -Data $orphans -Columns $cols -PrimaryButtonText "Purge Selected Orphans..." -SecondaryButtonText "Restore Backup (JSON)..." -SecondaryAlwaysEnabled
 
         if ($null -eq $res) {
             Write-GUI " -> Registry orphan sweep cancelled.`n"
             return
         }
 
-        if ($res.Action -eq "Secondary" -and (Test-Path -LiteralPath $backupFile)) {
+        if ($res.Action -eq "Secondary") {
+            $ofd = New-Object System.Windows.Forms.OpenFileDialog
+            $ofd.Filter = "WinUltix Registry Backup (*.json)|*.json"
+            $ofd.Title = "Select Registry Orphans JSON Backup to Restore"
+            $ofd.InitialDirectory = [Environment]::GetFolderPath("Desktop")
+
+            $selectedBackup = $null
+            try {
+                if ($ofd.ShowDialog($global:form) -eq [System.Windows.Forms.DialogResult]::OK) {
+                    $selectedBackup = $ofd.FileName
+                }
+            } finally {
+                $ofd.Dispose()
+            }
+
+            if ([string]::IsNullOrWhiteSpace($selectedBackup) -or -not (Test-Path -LiteralPath $selectedBackup)) {
+                Write-GUI " -> Registry backup restore cancelled.`n"
+                return
+            }
+
             try {
                 $restored = 0
-                $bData = @(Get-Content -LiteralPath $backupFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+                $bData = @(Get-Content -LiteralPath $selectedBackup -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
                 foreach ($entry in $bData) {
-                    if ($null -eq $entry) { continue }
+                    if ($null -eq $entry -or [string]::IsNullOrWhiteSpace($entry.RegPath)) { continue }
                     if ($entry.EntryType -eq "SubKey") {
                         if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
                         Set-Item -LiteralPath $entry.RegPath -Value ([string]$entry.RawValueData) -Force -ErrorAction SilentlyContinue
@@ -1127,7 +1379,7 @@ function Show-RegistryOrphanSweeper {
                         $restored++
                     }
                 }
-                Write-GUI " -> [OK] Restored $restored registry entry(s) from $backupFile.`n"
+                Write-GUI " -> [OK] Restored $restored registry entry(s) from: $selectedBackup`n"
             } catch {
                 Write-GUI " -> [!] Failed to restore registry backup: $($_.Exception.Message)`n"
             }
@@ -1136,11 +1388,40 @@ function Show-RegistryOrphanSweeper {
 
         if ($res.Items.Count -eq 0) { return }
 
-        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($res.Items, $backupFile) -ScriptBlock {
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "WinUltix Registry Backup (*.json)|*.json"
+        $sfd.Title = "Save Registry Orphans Backup Before Purging"
+        $sfd.FileName = "WinUltix_RegOrphans_$($env:COMPUTERNAME)_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
+        $sfd.InitialDirectory = [Environment]::GetFolderPath("Desktop")
+
+        $targetBackupFile = $null
+        try {
+            if ($sfd.ShowDialog($global:form) -eq [System.Windows.Forms.DialogResult]::OK) {
+                $targetBackupFile = $sfd.FileName
+            }
+        } finally {
+            $sfd.Dispose()
+        }
+
+        if ([string]::IsNullOrWhiteSpace($targetBackupFile)) {
+            Write-GUI " -> Registry orphan purge cancelled (No backup file selected).`n"
+            return
+        }
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($res.Items, $targetBackupFile) -ScriptBlock {
             param([array]$Selected, [string]$BackupPath)
-            $appDir = Split-Path -Path $BackupPath -Parent
-            if (-not (Test-Path -LiteralPath $appDir)) { New-Item -Path $appDir -ItemType Directory -Force | Out-Null }
-            @($Selected) | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $BackupPath -Encoding UTF8 -Force
+            $parentDir = Split-Path -Path $BackupPath -Parent
+            if (-not [string]::IsNullOrWhiteSpace($parentDir) -and -not (Test-Path -LiteralPath $parentDir)) {
+                New-Item -Path $parentDir -ItemType Directory -Force | Out-Null
+            }
+
+            $jsonPayload = @($Selected) | ConvertTo-Json -Depth 4
+            $jsonPayload | Set-Content -LiteralPath $BackupPath -Encoding UTF8 -Force -ErrorAction Stop
+
+            # Maintain shadow copy in AppData\Local\WinUltix as emergency fallback
+            $shadowDir = "$env:LOCALAPPDATA\WinUltix"
+            if (-not (Test-Path -LiteralPath $shadowDir)) { New-Item -Path $shadowDir -ItemType Directory -Force | Out-Null }
+            $jsonPayload | Set-Content -LiteralPath "$shadowDir\RegOrphans_LastBackup.json" -Encoding UTF8 -Force -ErrorAction SilentlyContinue
 
             $total   = $Selected.Count
             $cur     = 0
@@ -1163,11 +1444,16 @@ function Show-RegistryOrphanSweeper {
                     }
                 } catch { }
             }
-            return $removed
+            return [PSCustomObject]@{
+                RemovedCount = $removed
+                SavedPath    = $BackupPath
+            }
         } -OnComplete ({
-            param($purgedCount)
+            param($resObj)
             Update-Progress 0
-            Write-GUI " -> [OK] Purged $purgedCount orphaned registry reference(s) (Backup saved to RegOrphans_LastBackup.json).`n"
+            if ($null -ne $resObj) {
+                Write-GUI " -> [OK] Purged $($resObj.RemovedCount) orphaned registry reference(s). Backup saved to: $($resObj.SavedPath)`n"
+            }
         }.GetNewClosure())
     }.GetNewClosure())
 }
@@ -1178,69 +1464,98 @@ function Show-RegistryOrphanSweeper {
 function Get-GhostServicesState {
     $ghosts = [System.Collections.Generic.List[PSCustomObject]]::new()
     
-    $runningNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.Name) }
-    Get-CimInstance -ClassName Win32_SystemDriver -Filter "State = 'Running'" -Property Name -ErrorAction SilentlyContinue | ForEach-Object { [void]$runningNames.Add($_.Name) }
-
-    $services = @(Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue)
-    $total = $services.Count
-    $current = 0
-
-    foreach ($svc in $services) {
-        $current++
-        if ($null -ne $UltixSync -and ($current % 15 -eq 0 -or $current -eq $total)) {
-            $UltixSync.Progress = [int](($current / $total) * 100)
-        }
-
-        $svcName = $svc.PSChildName
-        if ($runningNames.Contains($svcName)) { continue }
-
-        $props = Get-ItemProperty -Path $svc.PSPath -Name "ImagePath", "Type" -ErrorAction SilentlyContinue
-        if ($null -eq $props) { continue }
-
-        # Skip Per-User service templates and dynamic session instances (SERVICE_USER_SERVICE bit 0x40)
-        if ($null -ne $props.Type -and (($props.Type -band 0x40) -ne 0)) { continue }
-
-        $imagePath = $props.ImagePath
-        if ([string]::IsNullOrWhiteSpace($imagePath)) { continue }
-        if ($imagePath -match '(?i)^\\(?:Driver|FileSystem)\\') { continue }
-        
-        # Normalize kernel and relative root prefixes (\SystemRoot\, SystemRoot\, \System32\, system32\)
-        $rawPath = $imagePath.Trim()
-        $rawPath = $rawPath -replace '^\\+?\?\?\\+', ''
-        $rawPath = $rawPath -replace '(?i)^\\?SystemRoot\\', "$env:windir\"
-        $rawPath = $rawPath -replace '(?i)^\\?System32\\', "$env:windir\System32\"
-        $rawPath = $rawPath -replace '(?i)^\\?SysWOW64\\', "$env:windir\SysWOW64\"
-        $rawPath = [System.Environment]::ExpandEnvironmentVariables($rawPath).Trim()
-        
-        if ($rawPath -match '^"([^"]+)"') { 
-            $rawPath = $matches[1] 
-        } elseif ($rawPath -match '(?i)^(.+?\.(?:exe|sys|dll))(?:$|\s)') {
-            $rawPath = $matches[1]
-        } else { 
-            $rawPath = $rawPath.Split(' ')[0] 
-        }
-        
-        if (-not [System.IO.Path]::IsPathRooted($rawPath)) {
-            $candidateWinDir = Join-Path -Path $env:windir -ChildPath $rawPath
-            $candidateSys32  = Join-Path -Path "$env:windir\System32" -ChildPath $rawPath
-            $candidateDrv    = Join-Path -Path "$env:windir\System32\drivers" -ChildPath $rawPath
-            
-            if (Test-Path -LiteralPath $candidateWinDir -PathType Leaf) { $rawPath = $candidateWinDir }
-            elseif (Test-Path -LiteralPath $candidateSys32 -PathType Leaf) { $rawPath = $candidateSys32 }
-            elseif (Test-Path -LiteralPath $candidateDrv -PathType Leaf) { $rawPath = $candidateDrv }
-            else { $rawPath = $candidateWinDir }
-        }
-        
-        if (-not (Test-Path -LiteralPath $rawPath -PathType Leaf)) {
-            $ghosts.Add([PSCustomObject]@{
-                Name          = $svcName
-                Path          = $rawPath
-                UIDisplayName = "Ghost: $svcName (Missing: $rawPath)"
-                IsDetected    = $true
-            })
-        }
+    $readyDrives = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($drv in ([System.IO.DriveInfo]::GetDrives())) {
+        if ($drv.IsReady) { [void]$readyDrives.Add($drv.Name.Substring(0, 1)) }
     }
+
+    $runningNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    [System.ServiceProcess.ServiceController]::GetServices() | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.ServiceName) }
+    [System.ServiceProcess.ServiceController]::GetDevices()  | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.ServiceName) }
+
+    $svcRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
+    if ($null -eq $svcRoot) { return $ghosts }
+
+    try {
+        $svcNames = $svcRoot.GetSubKeyNames()
+        $total    = $svcNames.Count
+        $current  = 0
+
+        foreach ($svcName in $svcNames) {
+            $current++
+            if ($null -ne $UltixSync -and ($current % 25 -eq 0 -or $current -eq $total)) {
+                $UltixSync.Progress = [int](($current / $total) * 100)
+            }
+
+            if ($runningNames.Contains($svcName)) { continue }
+
+            # Open with writable=true to automatically skip TrustedInstaller-protected inbox OS services/drivers
+            $svcKey = $null
+            try {
+                $svcKey = $svcRoot.OpenSubKey($svcName, $true)
+            } catch {
+                continue
+            }
+            if ($null -eq $svcKey) { continue }
+
+            try {
+                # Skip Per-User service templates and dynamic session instances (SERVICE_USER_SERVICE bit 0x40)
+                $svcType = $svcKey.GetValue("Type", $null)
+                if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) { continue }
+
+                $imagePath = [string]$svcKey.GetValue("ImagePath", "")
+            } finally {
+                $svcKey.Dispose()
+            }
+
+            if ([string]::IsNullOrWhiteSpace($imagePath)) { continue }
+            if ($imagePath -match '(?i)^\\(?:Driver|FileSystem|KernelObjects)\\') { continue }
+            
+            # Normalize kernel and relative root prefixes (\SystemRoot\, SystemRoot\, \System32\, system32\)
+            $rawPath = $imagePath.Trim()
+            $rawPath = $rawPath -replace '^\\+?\?\?\\+', ''
+            $rawPath = $rawPath -replace '(?i)^\\?SystemRoot\\', "$env:windir\"
+            $rawPath = $rawPath -replace '(?i)^\\?System32\\', "$env:windir\System32\"
+            $rawPath = $rawPath -replace '(?i)^\\?SysWOW64\\', "$env:windir\SysWOW64\"
+            $rawPath = [System.Environment]::ExpandEnvironmentVariables($rawPath).Trim()
+            
+            if ($rawPath -match '^"([^"]+)"') { 
+                $rawPath = $matches[1] 
+            } elseif ($rawPath -match '(?i)^(.+?\.(?:exe|sys|dll))(?:$|\s)') {
+                $rawPath = $matches[1]
+            } else { 
+                $rawPath = $rawPath.Split(' ')[0] 
+            }
+            
+            if (-not [System.IO.Path]::IsPathRooted($rawPath)) {
+                $candidateWinDir = Join-Path -Path $env:windir -ChildPath $rawPath
+                $candidateSys32  = Join-Path -Path "$env:windir\System32" -ChildPath $rawPath
+                $candidateDrv    = Join-Path -Path "$env:windir\System32\drivers" -ChildPath $rawPath
+                
+                if ([System.IO.File]::Exists($candidateWinDir))    { $rawPath = $candidateWinDir }
+                elseif ([System.IO.File]::Exists($candidateSys32)) { $rawPath = $candidateSys32 }
+                elseif ([System.IO.File]::Exists($candidateDrv))   { $rawPath = $candidateDrv }
+                else { $rawPath = $candidateWinDir }
+            }
+
+            # Shield services/drivers installed on currently unplugged external drives
+            if ($rawPath -match '^([a-zA-Z]):\\') {
+                if (-not $readyDrives.Contains($matches[1])) { continue }
+            }
+            
+            if (-not [System.IO.File]::Exists($rawPath)) {
+                $ghosts.Add([PSCustomObject]@{
+                    Name          = $svcName
+                    Path          = $rawPath
+                    UIDisplayName = "Ghost: $svcName (Missing: $rawPath)"
+                    IsDetected    = $true
+                })
+            }
+        }
+    } finally {
+        $svcRoot.Dispose()
+    }
+
     return $ghosts
 }
 
