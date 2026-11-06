@@ -61,37 +61,86 @@ function Start-ExternalConsoleAsync {
 function Get-WinSxSState {
     if ($null -ne $UltixSync) { $UltixSync.Progress = 5 }
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "dism.exe"
-    $psi.Arguments = "/Online /Cleanup-Image /AnalyzeComponentStore /English"
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-    $psi.CreateNoWindow = $true
+    # Ensure TrustedInstaller is not hard-locked to Disabled (4) before invoking CBS analysis
+    $tiRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+    $tiStart   = (Get-ItemProperty -LiteralPath $tiRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+    if ($tiStart -eq 4) {
+        Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+    }
 
-    $sbOutput = [System.Text.StringBuilder]::new()
-    $exitCode = -1
-    $proc = $null
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName               = "dism.exe"
+    $psi.Arguments              = "/Online /Cleanup-Image /AnalyzeComponentStore /English"
+    $psi.UseShellExecute        = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.RedirectStandardInput  = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.CreateNoWindow         = $true
+
+    $sbOutput       = [System.Text.StringBuilder]::new()
+    $exitCode       = -1
+    $proc           = $null
+    $loggedFinalize = $false
 
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
         if ($null -ne $proc) {
-            # StreamReader.ReadLine() yields on every '\r' progress bar update from dism.exe
-            while (-not $proc.StandardOutput.EndOfStream) {
-                $line = $proc.StandardOutput.ReadLine()
-                if ($null -eq $line) { continue }
+            # Immediately close stdin and drain stderr asynchronously without unused variable assignment
+            try { $proc.StandardInput.Close() } catch { }
+            [void]$proc.StandardError.ReadToEndAsync()
 
-                if ($line -match '(\d{1,3})\.\d+%') {
-                    $pct = [int]$matches[1]
-                    if ($null -ne $UltixSync) {
-                        $UltixSync.Progress = [math]::Max(5, [math]::Min(95, $pct))
+            $charBuf  = New-Object char[] 1024
+            $readTask = $proc.StandardOutput.ReadAsync($charBuf, 0, $charBuf.Length)
+            $idleTicksAfterTable = 0
+
+            while ($true) {
+                if ($readTask.Wait(250)) {
+                    $charsRead = $readTask.Result
+                    if ($charsRead -le 0) { break }
+
+                    $chunk = [string]::new($charBuf, 0, $charsRead)
+                    [void]$sbOutput.Append($chunk)
+
+                    $pctMatches = [regex]::Matches($chunk, '(\d{1,3})\.\d+%')
+                    if ($pctMatches.Count -gt 0) {
+                        $lastPct = [int]$pctMatches[$pctMatches.Count - 1].Groups[1].Value
+                        if ($null -ne $UltixSync) {
+                            $UltixSync.Progress = [math]::Max(5, [math]::Min(99, $lastPct))
+                            if ($lastPct -ge 100 -and -not $loggedFinalize) {
+                                $loggedFinalize = $true
+                                $UltixSync.Logs.Enqueue("  [*] 100% scan reached — waiting for CBS (TiWorker) to finalize WinSxS size table...")
+                            }
+                        }
                     }
+
+                    $readTask = $proc.StandardOutput.ReadAsync($charBuf, 0, $charBuf.Length)
+                    $idleTicksAfterTable = 0
                 } else {
-                    [void]$sbOutput.AppendLine($line)
+                    $curText = $sbOutput.ToString()
+                    # Locale-independent table completion check: 2 colon-separated lines after the YYYY-MM-DD HH:MM:SS timestamp
+                    $hasTableEnd = (
+                        $curText -match '(?s)\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}.*?:\s*\d+\s*\r?\n[^\r\n:]+:\s*\S+' -or
+                        $curText -match '(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*\S+'
+                    )
+
+                    if ($proc.HasExited) {
+                        $idleTicksAfterTable++
+                        if ($idleTicksAfterTable -ge 2) { break }
+                    } elseif ($hasTableEnd) {
+                        $idleTicksAfterTable++
+                        # Break if DismHost.exe / TiWorker.exe holds an inherited stdout pipe handle after table completion
+                        if ($idleTicksAfterTable -ge 6) { break }
+                    }
                 }
             }
-            $proc.WaitForExit()
-            $exitCode = $proc.ExitCode
+
+            [void]$proc.WaitForExit(3000)
+            if ($proc.HasExited) {
+                $exitCode = $proc.ExitCode
+            } else {
+                $exitCode = 0
+            }
         }
     } catch {
         if ($null -ne $UltixSync) {
@@ -115,8 +164,15 @@ function Get-WinSxSState {
         "Unknown"
     }
 
-    # Match localized Yes/Tak/Ja/Oui/Si on the last boolean line of the table
-    $recommended = ($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[ií]|True|1)\b")
+    # Extract integer count of Reclaimable Packages (line immediately following YYYY-MM-DD HH:MM:SS timestamp)
+    $reclaimableCount = 0
+    if ($dismOutput -match '(?s)\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s*\r?\n[^\r\n:]+:\s*(\d+)\b') {
+        $reclaimableCount = [int]$matches[1]
+    }
+    $recommended = (
+        $reclaimableCount -gt 0 -or
+        ($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[ií]|True|1)\b")
+    )
 
     $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
 
@@ -142,6 +198,10 @@ function Optimize-WinSXS {
     }
 
     $cmd = "echo Aggressive WinSxS compression in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
+    $tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+    if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
+        Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+    }
     Start-ExternalConsoleAsync -Title "WinUltix - WinSxS ResetBase" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 
@@ -152,6 +212,10 @@ function Invoke-SystemHealthAudit {
     Update-Progress 15
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        $tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+        if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
+            Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+        }
         $UltixSync.Progress = 35
         $null = & dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
         $dismExit = $LASTEXITCODE
@@ -166,15 +230,19 @@ function Invoke-SystemHealthAudit {
         )
         $isHealthy = ($dismExit -eq 0 -and -not $hasRegCorr)
 
-        # Zero-WMI NTFS Dirty Bit verification via native fsutil.exe
+        # Zero-WMI, 100% locale-independent NTFS Dirty Bit verification via kernel32!DeviceIoControl (FSCTL_IS_VOLUME_DIRTY)
         $UltixSync.Progress = 70
         $sysDrive = $env:SystemDrive.TrimEnd('\')
         $isDirty  = $false
-        $fsOut    = (& fsutil.exe dirty query $sysDrive 2>&1 | Out-String).Trim()
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($fsOut)) {
-            # Clean output always contains a negation particle across locales (NOT, NIE, NICHT, PAS, NON, NO, NIET, NAO, EI, etc.)
-            if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[AÃ]O|EI|INTE|IKKE|NE|NINCS)\b' -and $fsOut -notmatch '干净|正常|클린|クリーン') {
-                $isDirty = $true
+        $dirtyCode = [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+        if ($dirtyCode -ge 0) {
+            $isDirty = ($dirtyCode -eq 1)
+        } else {
+            $fsOut = (& fsutil.exe dirty query $sysDrive 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($fsOut)) {
+                if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[AÃ]O|EI|INTE|IKKE|NE|NINCS)\b') {
+                    $isDirty = $true
+                }
             }
         }
 
@@ -231,6 +299,10 @@ function Repair-SystemIntegrity {
     }
 
     $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk $sysDrive /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
+    $tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+    if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
+        Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+    }
     Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 

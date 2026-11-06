@@ -146,6 +146,38 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 }
                 return "";
             }
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr CreateFileW(
+                string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+                IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+                uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool DeviceIoControl(
+                IntPtr hDevice, uint dwIoControlCode,
+                IntPtr lpInBuffer, uint nInBufferSize,
+                out uint lpOutBuffer, uint nOutBufferSize,
+                out uint lpBytesReturned, IntPtr lpOverlapped);
+
+            private const uint FSCTL_IS_VOLUME_DIRTY = 0x00090078;
+
+            public static int IsVolumeDirty(string driveName) {
+                if (string.IsNullOrWhiteSpace(driveName)) return -1;
+                string cleanDrive = driveName.Trim().TrimEnd('\\');
+                if (!cleanDrive.EndsWith(":", StringComparison.Ordinal)) cleanDrive += ":";
+                IntPtr hVol = CreateFileW(@"\\.\" + cleanDrive, 0x80000000U, 3U, IntPtr.Zero, 3U, 0U, IntPtr.Zero);
+                if (hVol == IntPtr.Zero || hVol == new IntPtr(-1)) return -1;
+                try {
+                    uint flags = 0, ret = 0;
+                    if (DeviceIoControl(hVol, FSCTL_IS_VOLUME_DIRTY, IntPtr.Zero, 0U, out flags, 4U, out ret, IntPtr.Zero)) {
+                        return ((flags & 1U) != 0U) ? 1 : 0;
+                    }
+                } finally {
+                    CloseHandle(hVol);
+                }
+                return -1;
+            }
         }
 
         // Non-Invasive Shell & Taskbar Broadcast Interop
@@ -266,7 +298,7 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     clean = clean.Substring(0, clean.Length - 1).Trim();
                 }
 
-                clean = clean.Replace(',', '.');
+                clean = clean.Replace("\u00A0", "").Replace(" ", "").Replace(',', '.');
                 return double.TryParse(clean, NumberStyles.Float, CultureInfo.InvariantCulture, out val);
             }
 
@@ -936,6 +968,10 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     finally { Marshal.FreeHGlobal(props); }
                     _sessionHandle = 0;
                 }
+                if (_workerThread != null && _workerThread.IsAlive) {
+                    try { _workerThread.Join(400); } catch { }
+                    _workerThread = null;
+                }
             }
 
             public static List<DriverLoadRecord> SampleDriverLoads() {
@@ -1161,24 +1197,16 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
 
             [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
             private static extern IntPtr CreateFileW(
-                string lpFileName,
-                uint dwDesiredAccess,
-                uint dwShareMode,
-                IntPtr lpSecurityAttributes,
-                uint dwCreationDisposition,
-                uint dwFlagsAndAttributes,
-                IntPtr hTemplateFile);
+                string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+                IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+                uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool DeviceIoControl(
-                IntPtr hDevice,
-                uint dwIoControlCode,
-                IntPtr lpInBuffer,
-                uint nInBufferSize,
-                IntPtr lpOutBuffer,
-                uint nOutBufferSize,
-                out uint lpBytesReturned,
-                IntPtr lpOverlapped);
+                IntPtr hDevice, uint dwIoControlCode,
+                IntPtr lpInBuffer, uint nInBufferSize,
+                IntPtr lpOutBuffer, uint nOutBufferSize,
+                out uint lpBytesReturned, IntPtr lpOverlapped);
 
             [DllImport("kernel32.dll")]
             private static extern bool CloseHandle(IntPtr hObject);
@@ -1739,8 +1767,10 @@ function Set-ProtectedServiceStart {
         [Parameter(Mandatory=$true)][int]$StartValue
     )
     $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    if (-not (Test-Path -LiteralPath $regPath)) { return }
+
     try {
-        Set-ItemProperty -Path $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+        Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
     } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
         [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
         [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
@@ -1750,28 +1780,34 @@ function Set-ProtectedServiceStart {
 
         $keyOwn = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
         if ($null -ne $keyOwn) {
-            $aclOwn = $keyOwn.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
-            $aclOwn.SetOwner($adminSid)
-            $keyOwn.SetAccessControl($aclOwn)
-            $keyOwn.Close()
+            try {
+                $aclOwn = $keyOwn.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
+                $aclOwn.SetOwner($adminSid)
+                $keyOwn.SetAccessControl($aclOwn)
+            } finally {
+                $keyOwn.Dispose()
+            }
         }
 
         $keyAcl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
         if ($null -ne $keyAcl) {
-            $acl = $keyAcl.GetAccessControl()
-            $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-                $adminSid,
-                [System.Security.AccessControl.RegistryRights]::FullControl,
-                [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
-                [System.Security.AccessControl.PropagationFlags]::None,
-                [System.Security.AccessControl.AccessControlType]::Allow
-            )
-            $acl.SetAccessRule($rule)
-            $keyAcl.SetAccessControl($acl)
-            $keyAcl.Close()
+            try {
+                $acl = $keyAcl.GetAccessControl()
+                $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+                    $adminSid,
+                    [System.Security.AccessControl.RegistryRights]::FullControl,
+                    [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+                $acl.SetAccessRule($rule)
+                $keyAcl.SetAccessControl($acl)
+            } finally {
+                $keyAcl.Dispose()
+            }
         }
 
-        Set-ItemProperty -Path $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+        Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
     }
 }
 
@@ -1895,9 +1931,41 @@ function Format-UltixDeviceName {
     if ([string]::IsNullOrWhiteSpace($RawName)) { return "" }
     $clean = $RawName.Trim()
 
-    # Strip leading '@driver.inf,%token%;' prefix up to the FIRST semicolon
-    if ($clean -match '^@[^;]+;(.+)$') {
-        $clean = $matches[1].Trim()
+    # 100% locale-independent canonical normalization for standard Windows inbox .inf tokens
+    if ($clean -match '^@([^,;]+),([^;]+);(.+)$') {
+        $infFile  = $matches[1].Trim().ToLowerInvariant()
+        $infToken = $matches[2].Trim().ToLowerInvariant()
+        $restPart = $matches[3].Trim()
+
+        switch ($infFile) {
+            "usbxhci.inf" {
+                if ($restPart -match ';\(([^,]+),([^,]+),([^)]+)\)\s*$') {
+                    return "$($matches[1].Trim()) USB $($matches[2].Trim()) eXtensible Host Controller - $($matches[3].Trim()) (Microsoft)"
+                }
+            }
+            "hdaudbus.inf" { return "High Definition Audio Controller" }
+            "stornvme.inf" { return "Standard NVM Express Controller" }
+            "mshdc.inf" {
+                if ($infToken -match 'storahci|ahci') { return "Standard SATA AHCI Controller" }
+            }
+            "usb.inf" {
+                if ($infToken -match 'composite') { return "USB Composite Device" }
+            }
+            "input.inf" {
+                if ($infToken -match 'hid\.devicedesc') { return "USB Input Device" }
+            }
+            "keyboard.inf" {
+                if ($infToken -match 'hid\.keyboarddevice') { return "HID Keyboard Device" }
+            }
+            "msmouse.inf" {
+                if ($infToken -match 'hid\.mousedevice') { return "HID-compliant mouse" }
+            }
+            "usbhub3.inf" {
+                if ($infToken -match 'usb30hub') { return "Generic SuperSpeed USB Hub" }
+                if ($infToken -match 'usb20hub') { return "Generic USB Hub" }
+            }
+        }
+        $clean = $restPart
     }
 
     # Resolve parameterized INF templates like '%1 USB %2 eXtensible Host Controller - %3 (Microsoft);(Intel(R),3.0,1.0)'
@@ -2160,11 +2228,11 @@ function Update-DNSLabel {
     if ($null -eq $global:lblCurrentDNS -or $global:lblCurrentDNS.IsDisposed) { return }
 
     try {
-        # Direct Win32 GetAdaptersAddresses via .NET NetworkInterface (~2ms, zero CIM/CDXML overhead)
+        # Direct Win32 GetAdaptersAddresses via .NET NetworkInterface (~2ms, ignores 0.0.0.0 dummy gateways)
         $activeNic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
             $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
             $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback -and
-            $_.GetIPProperties().GatewayAddresses.Count -gt 0
+            @($_.GetIPProperties().GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") }).Count -gt 0
         } | Select-Object -First 1
 
         if ($null -eq $activeNic) {

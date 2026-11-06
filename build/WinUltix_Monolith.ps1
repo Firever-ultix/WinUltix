@@ -129,6 +129,34 @@ CloseHandle(hProc);
 }
 return "";
 }
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+private static extern IntPtr CreateFileW(
+string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+[DllImport("kernel32.dll", SetLastError = true)]
+private static extern bool DeviceIoControl(
+IntPtr hDevice, uint dwIoControlCode,
+IntPtr lpInBuffer, uint nInBufferSize,
+out uint lpOutBuffer, uint nOutBufferSize,
+out uint lpBytesReturned, IntPtr lpOverlapped);
+private const uint FSCTL_IS_VOLUME_DIRTY = 0x00090078;
+public static int IsVolumeDirty(string driveName) {
+if (string.IsNullOrWhiteSpace(driveName)) return -1;
+string cleanDrive = driveName.Trim().TrimEnd('\\');
+if (!cleanDrive.EndsWith(":", StringComparison.Ordinal)) cleanDrive += ":";
+IntPtr hVol = CreateFileW(@"\\.\" + cleanDrive, 0x80000000U, 3U, IntPtr.Zero, 3U, 0U, IntPtr.Zero);
+if (hVol == IntPtr.Zero || hVol == new IntPtr(-1)) return -1;
+try {
+uint flags = 0, ret = 0;
+if (DeviceIoControl(hVol, FSCTL_IS_VOLUME_DIRTY, IntPtr.Zero, 0U, out flags, 4U, out ret, IntPtr.Zero)) {
+return ((flags & 1U) != 0U) ? 1 : 0;
+}
+} finally {
+CloseHandle(hVol);
+}
+return -1;
+}
 }
 public static class ShellInterop {
 private static readonly IntPtr HWND_BROADCAST = new IntPtr(0xFFFF);
@@ -221,7 +249,7 @@ clean = clean.Substring(0, clean.Length - 3).Trim();
 } else if (clean.EndsWith("%", StringComparison.Ordinal)) {
 clean = clean.Substring(0, clean.Length - 1).Trim();
 }
-clean = clean.Replace(',', '.');
+clean = clean.Replace("\u00A0", "").Replace(" ", "").Replace(',', '.');
 return double.TryParse(clean, NumberStyles.Float, CultureInfo.InvariantCulture, out val);
 }
 public int Compare(object x, object y) {
@@ -784,6 +812,10 @@ try { ControlTraceW(_sessionHandle, _activeSessionName, props, EVENT_TRACE_CONTR
 finally { Marshal.FreeHGlobal(props); }
 _sessionHandle = 0;
 }
+if (_workerThread != null && _workerThread.IsAlive) {
+try { _workerThread.Join(400); } catch { }
+_workerThread = null;
+}
 }
 public static List<DriverLoadRecord> SampleDriverLoads() {
 var results = new List<DriverLoadRecord>();
@@ -973,23 +1005,15 @@ ref uint PropertyBufferSize,
 uint ulFlags);
 [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
 private static extern IntPtr CreateFileW(
-string lpFileName,
-uint dwDesiredAccess,
-uint dwShareMode,
-IntPtr lpSecurityAttributes,
-uint dwCreationDisposition,
-uint dwFlagsAndAttributes,
-IntPtr hTemplateFile);
+string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 [DllImport("kernel32.dll", SetLastError = true)]
 private static extern bool DeviceIoControl(
-IntPtr hDevice,
-uint dwIoControlCode,
-IntPtr lpInBuffer,
-uint nInBufferSize,
-IntPtr lpOutBuffer,
-uint nOutBufferSize,
-out uint lpBytesReturned,
-IntPtr lpOverlapped);
+IntPtr hDevice, uint dwIoControlCode,
+IntPtr lpInBuffer, uint nInBufferSize,
+IntPtr lpOutBuffer, uint nOutBufferSize,
+out uint lpBytesReturned, IntPtr lpOverlapped);
 [DllImport("kernel32.dll")]
 private static extern bool CloseHandle(IntPtr hObject);
 private const uint GENERIC_WRITE = 0x40000000;
@@ -1460,8 +1484,9 @@ param(
 [Parameter(Mandatory=$true)][int]$StartValue
 )
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+if (-not (Test-Path -LiteralPath $regPath)) { return }
 try {
-Set-ItemProperty -Path $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
 } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
 [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
 [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
@@ -1469,13 +1494,17 @@ $subKeyPath = "SYSTEM\CurrentControlSet\Services\$ServiceName"
 $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
 $keyOwn = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
 if ($null -ne $keyOwn) {
+try {
 $aclOwn = $keyOwn.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
 $aclOwn.SetOwner($adminSid)
 $keyOwn.SetAccessControl($aclOwn)
-$keyOwn.Close()
+} finally {
+$keyOwn.Dispose()
+}
 }
 $keyAcl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
 if ($null -ne $keyAcl) {
+try {
 $acl = $keyAcl.GetAccessControl()
 $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
 $adminSid,
@@ -1486,9 +1515,11 @@ $adminSid,
 )
 $acl.SetAccessRule($rule)
 $keyAcl.SetAccessControl($acl)
-$keyAcl.Close()
+} finally {
+$keyAcl.Dispose()
 }
-Set-ItemProperty -Path $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+}
+Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
 }
 }
 function Get-UltixPowerAcIndex {
@@ -1593,8 +1624,39 @@ function Format-UltixDeviceName {
 param([AllowEmptyString()][string]$RawName)
 if ([string]::IsNullOrWhiteSpace($RawName)) { return "" }
 $clean = $RawName.Trim()
-if ($clean -match '^@[^;]+;(.+)$') {
-$clean = $matches[1].Trim()
+if ($clean -match '^@([^,;]+),([^;]+);(.+)$') {
+$infFile  = $matches[1].Trim().ToLowerInvariant()
+$infToken = $matches[2].Trim().ToLowerInvariant()
+$restPart = $matches[3].Trim()
+switch ($infFile) {
+"usbxhci.inf" {
+if ($restPart -match ';\(([^,]+),([^,]+),([^)]+)\)\s*$') {
+return "$($matches[1].Trim()) USB $($matches[2].Trim()) eXtensible Host Controller - $($matches[3].Trim()) (Microsoft)"
+}
+}
+"hdaudbus.inf" { return "High Definition Audio Controller" }
+"stornvme.inf" { return "Standard NVM Express Controller" }
+"mshdc.inf" {
+if ($infToken -match 'storahci|ahci') { return "Standard SATA AHCI Controller" }
+}
+"usb.inf" {
+if ($infToken -match 'composite') { return "USB Composite Device" }
+}
+"input.inf" {
+if ($infToken -match 'hid\.devicedesc') { return "USB Input Device" }
+}
+"keyboard.inf" {
+if ($infToken -match 'hid\.keyboarddevice') { return "HID Keyboard Device" }
+}
+"msmouse.inf" {
+if ($infToken -match 'hid\.mousedevice') { return "HID-compliant mouse" }
+}
+"usbhub3.inf" {
+if ($infToken -match 'usb30hub') { return "Generic SuperSpeed USB Hub" }
+if ($infToken -match 'usb20hub') { return "Generic USB Hub" }
+}
+}
+$clean = $restPart
 }
 $lastSemi = $clean.LastIndexOf(';')
 if ($lastSemi -gt 0 -and $lastSemi -lt ($clean.Length - 1)) {
@@ -1819,7 +1881,7 @@ try {
 $activeNic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
 $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
 $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback -and
-$_.GetIPProperties().GatewayAddresses.Count -gt 0
+@($_.GetIPProperties().GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") }).Count -gt 0
 } | Select-Object -First 1
 if ($null -eq $activeNic) {
 $global:lblCurrentDNS.Text = "Current DNS: No active internet route"
@@ -3443,7 +3505,7 @@ Provider      = $provider
 DriverClass   = $className
 VersionDate   = $verDate
 SizeMB        = $sizeMB
-SizeDisplay   = ("{0,7:N2} MB" -f $sizeMB)
+SizeDisplay = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $sizeMB)
 Status        = $statusStr
 IsLocked      = $isActive
 IsDetected    = (-not $isActive)
@@ -3698,7 +3760,7 @@ $results.Add([PSCustomObject]@{
 FileName      = $file.Name
 Status        = $statusTag
 SizeMB        = $sizeMB
-SizeDisplay   = ("{0,7:N2} MB" -f $sizeMB)
+SizeDisplay = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $sizeMB)
 ProductName   = $prodName
 Publisher     = $pubName
 FullPath      = $file.FullName
@@ -3720,7 +3782,7 @@ $results.Add([PSCustomObject]@{
 FileName      = "`$PatchCache`$"
 Status        = "[ORPHAN / CACHE]"
 SizeMB        = $pcMB
-SizeDisplay   = ("{0,7:N2} MB" -f $pcMB)
+SizeDisplay   = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $pcMB)
 ProductName   = "Windows Installer Baseline RTM Patch Cache (Safe to empty)"
 Publisher     = "Microsoft Corporation"
 FullPath      = $patchCacheDir
@@ -4087,16 +4149,27 @@ $restored++
 } else {
 if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
 $kind = if ($entry.PSObject.Properties.Match("ValueKind").Count -gt 0 -and $entry.ValueKind) { [string]$entry.ValueKind } else { "String" }
+$regItem = Get-Item -LiteralPath $entry.RegPath -ErrorAction SilentlyContinue
+if ($null -ne $regItem) {
+$wKey = $regItem.OpenSubKey("", $true)
+$regItem.Dispose()
+if ($null -ne $wKey) {
+try {
 if ($kind -eq "Binary" -and -not [string]::IsNullOrWhiteSpace($entry.RawValueData)) {
 [byte[]]$bytes = [Convert]::FromBase64String([string]$entry.RawValueData)
-Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value $bytes -Type Binary -Force -ErrorAction SilentlyContinue
+$wKey.SetValue([string]$entry.ValueName, $bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
 } elseif ($kind -eq "DWord") {
 $dw = if ($entry.RawValueData -match '^\d+$') { [int]$entry.RawValueData } else { 1 }
-Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value $dw -Type DWord -Force -ErrorAction SilentlyContinue
+$wKey.SetValue([string]$entry.ValueName, $dw, [Microsoft.Win32.RegistryValueKind]::DWord)
 } else {
-Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value ([string]$entry.RawValueData) -Type String -Force -ErrorAction SilentlyContinue
+$wKey.SetValue([string]$entry.ValueName, [string]$entry.RawValueData, [Microsoft.Win32.RegistryValueKind]::String)
 }
 $restored++
+} finally {
+$wKey.Dispose()
+}
+}
+}
 }
 }
 Write-GUI " -> [OK] Restored $restored registry entry(s) from: $selectedBackup`n"
@@ -4149,8 +4222,19 @@ Remove-Item -LiteralPath $item.RegPath -Recurse -Force -ErrorAction Stop
 $removed++
 }
 } else {
-Remove-ItemProperty -LiteralPath $item.RegPath -Name $item.ValueName -Force -ErrorAction Stop
+$regItem = Get-Item -LiteralPath $item.RegPath -ErrorAction Stop
+if ($null -ne $regItem) {
+$wKey = $regItem.OpenSubKey("", $true)
+$regItem.Dispose()
+if ($null -ne $wKey) {
+try {
+$wKey.DeleteValue([string]$item.ValueName, $true)
 $removed++
+} finally {
+$wKey.Dispose()
+}
+}
+}
 }
 } catch { }
 }
@@ -5144,7 +5228,7 @@ if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -For
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Deprovisioned base image: $($prov.DisplayName)") }
 } catch {
 [void]$provisionedSet.Remove($prov.PackageName)
-if ($_.Exception.Message -notmatch "(?i)nie mo.na odnale..|cannot find|0x80070002|0x80070003") {
+if ($_.Exception.HResult -notin @(-2147024894, -2147024893) -and $_.Exception.Message -notmatch "(?i)0x80070002|0x80070003") {
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [-] Error deprovisioning $($prov.DisplayName): $($_.Exception.Message)") }
 }
 }
@@ -6925,14 +7009,21 @@ $verbLabel   = if ($Action -eq "Primary") { "Disabling" } else { "Restoring to M
 $UltixSync.Logs.Enqueue(" -> $verbLabel service: $($svc.Name) ($($svc.DisplayName))")
 try {
 Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetStart
-if ($svc.Name -match '^(.+)_[0-9a-fA-F]{2,}$') {
-$baseSvcName = $matches[1]
-if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$baseSvcName") {
+$flagVal = if ($Action -eq "Primary") { 0 } else { 3 }
+$baseSvcName = if ($svc.Name -match '^(.+)_[0-9a-fA-F]{2,}$') { $matches[1] } else { $svc.Name }
+$baseRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$baseSvcName"
+if (Test-Path -LiteralPath $baseRegPath) {
+if ($baseSvcName -ne $svc.Name) {
 Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart
+}
+$svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
+if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
+Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
 }
 }
 if ($Action -eq "Primary") {
 Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+Get-Service -Name "$($baseSvcName)_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
 $UltixSync.Logs.Enqueue("    [OK] $($svc.Name) stopped and locked to Disabled (Start=4).")
 } else {
 $UltixSync.Logs.Enqueue("    [OK] $($svc.Name) set to Manual (Start=3).")
@@ -7650,7 +7741,8 @@ if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]
 if ($nic.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
 try {
 $ipProps = $nic.GetIPProperties()
-if ($null -eq $ipProps -or $ipProps.GatewayAddresses.Count -eq 0) { continue }
+$validGw = @($ipProps.GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") })
+if ($null -eq $ipProps -or $validGw.Count -eq 0) { continue }
 $v4Props = $ipProps.GetIPv4Properties()
 if ($null -eq $v4Props -or $v4Props.Index -le 0) { continue }
 $routedAdapters.Add([PSCustomObject]@{
@@ -8007,33 +8099,72 @@ Write-GUI " -> [!] [$($res.Title)] finished with non-zero Exit Code: $code ($hex
 }
 function Get-WinSxSState {
 if ($null -ne $UltixSync) { $UltixSync.Progress = 5 }
+$tiRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+$tiStart   = (Get-ItemProperty -LiteralPath $tiRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+if ($tiStart -eq 4) {
+Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+}
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = "dism.exe"
-$psi.Arguments = "/Online /Cleanup-Image /AnalyzeComponentStore /English"
-$psi.UseShellExecute = $false
+$psi.FileName               = "dism.exe"
+$psi.Arguments              = "/Online /Cleanup-Image /AnalyzeComponentStore /English"
+$psi.UseShellExecute        = $false
 $psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError  = $true
+$psi.RedirectStandardInput  = $true
 $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-$psi.CreateNoWindow = $true
-$sbOutput = [System.Text.StringBuilder]::new()
-$exitCode = -1
-$proc = $null
+$psi.CreateNoWindow         = $true
+$sbOutput       = [System.Text.StringBuilder]::new()
+$exitCode       = -1
+$proc           = $null
+$loggedFinalize = $false
 try {
 $proc = [System.Diagnostics.Process]::Start($psi)
 if ($null -ne $proc) {
-while (-not $proc.StandardOutput.EndOfStream) {
-$line = $proc.StandardOutput.ReadLine()
-if ($null -eq $line) { continue }
-if ($line -match '(\d{1,3})\.\d+%') {
-$pct = [int]$matches[1]
+try { $proc.StandardInput.Close() } catch { }
+[void]$proc.StandardError.ReadToEndAsync()
+$charBuf  = New-Object char[] 1024
+$readTask = $proc.StandardOutput.ReadAsync($charBuf, 0, $charBuf.Length)
+$idleTicksAfterTable = 0
+while ($true) {
+if ($readTask.Wait(250)) {
+$charsRead = $readTask.Result
+if ($charsRead -le 0) { break }
+$chunk = [string]::new($charBuf, 0, $charsRead)
+[void]$sbOutput.Append($chunk)
+$pctMatches = [regex]::Matches($chunk, '(\d{1,3})\.\d+%')
+if ($pctMatches.Count -gt 0) {
+$lastPct = [int]$pctMatches[$pctMatches.Count - 1].Groups[1].Value
 if ($null -ne $UltixSync) {
-$UltixSync.Progress = [math]::Max(5, [math]::Min(95, $pct))
+$UltixSync.Progress = [math]::Max(5, [math]::Min(99, $lastPct))
+if ($lastPct -ge 100 -and -not $loggedFinalize) {
+$loggedFinalize = $true
+$UltixSync.Logs.Enqueue("  [*] 100% scan reached -- waiting for CBS (TiWorker) to finalize WinSxS size table...")
 }
+}
+}
+$readTask = $proc.StandardOutput.ReadAsync($charBuf, 0, $charBuf.Length)
+$idleTicksAfterTable = 0
 } else {
-[void]$sbOutput.AppendLine($line)
+$curText = $sbOutput.ToString()
+$hasTableEnd = (
+$curText -match '(?s)\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}.*?:\s*\d+\s*\r?\n[^\r\n:]+:\s*\S+' -or
+$curText -match '(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*\S+'
+)
+if ($proc.HasExited) {
+$idleTicksAfterTable++
+if ($idleTicksAfterTable -ge 2) { break }
+} elseif ($hasTableEnd) {
+$idleTicksAfterTable++
+if ($idleTicksAfterTable -ge 6) { break }
 }
 }
-$proc.WaitForExit()
+}
+[void]$proc.WaitForExit(3000)
+if ($proc.HasExited) {
 $exitCode = $proc.ExitCode
+} else {
+$exitCode = 0
+}
 }
 } catch {
 if ($null -ne $UltixSync) {
@@ -8052,7 +8183,14 @@ $sizeMatches[0].Groups[1].Value.Trim()
 } else {
 "Unknown"
 }
-$recommended = ($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)\b")
+$reclaimableCount = 0
+if ($dismOutput -match '(?s)\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s*\r?\n[^\r\n:]+:\s*(\d+)\b') {
+$reclaimableCount = [int]$matches[1]
+}
+$recommended = (
+$reclaimableCount -gt 0 -or
+($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)\b")
+)
 $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
 return [PSCustomObject]@{
 UIDisplayName = "WinSxS Payload (Actual Size: $actualSize)"
@@ -8073,6 +8211,10 @@ return
 }
 }
 $cmd = "echo Aggressive WinSxS compression in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
+$tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
+Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+}
 Start-ExternalConsoleAsync -Title "WinUltix - WinSxS ResetBase" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 function Invoke-SystemHealthAudit {
@@ -8080,6 +8222,10 @@ param([AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable
 Write-GUI "--- AUDIT: OS Image, CBS & NTFS Volume Health (Background Thread) ---"
 Update-Progress 15
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+$tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
+Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+}
 $UltixSync.Progress = 35
 $null = & dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
 $dismExit = $LASTEXITCODE
@@ -8094,10 +8240,15 @@ $isHealthy = ($dismExit -eq 0 -and -not $hasRegCorr)
 $UltixSync.Progress = 70
 $sysDrive = $env:SystemDrive.TrimEnd('\')
 $isDirty  = $false
-$fsOut    = (& fsutil.exe dirty query $sysDrive 2>&1 | Out-String).Trim()
+$dirtyCode = [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+if ($dirtyCode -ge 0) {
+$isDirty = ($dirtyCode -eq 1)
+} else {
+$fsOut = (& fsutil.exe dirty query $sysDrive 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($fsOut)) {
-if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[A\u00C3]O|EI|INTE|IKKE|NE|NINCS)\b' -and $fsOut -notmatch '\u5E72\u51C0|\u6B63\u5E38|\uD074\uB9B0|\u30AF\u30EA\u30FC\u30F3') {
+if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[A\u00C3]O|EI|INTE|IKKE|NE|NINCS)\b') {
 $isDirty = $true
+}
 }
 }
 $UltixSync.Progress = 90
@@ -8147,6 +8298,10 @@ Write-GUI " -> System Integrity Repair cancelled by user.`n"
 return
 }
 $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk $sysDrive /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
+$tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
+Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+}
 Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 function Clear-NetworkStack {
@@ -9084,13 +9239,14 @@ function Get-HardwareState_IRQ {
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 [int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
 [uint64]$core0Mask  = if ($coreMasks.Count -ge 1) { [uint64]$coreMasks[0] } else { 3 }
-[uint64]$core1Mask  = if ($coreMasks.Count -ge 2) { [uint64]$coreMasks[1] } else { 12 }
-$pciRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum\PCI", $false)
-$enumRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum", $false)
-$svcRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
+$pciRoot   = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum\PCI", $false)
+$enumRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum", $false)
+$svcRoot   = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
+$classRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Class", $false)
 if ($null -eq $pciRoot) {
-if ($null -ne $enumRoot) { $enumRoot.Dispose() }
-if ($null -ne $svcRoot)  { $svcRoot.Dispose() }
+if ($null -ne $enumRoot)  { $enumRoot.Dispose() }
+if ($null -ne $svcRoot)   { $svcRoot.Dispose() }
+if ($null -ne $classRoot) { $classRoot.Dispose() }
 return @()
 }
 $svcBinaryCache = @{}
@@ -9196,7 +9352,7 @@ $isGpu     = ($devClass -match '^(?i)Display$' -or $clsGuid -match '(?i)4d36e968
 $isNic     = ($devClass -match '^(?i)Net$' -or $clsGuid -match '(?i)4d36e972-e325-11ce-bfc1-08002be10318' -or $devName -match '(?i)(Ethernet|GbE|Network|Wi-Fi|WiFi|Wireless|802\.11|I219|I225|I226|Killer|Realtek PCI|AQtion|ConnectX)')
 $isUsb     = ($devClass -match '^(?i)USB$' -or $clsGuid -match '(?i)36fc9e60-c465-11cf-8056-444553540000' -or $svcName -match '^(?i)(USBXHCI|USB4|usbuhci|usbehci)$' -or $devName -match '(?i)(eXtensible Host|Enhanced Host|USB4)')
 $isStorage = ($policyVal -eq 5 -or $clsGuid -match '(?i)(4d36e96a|4d36e97b)-e325-11ce-bfc1-08002be10318' -or $svcName -match '^(?i)(stornvme|secnvme|storahci|iaStor)' -or $devName -match '(?i)(NVM Express|SATA AHCI)')
-$isAudio   = ($svcName -match '^(?i)(HDAudBus|IntcAzAudAddService|IntcOED)$' -or $devName -match '(?i)High Definition Audio')
+$isAudio   = ($devClass -match '^(?i)(MEDIA|Sound)$' -or $clsGuid -match '(?i)4d36e96c-e325-11ce-bfc1-08002be10318' -or $svcName -match '^(?i)(HDAudBus|IntcAzAudAddService|IntcOED)$' -or $devName -match '(?i)High Definition Audio')
 if ($isStorage -and $null -ne $enumRoot) {
 $diskNames = [System.Collections.Generic.List[string]]::new()
 foreach ($descEntry in ([WinUltix.PnpTree]::GetDescendants($instanceId))) {
@@ -9217,15 +9373,99 @@ $childKey.Dispose()
 }
 }
 }
-$shortCtrl = $devName -replace '^Standard\s+', ''
+$shortCtrl = if ($svcName -match '^(?i)(stornvme|secnvme)$' -or $rawDevName -match '^(?i)@stornvme\.inf,') {
+"NVMe Controller"
+} elseif ($svcName -match '^(?i)(storahci|iaStor)' -or $rawDevName -match '^(?i)@mshdc\.inf,') {
+"SATA AHCI Controller"
+} else {
+($devName -replace '^(?i)(Standard|Standardowy)\s+', '').Trim()
+}
 if ($diskNames.Count -gt 0) {
 $devName = "$shortCtrl [$($diskNames -join ', ')]"
 } elseif (-not [string]::IsNullOrEmpty($bdfTag)) {
 $devName = "$shortCtrl [Empty $bdfTag]"
+} else {
+$devName = $shortCtrl
 }
 } elseif ($isUsb -and -not [string]::IsNullOrEmpty($bdfTag)) {
-$shortUsb = ($devName -replace '\s*-\s*\d+\.\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace 'eXtensible Host Controller', 'XHCI').Trim()
-$devName  = "$shortUsb [$bdfTag]"
+$shortUsb = ($devName -replace '(?i)^(Rozszerzalny kontroler hosta|Kontroler hosta)\s+', '' -replace '\s*[----]\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
+if ($shortUsb -notmatch '(?i)XHCI' -and $svcName -match '^(?i)USBXHCI$') {
+$shortUsb = "$shortUsb XHCI"
+}
+$devName = "$shortUsb [$bdfTag]"
+} elseif ($isAudio) {
+$codecNames = [System.Collections.Generic.List[string]]::new()
+if ($null -ne $enumRoot) {
+foreach ($descEntry in ([WinUltix.PnpTree]::GetDescendants($instanceId))) {
+$childId = ($descEntry -split '\|', 2)[1]
+if ([string]::IsNullOrWhiteSpace($childId)) { continue }
+$childKey = $enumRoot.OpenSubKey($childId, $false)
+if ($null -ne $childKey) {
+try {
+$cClass   = [string]$childKey.GetValue("Class", "")
+$cDrvRel  = [string]$childKey.GetValue("Driver", "")
+$cRawDesc = [string]$childKey.GetValue("DeviceDesc", "")
+if ($cClass -notmatch '^(?i)(MEDIA|Sound)$' -and $childId -notmatch '^(?i)(HDAUDIO|INTELAUDIO|ACP)\\') { continue }
+$cInfPath  = ""
+$cResolved = [string]$childKey.GetValue("FriendlyName", "")
+if ($null -ne $classRoot -and -not [string]::IsNullOrWhiteSpace($cDrvRel)) {
+$cDrvKey = $classRoot.OpenSubKey($cDrvRel, $false)
+if ($null -ne $cDrvKey) {
+try {
+$cInfPath = [string]$cDrvKey.GetValue("InfPath", "")
+if ([string]::IsNullOrWhiteSpace($cResolved)) {
+$cResolved = [string]$cDrvKey.GetValue("DriverDesc", "")
+}
+} finally {
+$cDrvKey.Dispose()
+}
+}
+}
+if ([string]::IsNullOrWhiteSpace($cResolved)) {
+$cResolved = Format-UltixDeviceName -RawName $cRawDesc
+}
+$isGenericInbox = ($cRawDesc -match '^(?i)@hdaudio\.inf,' -or $cInfPath -match '^(?i)hdaudio\.inf$')
+$cClean = ($cResolved -replace '(?i)\(R\)|\(TM\)', '' -replace '(?i)\s*High Definition Audio(\s+Device|\s+Controller)?', ' HD Audio' -replace '(?i)\s*Audio Device\s*$', ' Audio' -replace '\s+', ' ').Trim()
+if ($isGenericInbox -or [string]::IsNullOrWhiteSpace($cClean) -or $cClean -match '^(?i)(HD Audio|Microsoft.*|Urządzenie.*|Kontroler.*)$') {
+$cClean = if ($childId -match 'VEN_10DE')     { "NVIDIA HD Audio" }
+elseif ($childId -match 'VEN_10EC')           { "Realtek HD Audio" }
+elseif ($childId -match 'VEN_1002')           { "AMD HDMI Audio" }
+elseif ($childId -match 'VEN_8086')           { "Intel Display Audio" }
+elseif ($childId -match 'VEN_1102')           { "Creative Audio" }
+elseif ($childId -match 'VEN_13F6')           { "C-Media Audio" }
+elseif ($childId -match 'VEN_14F1')           { "Conexant Audio" }
+elseif ($childId -match 'VEN_1106')           { "VIA HD Audio" }
+else { "" }
+}
+if (-not [string]::IsNullOrWhiteSpace($cClean) -and -not $codecNames.Contains($cClean)) {
+$codecNames.Add($cClean)
+}
+} finally {
+$childKey.Dispose()
+}
+}
+}
+}
+if ($codecNames.Count -eq 0) {
+$pciAudioVendor = if ($venName -match 'VEN_10DE')                        { "NVIDIA GPU Audio" }
+elseif ($venName -match 'VEN_1002')                                      { "AMD HDMI Audio" }
+elseif ($venName -match 'VEN_1022&DEV_(1640|1637|15DE)')                 { "AMD Display Audio" }
+elseif ($venName -match 'VEN_1022')                                      { "AMD SoC Audio" }
+elseif ($venName -match 'VEN_8086')                                      { "Intel PCH Audio" }
+elseif ($venName -match 'VEN_1102')                                      { "Creative Audio" }
+else                                                                     { "PCI Audio" }
+$fallbackLabel = if (-not [string]::IsNullOrEmpty($bdfTag)) { "$pciAudioVendor $bdfTag" } else { $pciAudioVendor }
+$codecNames.Add($fallbackLabel)
+}
+$shortAudio = if ($svcName -match '^(?i)HDAudBus$' -or $rawDevName -match '^(?i)@hdaudbus\.inf,' -or $devName -match '(?i)High Definition Audio') {
+"HD Audio"
+} else {
+$devName.Trim()
+}
+$joinedCodecs = ($codecNames -join ', ')
+if ($shortAudio -notmatch [regex]::Escape($joinedCodecs)) {
+$devName = "$shortAudio [$joinedCodecs]"
+}
 }
 $deviceRole    = "Other"
 $sortRank      = 50
@@ -9276,6 +9516,7 @@ $results.Add([PSCustomObject]@{
 UIDisplayName        = "$devName [MSI: $msiBadge | Prio: $prioLabel | Mask: $affLabel | $adviceText]"
 MsiStatus            = $msiBadge
 RawDeviceName        = $devName
+BdfTag               = $bdfTag
 DeviceRole           = $deviceRole
 ServiceName          = $etwModuleKey
 DriverTag            = $drvTag
@@ -9304,8 +9545,20 @@ $venKey.Dispose()
 }
 } finally {
 $pciRoot.Dispose()
-if ($null -ne $enumRoot) { $enumRoot.Dispose() }
-if ($null -ne $svcRoot)  { $svcRoot.Dispose() }
+if ($null -ne $enumRoot)  { $enumRoot.Dispose() }
+if ($null -ne $svcRoot)   { $svcRoot.Dispose() }
+if ($null -ne $classRoot) { $classRoot.Dispose() }
+}
+$nameCounts = @{}
+foreach ($r in $results) {
+$n = $r.RawDeviceName
+$nameCounts[$n] = if ($nameCounts.ContainsKey($n)) { $nameCounts[$n] + 1 } else { 1 }
+}
+foreach ($r in $results) {
+if ($nameCounts[$r.RawDeviceName] -gt 1 -and -not [string]::IsNullOrEmpty($r.BdfTag) -and $r.RawDeviceName -notmatch [regex]::Escape($r.BdfTag)) {
+$r.RawDeviceName = "$($r.RawDeviceName) ($($r.BdfTag))"
+$r.UIDisplayName = "$($r.RawDeviceName) [MSI: $($r.MsiStatus) | Prio: $($r.PrioLabel) | Mask: $($r.AffinityLabel) | $($r.AdviceText)]"
+}
 }
 return @($results | Sort-Object SortRank, RawDeviceName)
 }
@@ -9496,14 +9749,30 @@ IsOptimized   = $isHpetDisabled
 ActionData    = @{ Type = "PNP"; Instance = $hpetInstance }
 })
 }
-$bcd = (bcdedit.exe /enum "{current}" 2>$null) -join " "
-$dynTickOpt = ($bcd -match "(?i)disabledynamictick\s+(Yes|Tak|True|1)")
+$bcdVerbose = (bcdedit.exe /enum "{current}" /v 2>$null) -join " "
+$dynTickOpt   = $false
+$platClockOpt = $true
+if ($bcdVerbose -match '(\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})') {
+$bcdElemBase = "HKLM:\BCD00000000\Objects\$($matches[1])\Elements"
+if (Test-Path -LiteralPath $bcdElemBase) {
+[byte[]]$dynBytes = (Get-ItemProperty -LiteralPath "$bcdElemBase\250000f0" -Name "Element" -ErrorAction SilentlyContinue).Element
+if ($null -ne $dynBytes -and $dynBytes.Length -ge 1) {
+$dynTickOpt = ($dynBytes[0] -eq 1)
+}
+[byte[]]$platBytes = (Get-ItemProperty -LiteralPath "$bcdElemBase\250000c2" -Name "Element" -ErrorAction SilentlyContinue).Element
+if ($null -ne $platBytes -and $platBytes.Length -ge 1 -and $platBytes[0] -eq 1) {
+$platClockOpt = $false
+}
+} else {
+$dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)")
+$platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)"))
+}
+}
 $results.Add([PSCustomObject]@{
 UIDisplayName = "Disable Dynamic Tick (Power Saving)"
 IsOptimized   = $dynTickOpt
 ActionData    = @{ Type = "BCD"; Cmd = "disabledynamictick yes" }
 })
-$platClockOpt = (-not ($bcd -match "(?i)useplatformclock\s+(Yes|Tak|True|1)"))
 $results.Add([PSCustomObject]@{
 UIDisplayName = "Disable Platform Clock (Force TSC)"
 IsOptimized   = $platClockOpt
@@ -10330,6 +10599,7 @@ if ($null -ne $lvItem -and $null -ne $lvItem.Tag -and $lvItem.Tag.IsKernelOnly -
 $e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
 }
 })
+$sortSyncGuard = @{ SuppressCombo = $false }
 $applySortMode = {
 $listView.BeginUpdate()
 switch ($comboSort.SelectedIndex) {
@@ -10350,7 +10620,12 @@ $listView.ListViewItemSorter = $sorter
 & $reapplyAllRowShading
 $listView.EndUpdate()
 }
-$comboSort.Add_SelectedIndexChanged({ & $applySortMode }.GetNewClosure())
+$comboSort.Add_SelectedIndexChanged({
+if ($sortSyncGuard.SuppressCombo) { return }
+if ($comboSort.SelectedIndex -ge 0) {
+& $applySortMode
+}
+}.GetNewClosure())
 $chkShowKernel.Add_CheckedChanged({
 if (-not $chkShowKernel.Checked) {
 $listView.BeginUpdate()
@@ -10383,6 +10658,9 @@ $sorter.OrderOfSort = if ($e.Column -in @(3, 4)) {
 $listView.Sort()
 & $reapplyAllRowShading
 $listView.EndUpdate()
+$sortSyncGuard.SuppressCombo = $true
+$comboSort.SelectedIndex = -1
+$sortSyncGuard.SuppressCombo = $false
 }.GetNewClosure())
 $etwStarted = $false
 try { $etwStarted = [WinUltix.DpcDriverProfiler]::Start() } catch { $etwStarted = $false }
@@ -10412,6 +10690,7 @@ $roleMaskMap    = @{
 "NIC"     = "-> Default"
 "USB"     = "-> Default"
 "Storage" = "-> Spread"
+"Audio"   = "-> Default"
 "System"  = "All / C0"
 }
 $kernelRoleCatalog = @{
@@ -10421,6 +10700,9 @@ $kernelRoleCatalog = @{
 "ndis"      = @{ Name = "[OS] NDIS Network Subsystem";         Role = "NIC";     Advice = "Aggregates NIC IRQ (Offload NIC -> C1)" }
 "tcpip"     = @{ Name = "[OS] Windows TCP/IP Network Stack";   Role = "NIC";     Advice = "Follows NIC RSS / Interrupt Core" }
 "usbport"   = @{ Name = "[OS] USB 2.0 EHCI Port Driver";       Role = "USB";     Advice = "Legacy USB 2.0 EHCI Host Wrapper" }
+"usbaudio2" = @{ Name = "[OS] USB Audio 2.0 Class Driver";     Role = "USB";     Advice = "Follows USB XHCI Controller Core" }
+"portcls"   = @{ Name = "[OS] PortCls Audio Class Driver";     Role = "Audio";   Advice = "Follows HD Audio / PCIe Sound Core" }
+"ks"        = @{ Name = "[OS] Kernel Streaming Audio/Video";   Role = "Audio";   Advice = "Audio/Video Kernel Pin Dispatcher" }
 "ntoskrnl"  = @{ Name = "[OS] Windows NT Executive & Timer";   Role = "System";  Advice = "OS Scheduler & Timer (Core 0 / All)" }
 "hal"       = @{ Name = "[OS] Hardware Abstraction Layer";     Role = "System";  Advice = "Hardware Timer & APIC Routing" }
 "acpi"      = @{ Name = "[OS] ACPI Power & Thermal Driver";    Role = "System";  Advice = "BIOS AML / EC Polling (Core 0)" }
@@ -10440,12 +10722,17 @@ if ($null -ne $chkIt.Tag -and $null -ne $chkIt.Tag.ActionData -and $chkIt.Tag.Ac
 [void]$previouslyChecked.Add([string]$chkIt.Tag.ActionData.DevicePath)
 }
 }
+if ($comboSort.SelectedIndex -lt 0) {
+$sortSyncGuard.SuppressCombo = $true
+$comboSort.SelectedIndex = 0
+$sortSyncGuard.SuppressCombo = $false
+}
 $listView.BeginUpdate()
 $listView.ListViewItemSorter = $null
 $listView.Items.Clear()
 $pciServiceKeys.Clear()
 $auditData = Get-HardwareState_IRQ
-foreach ($rName in @("GPU", "NIC", "USB", "Storage")) {
+foreach ($rName in @("GPU", "NIC", "USB", "Storage", "Audio")) {
 $rItems = @($auditData | Where-Object { $_.DeviceRole -eq $rName })
 if ($rItems.Count -eq 0) {
 $roleMaskMap[$rName] = if ($rName -eq "Storage") { "-> Spread" } else { "-> Default" }
@@ -10550,6 +10837,7 @@ $lv = $ctx.ListView
 $st = $ctx.Sorter
 if ($null -ne $lv -and -not $lv.IsDisposed) {
 $existingKernelRows = @{}
+$addedKernelRow     = $false
 for ($r = 0; $r -lt $lv.Items.Count; $r++) {
 $lvItem = $lv.Items[$r]
 $dev = $lvItem.Tag
@@ -10612,16 +10900,19 @@ $kLv = New-Object System.Windows.Forms.ListViewItem("KERNEL")
 $kLv.Tag = $kItemObj
 & $ctx.StyleRow $kLv $lv.Items.Count $rec
 [void]$lv.Items.Add($kLv)
+$addedKernelRow = $true
 }
 }
 if ($st.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None -and
-$st.ColumnToSort -in @(3, 4, -1) -and
+($st.ColumnToSort -in @(3, 4, -1) -or $addedKernelRow) -and
 [System.Windows.Forms.Control]::MouseButtons -eq [System.Windows.Forms.MouseButtons]::None) {
-$needsResort = $false
+$needsResort = $addedKernelRow
+if (-not $needsResort) {
 for ($i = 0; $i -lt ($lv.Items.Count - 1); $i++) {
 if ($st.Compare($lv.Items[$i], $lv.Items[$i + 1]) -gt 0) {
 $needsResort = $true
 break
+}
 }
 }
 if ($needsResort) {
@@ -11518,6 +11809,11 @@ foreach ($entry in $descendants) {
 $parts = $entry -split '\|', 2
 $depth = [int]$parts[0]
 $devId = $parts[1]
+foreach ($staleDepth in @($hubSpeedMap.Keys)) {
+if ($staleDepth -ge $depth) {
+[void]$hubSpeedMap.Remove($staleDepth)
+}
+}
 if ($devId -match '^USB\\ROOT_HUB') {
 $rootHubInfo = [WinUltix.UsbProberV2]::ProbeHub($devId)
 $hubSpeedMap[$depth] = $rootHubInfo.PortSpeeds

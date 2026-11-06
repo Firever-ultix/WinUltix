@@ -537,14 +537,15 @@ function Get-HardwareState_IRQ {
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     [int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
     [uint64]$core0Mask  = if ($coreMasks.Count -ge 1) { [uint64]$coreMasks[0] } else { 3 }
-    [uint64]$core1Mask  = if ($coreMasks.Count -ge 2) { [uint64]$coreMasks[1] } else { 12 }
 
-    $pciRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum\PCI", $false)
-    $enumRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum", $false)
-    $svcRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
+    $pciRoot   = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum\PCI", $false)
+    $enumRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum", $false)
+    $svcRoot   = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
+    $classRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Class", $false)
     if ($null -eq $pciRoot) {
-        if ($null -ne $enumRoot) { $enumRoot.Dispose() }
-        if ($null -ne $svcRoot)  { $svcRoot.Dispose() }
+        if ($null -ne $enumRoot)  { $enumRoot.Dispose() }
+        if ($null -ne $svcRoot)   { $svcRoot.Dispose() }
+        if ($null -ne $classRoot) { $classRoot.Dispose() }
         return @()
     }
 
@@ -667,9 +668,9 @@ function Get-HardwareState_IRQ {
                         $isNic     = ($devClass -match '^(?i)Net$' -or $clsGuid -match '(?i)4d36e972-e325-11ce-bfc1-08002be10318' -or $devName -match '(?i)(Ethernet|GbE|Network|Wi-Fi|WiFi|Wireless|802\.11|I219|I225|I226|Killer|Realtek PCI|AQtion|ConnectX)')
                         $isUsb     = ($devClass -match '^(?i)USB$' -or $clsGuid -match '(?i)36fc9e60-c465-11cf-8056-444553540000' -or $svcName -match '^(?i)(USBXHCI|USB4|usbuhci|usbehci)$' -or $devName -match '(?i)(eXtensible Host|Enhanced Host|USB4)')
                         $isStorage = ($policyVal -eq 5 -or $clsGuid -match '(?i)(4d36e96a|4d36e97b)-e325-11ce-bfc1-08002be10318' -or $svcName -match '^(?i)(stornvme|secnvme|storahci|iaStor)' -or $devName -match '(?i)(NVM Express|SATA AHCI)')
-                        $isAudio   = ($svcName -match '^(?i)(HDAudBus|IntcAzAudAddService|IntcOED)$' -or $devName -match '(?i)High Definition Audio')
+                        $isAudio   = ($devClass -match '^(?i)(MEDIA|Sound)$' -or $clsGuid -match '(?i)4d36e96c-e325-11ce-bfc1-08002be10318' -or $svcName -match '^(?i)(HDAudBus|IntcAzAudAddService|IntcOED)$' -or $devName -match '(?i)High Definition Audio')
 
-                        # Disambiguate generic NVMe/SATA controllers by attached physical drive name, and USB controllers by PCI B:D.F
+                        # Disambiguate generic NVMe/SATA controllers by attached physical drive, USB by PCI B:D.F, and Audio controllers by child HDAUDIO/MEDIA codec
                         if ($isStorage -and $null -ne $enumRoot) {
                             $diskNames = [System.Collections.Generic.List[string]]::new()
                             foreach ($descEntry in ([WinUltix.PnpTree]::GetDescendants($instanceId))) {
@@ -690,15 +691,109 @@ function Get-HardwareState_IRQ {
                                     }
                                 }
                             }
-                            $shortCtrl = $devName -replace '^Standard\s+', ''
+                            $shortCtrl = if ($svcName -match '^(?i)(stornvme|secnvme)$' -or $rawDevName -match '^(?i)@stornvme\.inf,') {
+                                "NVMe Controller"
+                            } elseif ($svcName -match '^(?i)(storahci|iaStor)' -or $rawDevName -match '^(?i)@mshdc\.inf,') {
+                                "SATA AHCI Controller"
+                            } else {
+                                ($devName -replace '^(?i)(Standard|Standardowy)\s+', '').Trim()
+                            }
                             if ($diskNames.Count -gt 0) {
                                 $devName = "$shortCtrl [$($diskNames -join ', ')]"
                             } elseif (-not [string]::IsNullOrEmpty($bdfTag)) {
                                 $devName = "$shortCtrl [Empty $bdfTag]"
+                            } else {
+                                $devName = $shortCtrl
                             }
                         } elseif ($isUsb -and -not [string]::IsNullOrEmpty($bdfTag)) {
-                            $shortUsb = ($devName -replace '\s*-\s*\d+\.\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace 'eXtensible Host Controller', 'XHCI').Trim()
-                            $devName  = "$shortUsb [$bdfTag]"
+                            $shortUsb = ($devName -replace '(?i)^(Rozszerzalny kontroler hosta|Kontroler hosta)\s+', '' -replace '\s*[-–—]\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
+                            if ($shortUsb -notmatch '(?i)XHCI' -and $svcName -match '^(?i)USBXHCI$') {
+                                $shortUsb = "$shortUsb XHCI"
+                            }
+                            $devName = "$shortUsb [$bdfTag]"
+                        } elseif ($isAudio) {
+                            $codecNames = [System.Collections.Generic.List[string]]::new()
+                            if ($null -ne $enumRoot) {
+                                foreach ($descEntry in ([WinUltix.PnpTree]::GetDescendants($instanceId))) {
+                                    $childId = ($descEntry -split '\|', 2)[1]
+                                    if ([string]::IsNullOrWhiteSpace($childId)) { continue }
+                                    $childKey = $enumRoot.OpenSubKey($childId, $false)
+                                    if ($null -ne $childKey) {
+                                        try {
+                                            $cClass   = [string]$childKey.GetValue("Class", "")
+                                            $cDrvRel  = [string]$childKey.GetValue("Driver", "")
+                                            $cRawDesc = [string]$childKey.GetValue("DeviceDesc", "")
+                                            if ($cClass -notmatch '^(?i)(MEDIA|Sound)$' -and $childId -notmatch '^(?i)(HDAUDIO|INTELAUDIO|ACP)\\') { continue }
+
+                                            $cInfPath  = ""
+                                            $cResolved = [string]$childKey.GetValue("FriendlyName", "")
+                                            if ($null -ne $classRoot -and -not [string]::IsNullOrWhiteSpace($cDrvRel)) {
+                                                $cDrvKey = $classRoot.OpenSubKey($cDrvRel, $false)
+                                                if ($null -ne $cDrvKey) {
+                                                    try {
+                                                        $cInfPath = [string]$cDrvKey.GetValue("InfPath", "")
+                                                        if ([string]::IsNullOrWhiteSpace($cResolved)) {
+                                                            $cResolved = [string]$cDrvKey.GetValue("DriverDesc", "")
+                                                        }
+                                                    } finally {
+                                                        $cDrvKey.Dispose()
+                                                    }
+                                                }
+                                            }
+                                            if ([string]::IsNullOrWhiteSpace($cResolved)) {
+                                                $cResolved = Format-UltixDeviceName -RawName $cRawDesc
+                                            }
+
+                                            $isGenericInbox = ($cRawDesc -match '^(?i)@hdaudio\.inf,' -or $cInfPath -match '^(?i)hdaudio\.inf$')
+                                            $cClean = ($cResolved -replace '(?i)\(R\)|\(TM\)', '' -replace '(?i)\s*High Definition Audio(\s+Device|\s+Controller)?', ' HD Audio' -replace '(?i)\s*Audio Device\s*$', ' Audio' -replace '\s+', ' ').Trim()
+
+                                            # 100% locale-independent fallback when Microsoft's generic hdaudio.inf driver is bound
+                                            if ($isGenericInbox -or [string]::IsNullOrWhiteSpace($cClean) -or $cClean -match '^(?i)(HD Audio|Microsoft.*|Urządzenie.*|Kontroler.*)$') {
+                                                $cClean = if ($childId -match 'VEN_10DE')     { "NVIDIA HD Audio" }
+                                                elseif ($childId -match 'VEN_10EC')           { "Realtek HD Audio" }
+                                                elseif ($childId -match 'VEN_1002')           { "AMD HDMI Audio" }
+                                                elseif ($childId -match 'VEN_8086')           { "Intel Display Audio" }
+                                                elseif ($childId -match 'VEN_1102')           { "Creative Audio" }
+                                                elseif ($childId -match 'VEN_13F6')           { "C-Media Audio" }
+                                                elseif ($childId -match 'VEN_14F1')           { "Conexant Audio" }
+                                                elseif ($childId -match 'VEN_1106')           { "VIA HD Audio" }
+                                                else { "" }
+                                            }
+
+                                            if (-not [string]::IsNullOrWhiteSpace($cClean) -and -not $codecNames.Contains($cClean)) {
+                                                $codecNames.Add($cClean)
+                                            }
+                                        } finally {
+                                            $childKey.Dispose()
+                                        }
+                                    }
+                                }
+                            }
+
+                            # Fallback to PCI Controller Vendor/Device ID if HDAUDIO bus has no active/bound child codec (e.g. unused AM5 Azalia SoC when board uses USB ALC4080)
+                            if ($codecNames.Count -eq 0) {
+                                $pciAudioVendor = if ($venName -match 'VEN_10DE')                        { "NVIDIA GPU Audio" }
+                                elseif ($venName -match 'VEN_1002')                                      { "AMD HDMI Audio" }
+                                elseif ($venName -match 'VEN_1022&DEV_(1640|1637|15DE)')                 { "AMD Display Audio" }
+                                elseif ($venName -match 'VEN_1022')                                      { "AMD SoC Audio" }
+                                elseif ($venName -match 'VEN_8086')                                      { "Intel PCH Audio" }
+                                elseif ($venName -match 'VEN_1102')                                      { "Creative Audio" }
+                                else                                                                     { "PCI Audio" }
+
+                                $fallbackLabel = if (-not [string]::IsNullOrEmpty($bdfTag)) { "$pciAudioVendor $bdfTag" } else { $pciAudioVendor }
+                                $codecNames.Add($fallbackLabel)
+                            }
+
+                            # Force compact 'HD Audio' prefix across all OS locales (replaces 52-char Polish 'Kontroler zgodny ze standardem High Definition Audio')
+                            $shortAudio = if ($svcName -match '^(?i)HDAudBus$' -or $rawDevName -match '^(?i)@hdaudbus\.inf,' -or $devName -match '(?i)High Definition Audio') {
+                                "HD Audio"
+                            } else {
+                                $devName.Trim()
+                            }
+                            $joinedCodecs = ($codecNames -join ', ')
+                            if ($shortAudio -notmatch [regex]::Escape($joinedCodecs)) {
+                                $devName = "$shortAudio [$joinedCodecs]"
+                            }
                         }
 
                         $deviceRole    = "Other"
@@ -754,6 +849,7 @@ function Get-HardwareState_IRQ {
                             UIDisplayName        = "$devName [MSI: $msiBadge | Prio: $prioLabel | Mask: $affLabel | $adviceText]"
                             MsiStatus            = $msiBadge
                             RawDeviceName        = $devName
+                            BdfTag               = $bdfTag
                             DeviceRole           = $deviceRole
                             ServiceName          = $etwModuleKey
                             DriverTag            = $drvTag
@@ -782,8 +878,22 @@ function Get-HardwareState_IRQ {
         }
     } finally {
         $pciRoot.Dispose()
-        if ($null -ne $enumRoot) { $enumRoot.Dispose() }
-        if ($null -ne $svcRoot)  { $svcRoot.Dispose() }
+        if ($null -ne $enumRoot)  { $enumRoot.Dispose() }
+        if ($null -ne $svcRoot)   { $svcRoot.Dispose() }
+        if ($null -ne $classRoot) { $classRoot.Dispose() }
+    }
+
+    # Final pass: if any two PCI controllers share the exact same RawDeviceName, append their PCI B:D.F tag
+    $nameCounts = @{}
+    foreach ($r in $results) {
+        $n = $r.RawDeviceName
+        $nameCounts[$n] = if ($nameCounts.ContainsKey($n)) { $nameCounts[$n] + 1 } else { 1 }
+    }
+    foreach ($r in $results) {
+        if ($nameCounts[$r.RawDeviceName] -gt 1 -and -not [string]::IsNullOrEmpty($r.BdfTag) -and $r.RawDeviceName -notmatch [regex]::Escape($r.BdfTag)) {
+            $r.RawDeviceName = "$($r.RawDeviceName) ($($r.BdfTag))"
+            $r.UIDisplayName = "$($r.RawDeviceName) [MSI: $($r.MsiStatus) | Prio: $($r.PrioLabel) | Mask: $($r.AffinityLabel) | $($r.AdviceText)]"
+        }
     }
 
     return @($results | Sort-Object SortRank, RawDeviceName)
@@ -1009,22 +1119,41 @@ function Get-HardwareState_Timer {
         })
     }
 
-    $bcd = (bcdedit.exe /enum "{current}" 2>$null) -join " "
-    
-    $dynTickOpt = ($bcd -match "(?i)disabledynamictick\s+(Yes|Tak|True|1)")
+    $bcdVerbose = (bcdedit.exe /enum "{current}" /v 2>$null) -join " "
+    $dynTickOpt   = $false
+    $platClockOpt = $true
+
+    if ($bcdVerbose -match '(\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})') {
+        $bcdElemBase = "HKLM:\BCD00000000\Objects\$($matches[1])\Elements"
+        if (Test-Path -LiteralPath $bcdElemBase) {
+            # 250000f0 = disabledynamictick (REG_BINARY: 01 = Yes, 00 = No)
+            [byte[]]$dynBytes = (Get-ItemProperty -LiteralPath "$bcdElemBase\250000f0" -Name "Element" -ErrorAction SilentlyContinue).Element
+            if ($null -ne $dynBytes -and $dynBytes.Length -ge 1) {
+                $dynTickOpt = ($dynBytes[0] -eq 1)
+            }
+            # 250000c2 = useplatformclock (REG_BINARY: 01 = Yes, 00/Absent = No)
+            [byte[]]$platBytes = (Get-ItemProperty -LiteralPath "$bcdElemBase\250000c2" -Name "Element" -ErrorAction SilentlyContinue).Element
+            if ($null -ne $platBytes -and $platBytes.Length -ge 1 -and $platBytes[0] -eq 1) {
+                $platClockOpt = $false
+            }
+        } else {
+            $dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|Tak|Ja|Oui|S[ií]|True|1)")
+            $platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|Tak|Ja|Oui|S[ií]|True|1)"))
+        }
+    }
+
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Disable Dynamic Tick (Power Saving)"
         IsOptimized   = $dynTickOpt
         ActionData    = @{ Type = "BCD"; Cmd = "disabledynamictick yes" }
     })
-    
-    $platClockOpt = (-not ($bcd -match "(?i)useplatformclock\s+(Yes|Tak|True|1)"))
+
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Disable Platform Clock (Force TSC)"
         IsOptimized   = $platClockOpt
         ActionData    = @{ Type = "BCD"; Cmd = "useplatformclock no" }
     })
-	
+
     return @($results)
 }
 
@@ -1980,6 +2109,8 @@ function Show-MsiModal {
         }
     })
 
+    $sortSyncGuard = @{ SuppressCombo = $false }
+
     $applySortMode = {
         $listView.BeginUpdate()
         switch ($comboSort.SelectedIndex) {
@@ -2001,7 +2132,12 @@ function Show-MsiModal {
         $listView.EndUpdate()
     }
 
-    $comboSort.Add_SelectedIndexChanged({ & $applySortMode }.GetNewClosure())
+    $comboSort.Add_SelectedIndexChanged({
+        if ($sortSyncGuard.SuppressCombo) { return }
+        if ($comboSort.SelectedIndex -ge 0) {
+            & $applySortMode
+        }
+    }.GetNewClosure())
 
     $chkShowKernel.Add_CheckedChanged({
         if (-not $chkShowKernel.Checked) {
@@ -2036,6 +2172,11 @@ function Show-MsiModal {
         $listView.Sort()
         & $reapplyAllRowShading
         $listView.EndUpdate()
+
+        # Deselect combo preset (-1) when sorting via column headers so selecting 'Default (Offload Advice ★)' always fires SelectedIndexChanged
+        $sortSyncGuard.SuppressCombo = $true
+        $comboSort.SelectedIndex = -1
+        $sortSyncGuard.SuppressCombo = $false
     }.GetNewClosure())
 
     $etwStarted = $false
@@ -2068,6 +2209,7 @@ function Show-MsiModal {
         "NIC"     = "-> Default"
         "USB"     = "-> Default"
         "Storage" = "-> Spread"
+        "Audio"   = "-> Default"
         "System"  = "All / C0"
     }
 
@@ -2078,6 +2220,9 @@ function Show-MsiModal {
         "ndis"      = @{ Name = "[OS] NDIS Network Subsystem";         Role = "NIC";     Advice = "Aggregates NIC IRQ (Offload NIC -> C1)" }
         "tcpip"     = @{ Name = "[OS] Windows TCP/IP Network Stack";   Role = "NIC";     Advice = "Follows NIC RSS / Interrupt Core" }
         "usbport"   = @{ Name = "[OS] USB 2.0 EHCI Port Driver";       Role = "USB";     Advice = "Legacy USB 2.0 EHCI Host Wrapper" }
+        "usbaudio2" = @{ Name = "[OS] USB Audio 2.0 Class Driver";     Role = "USB";     Advice = "Follows USB XHCI Controller Core" }
+        "portcls"   = @{ Name = "[OS] PortCls Audio Class Driver";     Role = "Audio";   Advice = "Follows HD Audio / PCIe Sound Core" }
+        "ks"        = @{ Name = "[OS] Kernel Streaming Audio/Video";   Role = "Audio";   Advice = "Audio/Video Kernel Pin Dispatcher" }
         "ntoskrnl"  = @{ Name = "[OS] Windows NT Executive & Timer";   Role = "System";  Advice = "OS Scheduler & Timer (Core 0 / All)" }
         "hal"       = @{ Name = "[OS] Hardware Abstraction Layer";     Role = "System";  Advice = "Hardware Timer & APIC Routing" }
         "acpi"      = @{ Name = "[OS] ACPI Power & Thermal Driver";    Role = "System";  Advice = "BIOS AML / EC Polling (Core 0)" }
@@ -2099,14 +2244,20 @@ function Show-MsiModal {
             }
         }
 
+        if ($comboSort.SelectedIndex -lt 0) {
+            $sortSyncGuard.SuppressCombo = $true
+            $comboSort.SelectedIndex = 0
+            $sortSyncGuard.SuppressCombo = $false
+        }
+
         $listView.BeginUpdate()
         $listView.ListViewItemSorter = $null
         $listView.Items.Clear()
         $pciServiceKeys.Clear()
         $auditData = Get-HardwareState_IRQ
 
-        # Compute inherited IRQ Mask summary per hardware role (GPU, NIC, USB, Storage) for KERNEL rows
-        foreach ($rName in @("GPU", "NIC", "USB", "Storage")) {
+        # Compute inherited IRQ Mask summary per hardware role (GPU, NIC, USB, Storage, Audio) for KERNEL rows
+        foreach ($rName in @("GPU", "NIC", "USB", "Storage", "Audio")) {
             $rItems = @($auditData | Where-Object { $_.DeviceRole -eq $rName })
             if ($rItems.Count -eq 0) {
                 $roleMaskMap[$rName] = if ($rName -eq "Storage") { "-> Spread" } else { "-> Default" }
@@ -2220,6 +2371,7 @@ function Show-MsiModal {
         $st = $ctx.Sorter
         if ($null -ne $lv -and -not $lv.IsDisposed) {
             $existingKernelRows = @{}
+            $addedKernelRow     = $false
             for ($r = 0; $r -lt $lv.Items.Count; $r++) {
                 $lvItem = $lv.Items[$r]
                 $dev = $lvItem.Tag
@@ -2291,17 +2443,20 @@ function Show-MsiModal {
 
                     & $ctx.StyleRow $kLv $lv.Items.Count $rec
                     [void]$lv.Items.Add($kLv)
+                    $addedKernelRow = $true
                 }
             }
 
             if ($st.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None -and
-                $st.ColumnToSort -in @(3, 4, -1) -and
+                ($st.ColumnToSort -in @(3, 4, -1) -or $addedKernelRow) -and
                 [System.Windows.Forms.Control]::MouseButtons -eq [System.Windows.Forms.MouseButtons]::None) {
-                $needsResort = $false
-                for ($i = 0; $i -lt ($lv.Items.Count - 1); $i++) {
-                    if ($st.Compare($lv.Items[$i], $lv.Items[$i + 1]) -gt 0) {
-                        $needsResort = $true
-                        break
+                $needsResort = $addedKernelRow
+                if (-not $needsResort) {
+                    for ($i = 0; $i -lt ($lv.Items.Count - 1); $i++) {
+                        if ($st.Compare($lv.Items[$i], $lv.Items[$i + 1]) -gt 0) {
+                            $needsResort = $true
+                            break
+                        }
                     }
                 }
                 if ($needsResort) {
@@ -3313,6 +3468,13 @@ function Get-UsbTopologyMap {
                 $parts = $entry -split '\|', 2
                 $depth = [int]$parts[0]
                 $devId = $parts[1]
+
+                # Purge stale hub speed maps from deeper or sibling DFS branches
+                foreach ($staleDepth in @($hubSpeedMap.Keys)) {
+                    if ($staleDepth -ge $depth) {
+                        [void]$hubSpeedMap.Remove($staleDepth)
+                    }
+                }
 
                 if ($devId -match '^USB\\ROOT_HUB') {
                     $rootHubInfo = [WinUltix.UsbProberV2]::ProbeHub($devId)

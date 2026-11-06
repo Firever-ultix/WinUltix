@@ -235,7 +235,8 @@ function Set-CustomDNS {
 
             try {
                 $ipProps = $nic.GetIPProperties()
-                if ($null -eq $ipProps -or $ipProps.GatewayAddresses.Count -eq 0) { continue }
+                $validGw = @($ipProps.GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") })
+                if ($null -eq $ipProps -or $validGw.Count -eq 0) { continue }
 
                 $v4Props = $ipProps.GetIPv4Properties()
                 if ($null -eq $v4Props -or $v4Props.Index -le 0) { continue }

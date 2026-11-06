@@ -486,17 +486,24 @@ function Show-ServicesGrid {
 
                 try {
                     Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetStart
+                    $flagVal = if ($Action -eq "Primary") { 0 } else { 3 }
 
-                    # If this is a Per-User session instance (e.g., CDPUserSvc_1a2b3c), also update its master template key
-                    if ($svc.Name -match '^(.+)_[0-9a-fA-F]{2,}$') {
-                        $baseSvcName = $matches[1]
-                        if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$baseSvcName") {
+                    # Sync master template and active _LUID session instances for Per-User services
+                    $baseSvcName = if ($svc.Name -match '^(.+)_[0-9a-fA-F]{2,}$') { $matches[1] } else { $svc.Name }
+                    $baseRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$baseSvcName"
+                    if (Test-Path -LiteralPath $baseRegPath) {
+                        if ($baseSvcName -ne $svc.Name) {
                             Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart
+                        }
+                        $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
+                        if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
+                            Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
                         }
                     }
 
                     if ($Action -eq "Primary") {
                         Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                        Get-Service -Name "$($baseSvcName)_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                         $UltixSync.Logs.Enqueue("    [OK] $($svc.Name) stopped and locked to Disabled (Start=4).")
                     } else {
                         $UltixSync.Logs.Enqueue("    [OK] $($svc.Name) set to Manual (Start=3).")

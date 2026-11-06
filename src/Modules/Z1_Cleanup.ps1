@@ -631,7 +631,7 @@ function Get-DriverStoreOrphans_Worker {
             DriverClass   = $className
             VersionDate   = $verDate
             SizeMB        = $sizeMB
-            SizeDisplay   = ("{0,7:N2} MB" -f $sizeMB)
+            SizeDisplay = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $sizeMB)
             Status        = $statusStr
             IsLocked      = $isActive
             IsDetected    = (-not $isActive)
@@ -924,7 +924,7 @@ function Get-InstallerOrphans_Worker {
             FileName      = $file.Name
             Status        = $statusTag
             SizeMB        = $sizeMB
-            SizeDisplay   = ("{0,7:N2} MB" -f $sizeMB)
+            SizeDisplay = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $sizeMB)
             ProductName   = $prodName
             Publisher     = $pubName
             FullPath      = $file.FullName
@@ -949,7 +949,7 @@ function Get-InstallerOrphans_Worker {
                 FileName      = "`$PatchCache`$"
                 Status        = "[ORPHAN / CACHE]"
                 SizeMB        = $pcMB
-                SizeDisplay   = ("{0,7:N2} MB" -f $pcMB)
+                SizeDisplay   = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $pcMB)
                 ProductName   = "Windows Installer Baseline RTM Patch Cache (Safe to empty)"
                 Publisher     = "Microsoft Corporation"
                 FullPath      = $patchCacheDir
@@ -1367,16 +1367,27 @@ function Show-RegistryOrphanSweeper {
                     } else {
                         if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
                         $kind = if ($entry.PSObject.Properties.Match("ValueKind").Count -gt 0 -and $entry.ValueKind) { [string]$entry.ValueKind } else { "String" }
-                        if ($kind -eq "Binary" -and -not [string]::IsNullOrWhiteSpace($entry.RawValueData)) {
-                            [byte[]]$bytes = [Convert]::FromBase64String([string]$entry.RawValueData)
-                            Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value $bytes -Type Binary -Force -ErrorAction SilentlyContinue
-                        } elseif ($kind -eq "DWord") {
-                            $dw = if ($entry.RawValueData -match '^\d+$') { [int]$entry.RawValueData } else { 1 }
-                            Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value $dw -Type DWord -Force -ErrorAction SilentlyContinue
-                        } else {
-                            Set-ItemProperty -LiteralPath $entry.RegPath -Name $entry.ValueName -Value ([string]$entry.RawValueData) -Type String -Force -ErrorAction SilentlyContinue
+                        $regItem = Get-Item -LiteralPath $entry.RegPath -ErrorAction SilentlyContinue
+                        if ($null -ne $regItem) {
+                            $wKey = $regItem.OpenSubKey("", $true)
+                            $regItem.Dispose()
+                            if ($null -ne $wKey) {
+                                try {
+                                    if ($kind -eq "Binary" -and -not [string]::IsNullOrWhiteSpace($entry.RawValueData)) {
+                                        [byte[]]$bytes = [Convert]::FromBase64String([string]$entry.RawValueData)
+                                        $wKey.SetValue([string]$entry.ValueName, $bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
+                                    } elseif ($kind -eq "DWord") {
+                                        $dw = if ($entry.RawValueData -match '^\d+$') { [int]$entry.RawValueData } else { 1 }
+                                        $wKey.SetValue([string]$entry.ValueName, $dw, [Microsoft.Win32.RegistryValueKind]::DWord)
+                                    } else {
+                                        $wKey.SetValue([string]$entry.ValueName, [string]$entry.RawValueData, [Microsoft.Win32.RegistryValueKind]::String)
+                                    }
+                                    $restored++
+                                } finally {
+                                    $wKey.Dispose()
+                                }
+                            }
                         }
-                        $restored++
                     }
                 }
                 Write-GUI " -> [OK] Restored $restored registry entry(s) from: $selectedBackup`n"
@@ -1439,8 +1450,19 @@ function Show-RegistryOrphanSweeper {
                             $removed++
                         }
                     } else {
-                        Remove-ItemProperty -LiteralPath $item.RegPath -Name $item.ValueName -Force -ErrorAction Stop
-                        $removed++
+                        $regItem = Get-Item -LiteralPath $item.RegPath -ErrorAction Stop
+                        if ($null -ne $regItem) {
+                            $wKey = $regItem.OpenSubKey("", $true)
+                            $regItem.Dispose()
+                            if ($null -ne $wKey) {
+                                try {
+                                    $wKey.DeleteValue([string]$item.ValueName, $true)
+                                    $removed++
+                                } finally {
+                                    $wKey.Dispose()
+                                }
+                            }
+                        }
                     }
                 } catch { }
             }

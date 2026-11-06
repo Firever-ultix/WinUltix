@@ -960,7 +960,7 @@ function Invoke-RemoveBloatware {
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Deprovisioned base image: $($prov.DisplayName)") }
                 } catch {
                     [void]$provisionedSet.Remove($prov.PackageName)
-                    if ($_.Exception.Message -notmatch "(?i)nie można odnaleźć|cannot find|0x80070002|0x80070003") {
+                    if ($_.Exception.HResult -notin @(-2147024894, -2147024893) -and $_.Exception.Message -notmatch "(?i)0x80070002|0x80070003") {
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [-] Error deprovisioning $($prov.DisplayName): $($_.Exception.Message)") }
                     }
                 }
