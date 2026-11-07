@@ -41,6 +41,7 @@ function Invoke-ServicesAudit {
             $results.Add([PSCustomObject]@{
                 UIDisplayName = $rule.UIDisplayName
                 IsDetected    = $isDetected
+                OptIn         = [bool]$rule.OptIn
                 ActionData    = $rule
             })
         }
@@ -103,7 +104,7 @@ function Get-TelemetryTasksState {
         @{ UIDisplayName = "Task: Windows Feedback & Diagnostics (Siuf)"; TaskPath = "\Microsoft\Windows\Feedback\*"; ExpectedState = "Disabled" }
         @{ UIDisplayName = "Task: Windows Performance Trace & WDI Resolution"; TaskPath = "\Microsoft\Windows\PerformanceTrace\*"; ExpectedState = "Disabled" }
         @{ UIDisplayName = "Task: Windows Error Reporting (QueueReporting)"; TaskPath = "\Microsoft\Windows\Windows Error Reporting\*"; ExpectedState = "Disabled" }
-        @{ UIDisplayName = "Task: Xbox Live Game Save Background Sync"; TaskPath = "\Microsoft\XblGameSave\*"; ExpectedState = "Disabled" }
+        @{ UIDisplayName = "Task: Xbox Live Game Save Background Sync"; TaskPath = "\Microsoft\XblGameSave\*"; ExpectedState = "Disabled"; OptIn = $true }
     )
     
     # Exclude core OS AppCompat Shim Database (sysmain.sdb) maintenance tasks protected by TrustedInstaller
@@ -121,10 +122,12 @@ function Get-TelemetryTasksState {
             ($_.State -eq 'Ready' -or $_.State -eq 'Running') -and
             (Test-UltixTaskAdminWritable -TaskPath $_.TaskPath -TaskName $_.TaskName)
         })
-        
+        $isDetected = ($activeTasks.Count -gt 0)
+
         $results.Add([PSCustomObject]@{
             UIDisplayName = $rule.UIDisplayName
-            IsDetected    = ($activeTasks.Count -gt 0)
+            IsDetected    = $isDetected
+            OptIn         = [bool]$rule.OptIn
             ActionData    = $rule
         })
     }
@@ -191,17 +194,17 @@ function Get-ServicesState_Heavy {
 
         # AI, Virtualization & Input Bloat
         @{ UIDisplayName = "AI: Windows AI Fabric Service (WSAIFabricSvc)"; Name = "WSAIFabricSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Input: Microsoft GameInput Service - Fixes HID stutter (GameInputSvc)"; Name = "GameInputSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+        @{ UIDisplayName = "Input: Microsoft GameInput Service - Disables Game Pass/Xbox controller input (GameInputSvc)"; Name = "GameInputSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
         @{ UIDisplayName = "Logitech: Lamp Array Service RGB (logi_lamparray_service)"; Name = "logi_lamparray_service"; ExpectedStart = 4; DefaultStart = 3 }
 
         # Printers, Scanner & Fax Subsystem
-        @{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4; DefaultStart = 2; OptIn = $true }
+        @{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
         @{ UIDisplayName = "Printers: Fax Service (Fax)"; Name = "Fax"; ExpectedStart = 4; DefaultStart = 3 }
 
         # Remote Access & Smart Cards
-        @{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
         @{ UIDisplayName = "Remote: Remote Registry (RemoteRegistry)"; Name = "RemoteRegistry"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Security: Smart Card Reader Service (SCardSvr)"; Name = "SCardSvr"; ExpectedStart = 4; DefaultStart = 3 }
 
@@ -209,9 +212,9 @@ function Get-ServicesState_Heavy {
         @{ UIDisplayName = "Location: Geolocation Service (lfsvc)"; Name = "lfsvc"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Location: Auto Time Zone Updater (tzautoupdate)"; Name = "tzautoupdate"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Biometrics: Windows Biometric Service (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Camera: Windows Camera Frame Server (FrameServer)"; Name = "FrameServer"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Biometrics: Windows Biometric Service - Fingerprint/Hello (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+        @{ UIDisplayName = "Camera: Windows Camera Frame Server - Webcams (FrameServer)"; Name = "FrameServer"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+        @{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
         @{ UIDisplayName = "Sensors: Sensor Data Service (SensorDataService)"; Name = "SensorDataService"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Sensors: Sensor Service (SensorService)"; Name = "SensorService"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Sensors: Sensor Monitoring Service (SensrSvc)"; Name = "SensrSvc"; ExpectedStart = 4; DefaultStart = 3 }
@@ -222,8 +225,8 @@ function Get-ServicesState_Heavy {
         @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Mobile: Phone Service (PhoneSvc)"; Name = "PhoneSvc"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Mobile: Cellular Time Synchronization (autotimesvc)"; Name = "autotimesvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Network: WWAN Cellular AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+        @{ UIDisplayName = "Network: WWAN Cellular AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
         @{ UIDisplayName = "Network: Internet Connection Sharing (SharedAccess)"; Name = "SharedAccess"; ExpectedStart = 4; DefaultStart = 3 }
 
         # Legacy Network Discovery (UPnP / SSDP / NetBIOS)
@@ -232,10 +235,10 @@ function Get-ServicesState_Heavy {
         @{ UIDisplayName = "Network: TCP/IP NetBIOS Helper (lmhosts)"; Name = "lmhosts"; ExpectedStart = 4; DefaultStart = 3 }
         
         # Xbox Background Services
-        @{ UIDisplayName = "Xbox: Xbox Live Auth Manager (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Live Game Save (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Live Networking Service (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Xbox: Xbox Accessory Management (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Xbox: Xbox Live Auth Manager (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+        @{ UIDisplayName = "Xbox: Xbox Live Game Save (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+        @{ UIDisplayName = "Xbox: Xbox Live Networking Service (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+        @{ UIDisplayName = "Xbox: Xbox Accessory Management (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
     )
     return Invoke-ServicesAudit -Rules $rules
 }

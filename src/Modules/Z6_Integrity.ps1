@@ -61,12 +61,7 @@ function Start-ExternalConsoleAsync {
 function Get-WinSxSState {
     if ($null -ne $UltixSync) { $UltixSync.Progress = 5 }
 
-    # Ensure TrustedInstaller is not hard-locked to Disabled (4) before invoking CBS analysis
-    $tiRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-    $tiStart   = (Get-ItemProperty -LiteralPath $tiRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
-    if ($tiStart -eq 4) {
-        Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-    }
+    Unlock-UltixTrustedInstaller
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = "dism.exe"
@@ -121,7 +116,7 @@ function Get-WinSxSState {
                     # Locale-independent table completion check: 2 colon-separated lines after the YYYY-MM-DD HH:MM:SS timestamp
                     $hasTableEnd = (
                         $curText -match '(?s)\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}.*?:\s*\d+\s*\r?\n[^\r\n:]+:\s*\S+' -or
-                        $curText -match '(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*\S+'
+                        $curText -match '(?im)Recommended.*?:\s*\S+'
                     )
 
                     if ($proc.HasExited) {
@@ -171,7 +166,7 @@ function Get-WinSxSState {
     }
     $recommended = (
         $reclaimableCount -gt 0 -or
-        ($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[ií]|True|1)\b")
+        ($dismOutput -match "(?im)Recommended.*?:\s*(Yes|True|1)\b")
     )
 
     $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
@@ -198,10 +193,7 @@ function Optimize-WinSXS {
     }
 
     $cmd = "echo Aggressive WinSxS compression in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
-    $tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-    if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
-        Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-    }
+    Unlock-UltixTrustedInstaller
     Start-ExternalConsoleAsync -Title "WinUltix - WinSxS ResetBase" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 
@@ -212,10 +204,7 @@ function Invoke-SystemHealthAudit {
     Update-Progress 15
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        $tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-        if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
-            Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-        }
+        Unlock-UltixTrustedInstaller
         $UltixSync.Progress = 35
         $null = & dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
         $dismExit = $LASTEXITCODE
@@ -232,9 +221,9 @@ function Invoke-SystemHealthAudit {
 
         # Zero-WMI, 100% locale-independent NTFS Dirty Bit verification via kernel32!DeviceIoControl (FSCTL_IS_VOLUME_DIRTY)
         $UltixSync.Progress = 70
-        $sysDrive = $env:SystemDrive.TrimEnd('\')
-        $isDirty  = $false
+        $sysDrive  = $env:SystemDrive.TrimEnd('\')
         $dirtyCode = [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+        $isDirty   = ($dirtyCode -eq 1)
         if ($dirtyCode -ge 0) {
             $isDirty = ($dirtyCode -eq 1)
         } else {
@@ -299,10 +288,7 @@ function Repair-SystemIntegrity {
     }
 
     $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk $sysDrive /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
-    $tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-    if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
-        Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-    }
+    Unlock-UltixTrustedInstaller
     Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 
@@ -678,12 +664,7 @@ function Repair-TimeSynchronization {
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         try {
             $UltixSync.Progress = 25
-            $UltixSync.Logs.Enqueue(" -> [1/4] Enforcing UTC hardware RTC clock (RealTimeIsUniversal=1) & unlocking W32Time...")
-            $tzPath = "HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation"
-            if (Test-Path -LiteralPath $tzPath) {
-                Set-ItemProperty -LiteralPath $tzPath -Name "RealTimeIsUniversal" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            }
-
+            $UltixSync.Logs.Enqueue(" -> [1/4] Re-registering Windows Time service (W32Time) & unlocking SCM configuration...")
             Stop-Service -Name "W32Time" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
             & w32tm.exe /unregister 2>$null | Out-Null
             Start-Sleep -Milliseconds 300
@@ -790,7 +771,7 @@ function Initialize-Z6UI {
     $rowCheckSystem = New-UltixActionRow -Parent $tabWinSXS -Y 20 -MainRGB @(55, 58, 64) `
         -Text "Scan System (ChkDisk + SFC + DISM)" `
         -Description "System First-Aid: Scans core Windows OS files for corruption and replaces damaged components using ChkDisk, DISM RestoreHealth, and SFC." `
-        -AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit via fsutil, and inspects CBS pending repair flags." `
+        -AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit via native FSCTL_IS_VOLUME_DIRTY, and inspects CBS pending repair flags." `
         -OnClick ({ Repair-SystemIntegrity -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
         -OnAudit ({ Invoke-SystemHealthAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
@@ -860,7 +841,7 @@ function Initialize-Z6UI {
     # 8. Time & NTP Clock Sync First-Aid
     $btnFixTime = New-UltixButton -Parent $tabWinSXS -X 15 -Y 370 -RGB @(55, 58, 64) `
         -Text "Repair Time & NTP Clock Sync (w32time)" `
-        -Description "Time First-Aid: Enforces UTC hardware RTC clock (fixes dual-boot drift), re-registers W32Time, sets Cloudflare/NTP.org peers, and forces immediate clock resync." `
+        -Description "Time First-Aid: Re-registers W32Time service, configures resilient Cloudflare/NTP.org peers, and forces immediate clock resynchronization." `
         -OnClick ({ Repair-TimeSynchronization -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     # 9. UWP Shell, Store & Xbox Gaming Services First-Aid

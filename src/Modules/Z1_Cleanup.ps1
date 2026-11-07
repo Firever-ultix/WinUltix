@@ -387,9 +387,7 @@ function Invoke-InteractiveCleanup {
                 elseif ($rule.Type -eq "RecycleBin") {
                     $path = $rule.Path
                     if (Test-Path -LiteralPath $path) {
-                        & takeown.exe /F "$path\*" /R /A /D Y 2>$null | Out-Null
-                        # Use well-known Administrators SID (*S-1-5-32-544) for locale independence
-                        & icacls.exe "$path\*" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+                        Grant-UltixDirectoryAdminAccess -TargetPath "$path\*"
                         Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
                             Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
                         }
@@ -1563,6 +1561,11 @@ function Get-GhostServicesState {
             # Shield services/drivers installed on currently unplugged external drives
             if ($rawPath -match '^([a-zA-Z]):\\') {
                 if (-not $readyDrives.Contains($matches[1])) { continue }
+            }
+
+            # Shield inbox Windows OS user-mode service binaries inside System32 / SysWOW64 (e.g. optional OS features)
+            if ($rawPath -match '(?i)^[a-z]:\\Windows\\(System32|SysWOW64)\\[^\\]+\.(exe|dll)$') {
+                continue
             }
             
             if (-not [System.IO.File]::Exists($rawPath)) {

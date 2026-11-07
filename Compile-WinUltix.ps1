@@ -30,13 +30,6 @@ function ConvertTo-AsciiSafePowerShell {
     $clean = $clean.Replace([string][char]0x2605, '$([char]0x2605)')
     $clean = $clean.Replace([string][char]0x2713, '$([char]0x2713)')
     $clean = $clean.Replace([string][char]0x00B5, '$([char]0x00B5)')
-    $clean = $clean -replace 'nie mo.na odnale..', 'nie mo.na odnale..'
-    $clean = $clean -replace 'Urz.dzenie kompozytowe', 'Urz.dzenie kompozytowe'
-    $clean = $clean -replace 'Urz.dzenie wej.ciowe', 'Urz.dzenie wej.ciowe'
-    $clean = $clean -replace 'Urz.dzenie klawiatury HID', 'Urz.dzenie klawiatury HID'
-    $clean = $clean.Replace("S[i" + [char]0x00ED + "]", "S[i\u00ED]")
-    $clean = $clean.Replace("N[A" + [char]0x00C3 + "]O", "N[A\u00C3]O")
-    $clean = $clean -replace '干净\|正常\|클린\|クリーン', '\u5E72\u51C0|\u6B63\u5E38|\uD074\uB9B0|\u30AF\u30EA\u30FC\u30F3'
 
     if ($Compact) {
         $outLines       = [System.Collections.Generic.List[string]]::new()
@@ -135,8 +128,16 @@ foreach ($line in $mainLines) {
     }
 }
 
-$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-[System.IO.File]::WriteAllText($outputPs1, $sbPs1.ToString(), $utf8NoBom)
+$utf8NoBom   = [System.Text.UTF8Encoding]::new($false)
+$monolithStr = $sbPs1.ToString()
+$nonAscii    = [regex]::Matches($monolithStr, '[^\x00-\x7F]')
+if ($nonAscii.Count -gt 0) {
+    $sampleChars = @($nonAscii | ForEach-Object { $_.Value } | Select-Object -Unique) -join ", "
+    Write-Warning "[!] Non-ASCII characters detected in Monolith ($($nonAscii.Count) occurrences: $sampleChars). Check ConvertTo-AsciiSafePowerShell!"
+} else {
+    Write-Host "  [+] Verified 100% 7-bit ASCII purity for 'irm | iex' streaming." -ForegroundColor Cyan
+}
+[System.IO.File]::WriteAllText($outputPs1, $monolithStr, $utf8NoBom)
 $ps1KB = [math]::Round((Get-Item $outputPs1).Length / 1KB, 2)
 Write-Host "  [+] Clean UTF-8 No-BOM Monolith saved: $outputPs1 ($ps1KB KB)" -ForegroundColor Green
 

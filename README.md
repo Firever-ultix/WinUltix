@@ -23,7 +23,7 @@ irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix
 ```
 
 *(Prefer a standalone `.exe`? Grab the compiled executable from the **[Releases](https://github.com/Firever-ultix/WinUltix/releases)** page).*
-SHA-256: 4835A57C996EBE16DBE7A33EFFED6F69504CA9F83A1FD4967DBB5C388279321F
+SHA-256: 46B2642FF4597A21709092EF387633DD9AF7200DA560B66416F613D06B19DFD4
 
 ---
 
@@ -83,13 +83,13 @@ Go far beyond basic temp cleaners by reclaiming every GB wasted from hidden Wind
 #### 🗑️ 2. `Debloat` — Bloatware, Recall AI & Component Removal (9 Tools)
 * **Uninstall & Deprovision OneDrive:** Multi-profile OneDrive amputation across all loaded `HKEY_USERS` hives—including residual `Explorer\Desktop\NameSpace` shell folders—while keeping dormant `%SystemRoot%` stubs so `sfc /scannow` stays 100% healthy.
 * **Aggressive Bloatware & AI Removal (64 Targets):** High-speed, single-pass DISM deprovisioning and removal of 64 UWP bloatware apps, **Windows Recall** payloads, and **Copilot AI**—while strictly shielding 25H2/26H2 shell packages, Xbox Identity, Steam, and Microsoft Store.
-* **System Features (FOD Preset) & CBS Capability Stubs:** Strip 14 unneeded Features on Demand (WordPad, Steps Recorder, Quick Assist, Fax, Hello Face) and purge underlying CBS `*stub*` packages.
+* **System Features (FOD Preset) & CBS Capability Stubs:** Strip unneeded Features on Demand (WordPad, Steps Recorder, Quick Assist, Fax, XPS Viewer, Hello Face, plus optional Inbox Ethernet/Wi-Fi driver packs when OEM `oemXX.inf` drivers are active) and purge underlying CBS `*stub*` packages.
+* **4 Manual Package & Feature Inspector Grids:** Sortable tables with live search for granular control over remaining **User Appx**, **Base Image Provisioned Appx**, **Full FOD Capabilities** (with red `[CRITICAL - LOCKED]` shields on DirectX, Defender, and any NIC FOD actively used by an inbox driver), and **Windows Optional Features (DISM)** with symmetric Enable/Disable support and `.NET 4.8` runtime lock.
 * **Appx Framework Garbage Collector:** Resolves transitive dependency graphs to remove orphaned UWP runtime frameworks.
-* **4 Manual Package & Feature Inspector Grids:** Sortable tables with live search for granular control over remaining **User Appx**, **Base Image Provisioned Appx**, **Full FOD Capabilities** (with red `[CRITICAL - LOCKED]` shields on DirectX, Ethernet LAN, and Defender FODs), and **Windows Optional Features (DISM)**.
 
 #### ⚡ 3. `Tweaks` — Shell, 26H2 Start Menu, Power & Gaming Registry (7 Tools)
 * **Taskbar & Start Menu Tweaks:** Align the taskbar left, show clock seconds, kill Bing web search, and disable Widgets (includes a symmetric kernel-level bypass for Microsoft's **`UCPD.sys`** protection driver on Windows 11 24H2/25H2/26H2).
-* **1-Click Clean Start Menu (3-Icon + Classic List):** Wipes promotional Start Menu tiles (`start2.bin`), hides recently opened file shortcuts, forces the **Classic Alphabetical All-Apps List (`AllAppsViewMode=2`)** instead of Windows 11 26H2 category tiles, and compiles a clean 3-icon Start Menu (*Edge, Settings, Explorer*) with zero MDM locks left behind.
+* **1-Click Clean Start Menu (3-Icon + Classic List + Backup Restore):** Automatically backs up your original `start2.bin` layout (`start2_backup.bin`), wipes promotional tiles, hides recently opened file shortcuts, forces the **Classic Alphabetical All-Apps List (`AllAppsViewMode=2`)** instead of Windows 11 26H2 category tiles, and compiles a clean 3-icon Start Menu (*Edge, Settings, Explorer*) with 1-click Revert support.
 * **File Explorer & Classic Context Menu:** Restore the classic Windows 10 right-click menu, show file extensions, unpin OneDrive, and run Explorer windows in separate processes.
 * **OS Annoyances:** Disable Modern Standby S0 (restore hardware S3 sleep), block AutoPlay, and kill Sticky/Filter Keys popups.
 * **7-Point Power & Display Optimizer:** Disable Hibernation (`hiberfil.sys`), stop SATA HDD spin-down lag, disable **USB Selective Suspend** (prevents drops on USB DACs and 8KHz mice), disable plan PCIe ASPM, and turn off **Content Adaptive Brightness (CABC)** to stop auto-dimming on OLED/IPS monitors.
@@ -121,7 +121,7 @@ When Windows breaks, fix the exact subsystem without reinstalling the OS:
 * **Refresh Network Stack:** Flushes DNS, clears ARP routing tables, resets WinHTTP proxy, resets the Winsock catalog, and resets the TCP/IPv4 & IPv6 stack.
 * **Reset Print Subsystem (Spooler First-Aid):** Auto-unlocks `Spooler` if disabled by the Gaming profile, terminates deadlocked `spoolsv.exe`, deletes `.SHD`/`.SPL` queue files, and restarts `PrintWorkflowUserSvc` & `Spooler`.
 * **Rebuild Shell Icon & Thumbnail Cache:** Gracefully cycles Explorer, deletes corrupted `iconcache_*.db` / `thumbcache_*.db` databases, and forces a clean rebuild via `ie4uinit.exe`.
-* **Repair Time & NTP Clock Sync (`w32time`):** Enforces a UTC hardware RTC clock (`RealTimeIsUniversal=1` to eliminate dual-boot clock drift), re-registers `W32Time`, configures resilient Cloudflare/NTP.org peers, and forces an immediate resync to fix broken TLS/DoH/Xbox authentication.
+* **Repair Time & NTP Clock Sync (`w32time`):** Unlocks and re-registers the `W32Time` service, configures resilient Cloudflare/NTP.org peers, and forces an immediate clock resynchronization to fix broken TLS/DoH/Xbox authentication.
 * **Repair UWP, Store & Xbox Gaming Services:** Unlocks `AppXSvc`, `ClipSVC`, and `GamingServices`, flushes `WindowsStore` cache (`wsreset -i`), and re-registers existing Shell, Store, and Xbox `AppxManifest.xml` files without restoring removed bloatware.
 
 

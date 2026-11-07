@@ -1664,6 +1664,24 @@ if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
 Start-Service -Name $ServiceName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
 }
 }
+function Unlock-UltixTrustedInstaller {
+$tiRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+$tiStart   = (Get-ItemProperty -LiteralPath $tiRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+if ($tiStart -eq 4) {
+Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+}
+}
+function Grant-UltixDirectoryAdminAccess {
+param([Parameter(Mandatory=$true)][string]$TargetPath)
+if ([string]::IsNullOrWhiteSpace($TargetPath)) { return }
+try {
+[WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
+[WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
+[WinUltix.PrivilegeEnabler]::EnablePrivilege("SeBackupPrivilege")
+} catch { }
+& icacls.exe "$TargetPath" /setowner "*S-1-5-32-544" /T /C /Q 2>$null | Out-Null
+& icacls.exe "$TargetPath" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+}
 function Get-UltixPowerAcIndex {
 param(
 [Parameter(Mandatory=$true)][string]$SettingGuid,
@@ -1777,6 +1795,7 @@ return "$($matches[1].Trim()) USB $($matches[2].Trim()) eXtensible Host Controll
 }
 }
 "hdaudbus.inf" { return "High Definition Audio Controller" }
+"hdaudio.inf"  { return "High Definition Audio Device" }
 "stornvme.inf" { return "Standard NVM Express Controller" }
 "mshdc.inf" {
 if ($infToken -match 'storahci|ahci') { return "Standard SATA AHCI Controller" }
@@ -1793,6 +1812,8 @@ if ($infToken -match 'hid\.keyboarddevice') { return "HID Keyboard Device" }
 "msmouse.inf" {
 if ($infToken -match 'hid\.mousedevice') { return "HID-compliant mouse" }
 }
+"hidclass.inf" { return "HID-compliant device" }
+"hidserv.inf"  { return "HID-compliant consumer control device" }
 "usbhub3.inf" {
 if ($infToken -match 'usb30hub') { return "Generic SuperSpeed USB Hub" }
 if ($infToken -match 'usb20hub') { return "Generic USB Hub" }
@@ -2147,8 +2168,12 @@ param(
 [int]$PollIntervalMs = 150
 )
 if ($null -ne $UltixSync) {
+$prevProg  = $UltixSync.Progress
 $nestedOut = & $ScriptBlock @Arguments
 if ($null -ne $OnComplete) { & $OnComplete $nestedOut }
+if ($UltixSync.Progress -eq 0 -and $prevProg -gt 0) {
+$UltixSync.Progress = $prevProg
+}
 return
 }
 foreach ($ctrl in $ControlsToDisable) {
@@ -2284,7 +2309,17 @@ Update-Progress 0
 $detected = @($auditData | Where-Object { $_.IsDetected })
 if ($isAuditOnly) {
 if ($detected.Count -gt 0) {
-foreach ($d in $detected) { Write-GUI "  [!] ${AuditPrefix}: $($d.UIDisplayName)" }
+foreach ($d in $detected) {
+$isOpt = (
+($d.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$d.OptIn) -or
+($null -ne $d.ActionData -and $d.ActionData -is [hashtable] -and $d.ActionData.OptIn -eq $true)
+)
+if ($isOpt) {
+Write-GUI "  [*] Optional (${AuditPrefix}): $($d.UIDisplayName)"
+} else {
+Write-GUI "  [!] ${AuditPrefix}: $($d.UIDisplayName)"
+}
+}
 Write-GUI "-> STATUS: $($detected.Count) item(s) flagged.`n"
 } else {
 Write-GUI "  [OK] Optimized / Clean.`n"
@@ -2389,8 +2424,16 @@ $chkList.Anchor = 'Top, Bottom, Left, Right'
 if ($hasValidItems) {
 $chkList.BeginUpdate()
 foreach ($item in $AuditResults) {
+$isOptIn = (
+($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
+($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
+)
 if ($item.IsDetected) {
+if ($isOptIn) {
+[void]$chkList.Items.Add("[ OPTIONAL ]  " + $item.UIDisplayName, $false)
+} else {
 [void]$chkList.Items.Add("[ DETECTED ]  " + $item.UIDisplayName, $true)
+}
 } else {
 [void]$chkList.Items.Add("[ OPTIMIZED ] " + $item.UIDisplayName, $false)
 }
@@ -2427,7 +2470,12 @@ $chkList.EndUpdate()
 $btnSelDet.Add_Click({
 $chkList.BeginUpdate()
 for ($i = 0; $i -lt $AuditResults.Count; $i++) {
-$chkList.SetItemChecked($i, [bool]$AuditResults[$i].IsDetected)
+$item = $AuditResults[$i]
+$isOptIn = (
+($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
+($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
+)
+$chkList.SetItemChecked($i, ([bool]$item.IsDetected -and -not $isOptIn))
 }
 $chkList.EndUpdate()
 & $updateCounter 0
@@ -2476,6 +2524,9 @@ if ($hasValidItems -and ($result -eq "OK" -or $result -eq "Yes")) {
 $selectedItems = [System.Collections.Generic.List[object]]::new()
 foreach ($idx in $chkList.CheckedIndices) {
 $selectedItems.Add($AuditResults[$idx])
+}
+if ($selectedItems.Count -eq 0 -and $AuditResults.Count -eq 1) {
+$selectedItems.Add($AuditResults[0])
 }
 $actionData = if ($result -eq "OK") { "Apply" } else { "Revert" }
 return [PSCustomObject]@{ Action = $actionData; Items = @($selectedItems) }
@@ -3440,8 +3491,7 @@ $UltixSync.Logs.Enqueue("    [OK] Cleared $totalCh Event Viewer channel(s).")
 elseif ($rule.Type -eq "RecycleBin") {
 $path = $rule.Path
 if (Test-Path -LiteralPath $path) {
-& takeown.exe /F "$path\*" /R /A /D Y 2>$null | Out-Null
-& icacls.exe "$path\*" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+Grant-UltixDirectoryAdminAccess -TargetPath "$path\*"
 Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
 Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -4455,6 +4505,9 @@ else { $rawPath = $candidateWinDir }
 if ($rawPath -match '^([a-zA-Z]):\\') {
 if (-not $readyDrives.Contains($matches[1])) { continue }
 }
+if ($rawPath -match '(?i)^[a-z]:\\Windows\\(System32|SysWOW64)\\[^\\]+\.(exe|dll)$') {
+continue
+}
 if (-not [System.IO.File]::Exists($rawPath)) {
 $ghosts.Add([PSCustomObject]@{
 Name          = $svcName
@@ -4576,6 +4629,64 @@ $TabControl.Controls.Add($tabClean)
 }
 function Get-UltixProtectedAppxRegex {
 return "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
+}
+function Get-UltixInboxNicFodStatus {
+$usingInboxWifi = $false
+$usingInboxEth  = $false
+$classRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}", $false)
+if ($null -eq $classRoot) {
+return [PSCustomObject]@{ InboxWifiActive = $false; InboxEthActive = $false }
+}
+try {
+foreach ($subName in $classRoot.GetSubKeyNames()) {
+if ($subName -notmatch '^\d{4}$') { continue }
+$drvKey = $classRoot.OpenSubKey($subName, $false)
+if ($null -eq $drvKey) { continue }
+try {
+$infPath = [string]$drvKey.GetValue("InfPath", "")
+if ([string]::IsNullOrWhiteSpace($infPath) -or $infPath -match '^(?i)oem\d+\.inf$') { continue }
+$matchingId = [string]$drvKey.GetValue("MatchingDeviceId", "")
+if ($matchingId -notmatch '^(?i)(PCI|USB)\\') { continue }
+$drvDesc = [string]$drvKey.GetValue("DriverDesc", "")
+$isActiveHw = $false
+$devInstId  = [string]$drvKey.GetValue("DeviceInstanceID", "")
+if ($devInstId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($devInstId) -eq 0) {
+$isActiveHw = $true
+}
+if (-not $isActiveHw) {
+$linkKey = $drvKey.OpenSubKey("Linkage", $false)
+if ($null -ne $linkKey) {
+try {
+[string[]]$rootDev = $linkKey.GetValue("RootDevice", @())
+foreach ($pnpId in $rootDev) {
+if ($pnpId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($pnpId) -eq 0) {
+$isActiveHw = $true
+break
+}
+}
+} finally {
+$linkKey.Dispose()
+}
+}
+}
+if ($isActiveHw) {
+if ($infPath -match '(?i)(wlan|wifi|netwtw|netrtwl|netr28|netathr|netbc6)' -or $drvDesc -match '(?i)(Wi-Fi|WiFi|Wireless|802\.11|WLAN)') {
+$usingInboxWifi = $true
+} else {
+$usingInboxEth = $true
+}
+}
+} finally {
+$drvKey.Dispose()
+}
+}
+} finally {
+$classRoot.Dispose()
+}
+return [PSCustomObject]@{
+InboxWifiActive = $usingInboxWifi
+InboxEthActive  = $usingInboxEth
+}
 }
 function Get-OneDriveState {
 if ($null -ne $UltixSync) { $UltixSync.Progress = 10 }
@@ -4706,14 +4817,17 @@ if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
 return $results
 }
 function Get-CapabilitiesState {
+Unlock-UltixTrustedInstaller
 if ($null -ne $UltixSync) { $UltixSync.Progress = 15 }
 $capsWildcards = @(
 "*Print.Fax.Scan*", "*App.StepsRecorder*", "*Media.WindowsMediaPlayer*",
 "*MathRecognizer*", "*App.Support.QuickAssist*", "*Microsoft.Windows.WordPad*",
 "*Hello.Face*", "*OneCoreUAP.OneSync*", "*Browser.InternetExplorer*",
 "*Microsoft.Wallpapers.Extended*", "*Print.Management.Console*",
-"*Language.Handwriting*", "*Language.Speech*", "*Wifi.Client*"
+"*Language.Handwriting*", "*Language.Speech*", "*XPS.Viewer*",
+"*Ethernet.Client*", "*Wifi.Client*"
 )
+$nicFodStatus  = Get-UltixInboxNicFodStatus
 $installedCaps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Installed' })
 if ($null -ne $UltixSync) { $UltixSync.Progress = 65 }
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -4727,9 +4841,29 @@ $UltixSync.Progress = 65 + [int](($idx / $total) * 35)
 $found      = @($installedCaps | Where-Object { $_.Name -like $capName })
 $isDetected = ($found.Count -gt 0)
 $cleanName  = $capName.Replace("*", "")
+$dispLabel  = "FOD: $cleanName"
+$isOptIn    = ($cleanName -match '^(?i)(Hello\.Face|Language\.|Ethernet\.Client|Wifi\.Client)')
+if ($cleanName -eq "Ethernet.Client") {
+if ($nicFodStatus.InboxEthActive) {
+$isDetected = $false
+$found      = @()
+$dispLabel  = "FOD: Ethernet.Client [LOCKED - Active NIC is using MS Inbox Driver; install OEM driver first]"
+} else {
+$dispLabel  = "FOD: Ethernet.Client (MS Inbox LAN Drivers - Safe: OEM driver active, install OEM driver first if changing NIC)"
+}
+} elseif ($cleanName -eq "Wifi.Client") {
+if ($nicFodStatus.InboxWifiActive) {
+$isDetected = $false
+$found      = @()
+$dispLabel  = "FOD: Wifi.Client [LOCKED - Active Wi-Fi is using MS Inbox Driver; install OEM driver first]"
+} else {
+$dispLabel  = "FOD: Wifi.Client (MS Inbox WLAN Drivers - Safe: OEM driver active, install OEM driver first if changing Wi-Fi)"
+}
+}
 $results.Add([PSCustomObject]@{
-UIDisplayName = "FOD: $cleanName"
+UIDisplayName = $dispLabel
 IsDetected    = $isDetected
+OptIn         = $isOptIn
 ActionData    = $found
 })
 }
@@ -4836,15 +4970,15 @@ $appCatalog = @(
 @{ Label = "Windows Maps";                                Pattern = "*WindowsMaps*" }
 @{ Label = "Windows Alarms & Clock";                      Pattern = "*WindowsAlarms*" }
 @{ Label = "Windows Voice Recorder (SoundRecorder)";      Pattern = "*SoundRecorder*" }
-@{ Label = "Windows Camera";                              Pattern = "*WindowsCamera*" }
-@{ Label = "Windows Photos";                              Pattern = "*Windows.Photos*" }
+@{ Label = "Windows Camera";                              Pattern = "*WindowsCamera*"; OptIn = $true }
+@{ Label = "Windows Photos";                              Pattern = "*Windows.Photos*"; OptIn = $true }
 @{ Label = "Media Player / Groove Music (ZuneMusic)";     Pattern = "*ZuneMusic*" }
 @{ Label = "Movies & TV (ZuneVideo)";                     Pattern = "*ZuneVideo*" }
 @{ Label = "Microsoft Solitaire Collection";              Pattern = "*SolitaireCollection*" }
-@{ Label = "Xbox App (GamingApp)";                        Pattern = "*GamingApp*|*XboxApp*" }
-@{ Label = "Xbox Game Bar (XboxGamingOverlay)";           Pattern = "*XboxGamingOverlay*" }
-@{ Label = "Xbox Speech To Text Overlay";                 Pattern = "*XboxSpeechToTextOverlay*" }
-@{ Label = "Xbox TCUI (Live In-Game Experience)";         Pattern = "*Xbox.TCUI*" }
+@{ Label = "Xbox App (GamingApp)";                        Pattern = "*GamingApp*|*XboxApp*"; OptIn = $true }
+@{ Label = "Xbox Game Bar (XboxGamingOverlay)";           Pattern = "*XboxGamingOverlay*"; OptIn = $true }
+@{ Label = "Xbox Speech To Text Overlay";                 Pattern = "*XboxSpeechToTextOverlay*"; OptIn = $true }
+@{ Label = "Xbox TCUI (Live In-Game Experience)";         Pattern = "*Xbox.TCUI*"; OptIn = $true }
 @{ Label = "Microsoft People";                            Pattern = "*Microsoft.People*" }
 @{ Label = "Skype UWP";                                   Pattern = "*SkypeApp*" }
 @{ Label = "Cortana";                                     Pattern = "*Cortana*" }
@@ -4963,8 +5097,10 @@ $sizeLabel = " [ Provisioned Image ]"
 $results.Add([PSCustomObject]@{
 UIDisplayName = "$($entry.Label)$sizeLabel"
 IsDetected    = $isDetected
+OptIn         = [bool]$entry.OptIn
 ActionData    = @{
 IsRecall    = $false
+OptIn       = [bool]$entry.OptIn
 Installed   = @($foundInstalled)
 Provisioned = @($foundProv)
 }
@@ -4974,6 +5110,7 @@ if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
 return $results
 }
 function Get-CapabilityStubState {
+Unlock-UltixTrustedInstaller
 if ($null -ne $UltixSync) { $UltixSync.Progress = 20 }
 $cbsStubs = @(Get-WindowsPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.PackageName -match "(?i)stub" -and $_.PackageState -eq "Installed" })
 if ($null -ne $UltixSync) { $UltixSync.Progress = 80 }
@@ -5004,8 +5141,7 @@ $current = 0
 function Remove-UltixOneDriveDirectory {
 param([string]$TargetDir)
 if ([string]::IsNullOrWhiteSpace($TargetDir) -or -not (Test-Path -LiteralPath $TargetDir)) { return }
-& takeown.exe /F "$TargetDir" /R /A /D Y 2>$null | Out-Null
-& icacls.exe "$TargetDir" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+Grant-UltixDirectoryAdminAccess -TargetPath $TargetDir
 $binFiles = @(Get-ChildItem -LiteralPath $TargetDir -Include "*.dll", "*.exe" -Recurse -File -Force -ErrorAction SilentlyContinue)
 foreach ($bin in $binFiles) {
 $binPath = $bin.FullName
@@ -5200,6 +5336,7 @@ Write-GUI " -> Removing selected Windows Capabilities (CBS Background Thread)...
 Update-Progress 5
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$SelectedItems) -ScriptBlock {
 param([array]$Items)
+Unlock-UltixTrustedInstaller
 $total   = $Items.Count
 $current = 0
 foreach ($item in $Items) {
@@ -5392,6 +5529,7 @@ Write-GUI " -> Purging selected CBS Stubs (Background Thread)..."
 Update-Progress 5
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$SelectedItems) -ScriptBlock {
 param([array]$Items)
+Unlock-UltixTrustedInstaller
 $total   = $Items.Count
 $current = 0
 foreach ($item in $Items) {
@@ -5539,14 +5677,33 @@ param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 Write-GUI " -> Querying installed Windows Capabilities / FOD (Background Thread)..."
 Update-Progress 25
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-$criticalFodRegex = '^(?i)(DirectX\.Configuration\.Database|Microsoft\.Windows\.Ethernet\.Client|Microsoft\.Windows\.Sense\.Client)'
+Unlock-UltixTrustedInstaller
+$nicFodStatus = Get-UltixInboxNicFodStatus
 $caps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue |
 Where-Object { $_.State -eq 'Installed' } |
 ForEach-Object {
-$isCrit = ($_.Name -match $criticalFodRegex)
-$stateDisp = if ($isCrit) { "Installed [CRITICAL - LOCKED]" } else { [string]$_.State }
+$cName  = $_.Name
+$isCrit = ($cName -match '^(?i)(DirectX\.Configuration\.Database|Microsoft\.Windows\.Sense\.Client)')
+$stateDisp = [string]$_.State
+if ($isCrit) {
+$stateDisp = "Installed [CRITICAL - LOCKED]"
+} elseif ($cName -match '^(?i)Microsoft\.Windows\.Ethernet\.Client') {
+if ($nicFodStatus.InboxEthActive) {
+$isCrit    = $true
+$stateDisp = "Installed [INBOX LAN IN USE - LOCKED]"
+} else {
+$stateDisp = "Installed [OEM Driver Active - Removable]"
+}
+} elseif ($cName -match '^(?i)Microsoft\.Windows\.Wifi\.Client') {
+if ($nicFodStatus.InboxWifiActive) {
+$isCrit    = $true
+$stateDisp = "Installed [INBOX WIFI IN USE - LOCKED]"
+} else {
+$stateDisp = "Installed [OEM Driver Active - Removable]"
+}
+}
 [PSCustomObject]@{
-Name     = $_.Name
+Name     = $cName
 State    = $stateDisp
 IsLocked = $isCrit
 }
@@ -5561,11 +5718,11 @@ Write-GUI " -> No installed Capabilities returned.`n"
 return
 }
 $cols = @(
-@{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 650 }
-@{ Header = "State";                 Property = "State"; Width = 190 }
+@{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 590 }
+@{ Header = "State / Driver Check";  Property = "State"; Width = 250 }
 )
 $res = Show-UltixGridModal -Title "WinUltix - Windows Capabilities (FOD)" `
--Description "Select installed Features on Demand (FOD) to uninstall. Critical DirectX, Ethernet LAN, and Defender FODs (Red) are locked." `
+-Description "Select installed FODs to uninstall. DirectX, Defender, and any NIC FOD currently used by an inbox driver (Red) are locked. Install OEM NIC drivers before removing Ethernet/Wi-Fi FODs." `
 -Data $caps -Columns $cols -PrimaryButtonText "Uninstall Selected FODs"
 if ($null -eq $res -or $res.Items.Count -eq 0) {
 Write-GUI " -> Capability removal cancelled.`n"
@@ -5573,6 +5730,7 @@ return
 }
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
 param([array]$Selected)
+Unlock-UltixTrustedInstaller
 $total = $Selected.Count
 $current = 0
 foreach ($cap in $Selected) {
@@ -5596,46 +5754,64 @@ Write-GUI " -> Capability removal finished.`n"
 }
 function Show-OptFeaturesGrid {
 param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
-Write-GUI " -> Querying enabled Windows Optional Features (Background Thread)..."
+Write-GUI " -> Querying Windows Optional Features (Background Thread)..."
 Update-Progress 25
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+Unlock-UltixTrustedInstaller
+$criticalFeatRegex = '^(?i)(NetFx4-AdvSrvs|NetFx4Extended-ASPNET45)$'
 $feats = @(Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue |
-Where-Object { $_.State -eq 'Enabled' } |
-Select-Object FeatureName, State |
-Sort-Object FeatureName)
+ForEach-Object {
+$isCrit    = ($_.FeatureName -match $criticalFeatRegex)
+$stateDisp = if ($isCrit) { "$($_.State) [CRITICAL - LOCKED]" } else { [string]$_.State }
+[PSCustomObject]@{
+FeatureName = $_.FeatureName
+State       = $stateDisp
+RawState    = [string]$_.State
+IsLocked    = $isCrit
+}
+} | Sort-Object IsLocked, @{Expression={ if ($_.RawState -match '^Enabled') { 0 } else { 1 } }}, FeatureName)
 return $feats
 } -OnComplete ({
 param($output)
 Update-Progress 0
 [array]$feats = @($output | Where-Object { $null -ne $_ })
 if ($feats.Count -eq 0) {
-Write-GUI " -> No enabled Optional Features found.`n"
+Write-GUI " -> No Optional Features returned from DISM.`n"
 return
 }
 $cols = @(
-@{ Header = "Optional Feature Name"; Property = "FeatureName"; Width = 680 }
-@{ Header = "State";                 Property = "State";       Width = 160 }
+@{ Header = "Optional Feature Name"; Property = "FeatureName"; Width = 640 }
+@{ Header = "State";                 Property = "State";       Width = 200 }
 )
-$res = Show-UltixGridModal -Title "WinUltix - Windows Optional Features" `
--Description "Select enabled Optional Features to disable (e.g., Legacy Components, SMB1, Hypervisor modules)." `
--Data $feats -Columns $cols -PrimaryButtonText "Disable Selected Features"
+$res = Show-UltixGridModal -Title "WinUltix - Windows Optional Features (DISM)" `
+-Description "Inspect and toggle Windows Optional Features (e.g., Hyper-V, WSL, Sandbox, SMB1). Core .NET 4.8 runtime (Red) is locked." `
+-Data $feats -Columns $cols -PrimaryButtonText "Disable Selected Features" `
+-SecondaryButtonText "Enable Selected Features"
 if ($null -eq $res -or $res.Items.Count -eq 0) {
 Write-GUI " -> Optional feature configuration cancelled.`n"
 return
 }
-Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
-param([array]$Selected)
+Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($res.Items, $res.Action) -ScriptBlock {
+param([array]$Selected, [string]$Action)
+Unlock-UltixTrustedInstaller
 $total = $Selected.Count
 $current = 0
 foreach ($feat in $Selected) {
 $current++
 $UltixSync.Progress = [int](($current / $total) * 100)
-$UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
+if ($feat.IsLocked) { continue }
 try {
+if ($Action -eq "Primary") {
+$UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
 Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
 $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
+} else {
+$UltixSync.Logs.Enqueue(" -> Enabling feature: $($feat.FeatureName)")
+Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop | Out-Null
+$UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) enabled (Reboot may be required).")
+}
 } catch {
-$UltixSync.Logs.Enqueue("    [!] Failed to disable $($feat.FeatureName): $($_.Exception.Message)")
+$UltixSync.Logs.Enqueue("    [!] Failed to modify $($feat.FeatureName): $($_.Exception.Message)")
 }
 }
 } -OnComplete ({
@@ -5673,7 +5849,7 @@ Invoke-UltixAuditFlow -ScannerFunction "Get-BloatwareState" -AuditLabel "Bloatwa
 }.GetNewClosure())
 $rowCaps = New-UltixActionRow -Parent $tabApps -Y 120 -MainRGB @(55, 58, 64) `
 -Text "Remove System Features (FOD Preset)" `
--Description "Interactive removal of 14 unnecessary built-in Features on Demand (Steps Recorder, Quick Assist, WordPad, Fax, Hello Face) in a background CBS thread." `
+-Description "Interactive removal of 16 unnecessary built-in Features on Demand (Steps Recorder, Quick Assist, WordPad, Fax, Hello Face) in a background CBS thread." `
 -AuditDescription "AUDIT: Verifies installed unnecessary Capabilities (FOD)." `
 -OnClick ({
 Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ModalTitle "WinUltix - FOD Removal" -ModalDescription "Select features to remove." -ExecutorFunction "Invoke-RemoveCapabilities" -ControlsToDisable $allTabButtons.ToArray()
@@ -5791,6 +5967,7 @@ $isDetected = $false
 $results.Add([PSCustomObject]@{
 UIDisplayName = $rule.UIDisplayName
 IsDetected    = $isDetected
+OptIn         = [bool]$rule.OptIn
 ActionData    = $rule
 })
 }
@@ -5821,10 +5998,10 @@ $rules = @(
 @{ UIDisplayName = "Start Menu: Disable Tailored Search Suggestions"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowTailoredSearch"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
 @{ UIDisplayName = "Widgets: Disable News & Interests (Saves RAM/Network)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"; Name = "AllowNewsAndInterests"; Expected = 0; Default = 1; AltName = "DisableWidgetsBoard"; AltExpected = 1; Type = "DWord"; RestartShell = $true }
 @{ UIDisplayName = "Bloat: Disable Consumer Features (Stops auto-installing apps)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; Name = "DisableWindowsConsumerFeatures"; Expected = 1; Default = 0; Type = "DWord" }
-@{ UIDisplayName = "UI: Disable Toast Notifications (Flyouts)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "ToastEnabled"; Expected = 0; Default = 1; Type = "DWord" }
-@{ UIDisplayName = "UI: Disable Focus Assist (Global)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings"; Name = "NOC_GLOBAL_SETTING_TOASTS_ENABLED"; Expected = 0; Default = 1; Type = "DWord" }
-@{ UIDisplayName = "UI: Disable App Push Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoCloudApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord" }
-@{ UIDisplayName = "UI: Disable App Toast Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoToastApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord" }
+@{ UIDisplayName = "UI: Disable Toast Notifications (Flyouts)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "ToastEnabled"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
+@{ UIDisplayName = "UI: Disable Focus Assist (Global)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings"; Name = "NOC_GLOBAL_SETTING_TOASTS_ENABLED"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
+@{ UIDisplayName = "UI: Disable App Push Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoCloudApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
+@{ UIDisplayName = "UI: Disable App Toast Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoToastApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
 @{ UIDisplayName = "Search: Disable Bing Web Results (Keeps local queries private)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "DisableWebSearch"; Expected = 1; Default = 0; Type = "DWord"; RestartSearch = $true }
 @{ UIDisplayName = "Search: Disable Connected Cloud Search Services"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchUseWeb"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
 @{ UIDisplayName = "Search: Disable Location Tracking in Search"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowSearchToUseLocation"; Expected = 0; Default = 1; Type = "DWord" }
@@ -5852,7 +6029,7 @@ return Invoke-RegistryAudit -Rules $rules
 }
 function Get-RegState_Annoyances {
 $rules = @(
-@{ UIDisplayName = "Power: Disable Modern Standby S0 (Force Hardware S3 Sleep)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power"; Name = "PlatformAoAcOverride"; Expected = 0; Default = 1; Type = "DWord" }
+@{ UIDisplayName = "Power: Disable Modern Standby S0 (Force Hardware S3 Sleep - Desktop/Supported BIOS)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power"; Name = "PlatformAoAcOverride"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
 @{ UIDisplayName = "Security: Disable AutoPlay for all drives"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoDriveTypeAutoRun"; Expected = 255; Default = 91; Type = "DWord" }
 @{ UIDisplayName = "Security: Disable Autoplay Handlers"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers"; Name = "DisableAutoplay"; Expected = 1; Default = 0; Type = "DWord" }
 @{ UIDisplayName = "Accessibility: Disable Sticky Keys prompt (Shift x5)"; Path = "HKCU:\Control Panel\Accessibility\StickyKeys"; Name = "Flags"; Expected = "506"; Default = "510"; Type = "String" }
@@ -5870,11 +6047,13 @@ $rules += @{ UIDisplayName = "Privacy: Disable Timeline & Activity History track
 $rules += @{ UIDisplayName = "Privacy: Disable Tailored Experiences"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"; Name = "TailoredExperiencesWithDiagnosticDataEnabled"; Expected = 0; Default = 1; Type = "DWord" }
 $rules += @{ UIDisplayName = "Privacy: Disable Cloud Speech Recognition"; Path = "HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy"; Name = "HasAccepted"; Expected = 0; Default = 1; Type = "DWord" }
 $rules += @{ UIDisplayName = "Privacy: Restrict Implicit Ink/Text Collection"; Path = "HKCU:\Software\Microsoft\InputPersonalization"; Name = "RestrictImplicitInkCollection"; Expected = 1; Default = 0; Type = "DWord" }
-$rules += @{ UIDisplayName = "Background Apps: Block UWP apps from running globally"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; Name = "GlobalUserDisabled"; Expected = 1; Default = 0; Type = "DWord" }
-$uwpBlocks = @("LetAppsRunInBackground", "LetAppsAccessSync", "LetAppsAccessIdentity", "LetAppsAccessBluetooth", "LetAppsActivateWithVoice", "LetAppsAccessNotifications", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessRadios", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar", "LetAppsAccessAccountInfo")
+$rules += @{ UIDisplayName = "Background Apps: Block UWP apps from running globally (Optional)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; Name = "GlobalUserDisabled"; Expected = 1; Default = 0; Type = "DWord"; OptIn = $true }
+$uwpBlocks = @("LetAppsRunInBackground", "LetAppsAccessSync", "LetAppsActivateWithVoice", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar")
 foreach ($app in $uwpBlocks) { $rules += @{ UIDisplayName = "UWP Permissions: Block $app"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $app; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" } }
-$rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessCamera"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessCamera"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" }
-$rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessMicrophone"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessMicrophone"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" }
+$uwpOptInBlocks = @("LetAppsAccessIdentity", "LetAppsAccessAccountInfo", "LetAppsAccessBluetooth", "LetAppsAccessRadios", "LetAppsAccessNotifications")
+foreach ($optApp in $uwpOptInBlocks) { $rules += @{ UIDisplayName = "UWP Permissions: Block $optApp (Optional - May affect Xbox/BT apps)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $optApp; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true } }
+$rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessCamera (Warning: Blocks Webcams globally)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessCamera"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
+$rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessMicrophone (Warning: Blocks Mics globally)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessMicrophone"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
 $rules += @{ UIDisplayName = "Edge: Disable Startup Boost (Background Process)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "StartupBoostEnabled"; Expected = 0; Default = 1; Type = "DWord" }
 $rules += @{ UIDisplayName = "Edge: Disable Background Mode"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "BackgroundModeEnabled"; Expected = 0; Default = 1; Type = "DWord" }
 $rules += @{ UIDisplayName = "Defender: Prevent automatic sample submission"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet"; Name = "SubmitSamplesConsent"; Expected = 2; Default = 1; Type = "DWord" }
@@ -5892,7 +6071,7 @@ $rules = @(
 @{ UIDisplayName = "Security: Block BIOS/UEFI Software Injections (WPBT)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"; Name = "DisableWpbtExecution"; Expected = 1; Default = 0; Type = "DWord" }
 @{ UIDisplayName = "System: Block OneDrive File Sync Integration"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; Name = "DisableFileSyncNGSC"; Expected = 1; Default = 0; Type = "DWord" }
 @{ UIDisplayName = "System: Block OneDrive Network Traffic Pre-Sign-In"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; Name = "PreventNetworkTrafficPreUserSignIn"; Expected = 1; Default = 0; Type = "DWord" }
-@{ UIDisplayName = "Security: Disable Remote Desktop (RDP) access"; Path = "HKLM:\System\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections"; Expected = 1; Default = 0; Type = "DWord" }
+@{ UIDisplayName = "Security: Disable Remote Desktop (RDP) access"; Path = "HKLM:\System\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections"; Expected = 1; Default = 0; Type = "DWord"; OptIn = $true }
 @{ UIDisplayName = "System: Disable Insider Preview Builds"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PreviewBuilds"; Name = "AllowBuildPreview"; Expected = 0; Default = 1; Type = "DWord" }
 @{ UIDisplayName = "Boot: Enable Verbose Status Messages"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"; Name = "verbosestatus"; Expected = 1; Default = 0; Type = "DWord" }
 )
@@ -5923,8 +6102,8 @@ $rules = @(
 @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
 @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
 @{ UIDisplayName = "MMCSS Profile: Scheduling Category (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Scheduling Category"; Expected = "High"; Default = "Medium"; Type = "String" }
-@{ UIDisplayName = "Security: Disable Virtualization Based Security (VBS)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"; Name = "EnableVirtualizationBasedSecurity"; Expected = 0; Default = 1; Type = "DWord" }
-@{ UIDisplayName = "Security: Disable Hypervisor-protected Code Integrity (HVCI)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"; Name = "Enabled"; Expected = 0; Default = 1; Type = "DWord" }
+@{ UIDisplayName = "Security: Disable Virtualization Based Security (VBS)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"; Name = "EnableVirtualizationBasedSecurity"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
+@{ UIDisplayName = "Security: Disable Hypervisor-protected Code Integrity (HVCI)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"; Name = "Enabled"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
 )
 return Invoke-RegistryAudit -Rules $rules
 }
@@ -6314,6 +6493,32 @@ Write-GUI ""
 }
 }.GetNewClosure())
 }
+function Get-StartMenuState {
+if ($null -ne $UltixSync) { $UltixSync.Progress = 25 }
+$pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+$isCleanActive = $false
+$sizeTag       = ""
+if ($null -ne $pkgDir) {
+$binFile   = Get-Item -Path (Join-Path $pkgDir.FullName "LocalState\start2.bin") -Force -ErrorAction SilentlyContinue
+$clearedSz = (Get-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -ErrorAction SilentlyContinue).StartMenuClearedSize
+$viewMode  = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -ErrorAction SilentlyContinue).AllAppsViewMode
+if ($null -ne $binFile) {
+$szKB = [math]::Round($binFile.Length / 1KB, 1)
+$sizeTag = " [Current: $szKB KB]"
+if ($null -ne $clearedSz -and [math]::Abs($binFile.Length - $clearedSz) -le 512 -and $viewMode -eq 2) {
+$isCleanActive = $true
+}
+}
+}
+$bakExists = Test-Path -LiteralPath "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
+$bakTag    = if ($bakExists) { " | Backup: Ready" } else { "" }
+if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+return @([PSCustomObject]@{
+UIDisplayName = "Start Menu: Compile Clean 3-Icon Layout (Edge, Settings, Explorer) + Classic List$sizeTag$bakTag"
+IsDetected    = (-not $isCleanActive)
+ActionData    = @{ Type = "StartMenuReset" }
+})
+}
 function Invoke-StartMenuAudit {
 param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 Write-GUI "--- AUDIT: Start Menu Pins & Layout Mode (Background Thread) ---"
@@ -6365,7 +6570,53 @@ Write-GUI ""
 }.GetNewClosure())
 }
 function Clear-StartMenu {
-param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+param(
+[array]$SelectedItems = @(),
+[ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+[System.Windows.Forms.Control[]]$ControlsToDisable = @()
+)
+if ($Operation -eq 'Revert') {
+Write-GUI " -> Restoring original Start Menu layout from backup (start2_backup.bin)..."
+Update-Progress 15
+Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+$pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $pkgDir) {
+if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] StartMenuExperienceHost package directory not found.") }
+return
+}
+$startStatePath = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
+$origBin        = Join-Path $startStatePath "start2.bin"
+$bakBin         = "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
+$UltixSync.Progress = 40
+Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 350
+if (Test-Path -LiteralPath $bakBin) {
+Copy-Item -LiteralPath $bakBin -Destination $origBin -Force -ErrorAction SilentlyContinue
+$UltixSync.Logs.Enqueue("    [OK] Restored original start2.bin from $bakBin.")
+} else {
+$UltixSync.Logs.Enqueue("    [*] No start2_backup.bin found in %LOCALAPPDATA%\WinUltix; reverting registry view flags only.")
+}
+Remove-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Force -ErrorAction SilentlyContinue
+Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "HideRecommendedSection" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoRecentDocsHistory" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+$defaultJsonPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell\LayoutModification.json"
+if (Test-Path -LiteralPath $defaultJsonPath) {
+Remove-Item -LiteralPath $defaultJsonPath -Force -ErrorAction SilentlyContinue
+}
+if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+Start-Process "explorer.exe"
+}
+$UltixSync.Progress = 100
+} -OnComplete ({
+param($nullOut)
+Update-Progress 0
+Write-GUI " -> Start Menu layout and view settings restored.`n"
+}.GetNewClosure())
+return
+}
 Write-GUI " -> Initializing deterministic Start Menu reset (3-Icon + Classic List + No Recent Files)..."
 Update-Progress 5
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
@@ -6457,6 +6708,13 @@ New-Item -Path $startRegPath -Force -ErrorAction SilentlyContinue | Out-Null
 Set-ItemProperty -LiteralPath $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
 Set-ItemProperty -LiteralPath $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
 Set-ItemProperty -LiteralPath $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+$origBin = Join-Path $startStatePath "start2.bin"
+$bakDir  = "$env:LOCALAPPDATA\WinUltix"
+$bakBin  = "$bakDir\start2_backup.bin"
+if ((Test-Path -LiteralPath $origBin) -and -not (Test-Path -LiteralPath $bakBin)) {
+if (-not (Test-Path -LiteralPath $bakDir)) { New-Item -Path $bakDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
+Copy-Item -LiteralPath $origBin -Destination $bakBin -Force -ErrorAction SilentlyContinue
+}
 if ($null -ne $UltixSync) {
 $UltixSync.Progress = 60
 $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
@@ -6721,16 +6979,10 @@ $rowTaskbar = New-UltixActionRow -Parent $tabReg -Y 20 -MainRGB @(55, 58, 64) `
 -OnAudit ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -AuditOnly }.GetNewClosure())
 $rowStartMenu = New-UltixActionRow -Parent $tabReg -Y 70 -MainRGB @(55, 58, 64) `
 -Text "Reset Start Menu Layout (Clean 3-Icon)" `
--Description "Wipes promotional Start Menu tiles (start2.bin) and compiles a clean 3-icon layout (Edge, Settings, Explorer) with zero MDM locks left behind." `
--AuditDescription "AUDIT: Scans the size of the current Start Menu layout database (start2.bin) and checks for residual MDM locks." `
+-Description "Backs up your current start2.bin database, wipes promotional tiles, and compiles a clean 3-icon layout (Edge, Settings, Explorer) with full Revert support." `
+-AuditDescription "AUDIT: Scans the size of the current Start Menu layout database (start2.bin), backup state, and checks for residual MDM locks." `
 -OnClick ({
-$msgText = "This action will permanently wipe your Start Menu pins and layout database.`n`nStartMenuExperienceHost will be restarted in the background (System Tray remains intact).`n`nDo you want to proceed?"
-$msgResult = [System.Windows.Forms.MessageBox]::Show($msgText, "WinUltix - Reset Start Menu", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
-Clear-StartMenu -ControlsToDisable $allTabButtons.ToArray()
-} else {
-Write-GUI " -> Start Menu reset aborted by user.`n"
-}
+Invoke-UltixAuditFlow -ScannerFunction "Get-StartMenuState" -AuditLabel "Start Menu Layout" -ModalTitle "WinUltix - Clean Start Menu Compiler" -ModalDescription "Click 'Execute Selected' to compile a clean 3-icon Start Menu (backs up start2.bin), or 'Revert Selected' to restore your original start2_backup.bin." -ExecutorFunction "Clear-StartMenu" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
 }.GetNewClosure()) `
 -OnAudit ({ Invoke-StartMenuAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 $rowExplorer = New-UltixActionRow -Parent $tabReg -Y 120 -MainRGB @(55, 58, 64) `
@@ -6799,6 +7051,7 @@ $isDetected = ($null -ne $currentStart -and [int]$currentStart -ne [int]$rule.Ex
 $results.Add([PSCustomObject]@{
 UIDisplayName = $rule.UIDisplayName
 IsDetected    = $isDetected
+OptIn         = [bool]$rule.OptIn
 ActionData    = $rule
 })
 }
@@ -6848,7 +7101,7 @@ $rules = @(
 @{ UIDisplayName = "Task: Windows Feedback & Diagnostics (Siuf)"; TaskPath = "\Microsoft\Windows\Feedback\*"; ExpectedState = "Disabled" }
 @{ UIDisplayName = "Task: Windows Performance Trace & WDI Resolution"; TaskPath = "\Microsoft\Windows\PerformanceTrace\*"; ExpectedState = "Disabled" }
 @{ UIDisplayName = "Task: Windows Error Reporting (QueueReporting)"; TaskPath = "\Microsoft\Windows\Windows Error Reporting\*"; ExpectedState = "Disabled" }
-@{ UIDisplayName = "Task: Xbox Live Game Save Background Sync"; TaskPath = "\Microsoft\XblGameSave\*"; ExpectedState = "Disabled" }
+@{ UIDisplayName = "Task: Xbox Live Game Save Background Sync"; TaskPath = "\Microsoft\XblGameSave\*"; ExpectedState = "Disabled"; OptIn = $true }
 )
 $protectedSdbTasks = '^(?i)(PcaPatchDbTask|SdbinstMergeDbTask)$'
 $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
@@ -6861,9 +7114,11 @@ $_.TaskName -notmatch $protectedSdbTasks -and
 ($_.State -eq 'Ready' -or $_.State -eq 'Running') -and
 (Test-UltixTaskAdminWritable -TaskPath $_.TaskPath -TaskName $_.TaskName)
 })
+$isDetected = ($activeTasks.Count -gt 0)
 $results.Add([PSCustomObject]@{
 UIDisplayName = $rule.UIDisplayName
-IsDetected    = ($activeTasks.Count -gt 0)
+IsDetected    = $isDetected
+OptIn         = [bool]$rule.OptIn
 ActionData    = $rule
 })
 }
@@ -6916,21 +7171,21 @@ $rules = @(
 @{ UIDisplayName = "Per-User: User Data Storage Template (UnistoreSvc)"; Name = "UnistoreSvc"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Per-User: User Data Access Template (UserDataSvc)"; Name = "UserDataSvc"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "AI: Windows AI Fabric Service (WSAIFabricSvc)"; Name = "WSAIFabricSvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Input: Microsoft GameInput Service - Fixes HID stutter (GameInputSvc)"; Name = "GameInputSvc"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Virtualization: Windows Subsystem for Linux (WSLService)"; Name = "WSLService"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+@{ UIDisplayName = "Input: Microsoft GameInput Service - Disables Game Pass/Xbox controller input (GameInputSvc)"; Name = "GameInputSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 @{ UIDisplayName = "Logitech: Lamp Array Service RGB (logi_lamparray_service)"; Name = "logi_lamparray_service"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4; DefaultStart = 2 }
-@{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Printers: Print Spooler - Disables all printing (Spooler)"; Name = "Spooler"; ExpectedStart = 4; DefaultStart = 2; OptIn = $true }
+@{ UIDisplayName = "Printers: Print Notify Service (PrintNotify)"; Name = "PrintNotify"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 @{ UIDisplayName = "Printers: Fax Service (Fax)"; Name = "Fax"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Remote: Remote Desktop Services (TermService)"; Name = "TermService"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 @{ UIDisplayName = "Remote: Remote Registry (RemoteRegistry)"; Name = "RemoteRegistry"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Security: Smart Card Reader Service (SCardSvr)"; Name = "SCardSvr"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Location: Geolocation Service (lfsvc)"; Name = "lfsvc"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Location: Auto Time Zone Updater (tzautoupdate)"; Name = "tzautoupdate"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
-@{ UIDisplayName = "Biometrics: Windows Biometric Service (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Camera: Windows Camera Frame Server (FrameServer)"; Name = "FrameServer"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Biometrics: Windows Biometric Service - Fingerprint/Hello (WbioSrvc)"; Name = "WbioSrvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+@{ UIDisplayName = "Camera: Windows Camera Frame Server - Webcams (FrameServer)"; Name = "FrameServer"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+@{ UIDisplayName = "Camera: Windows Camera Frame Server Monitor (FrameServerMonitor)"; Name = "FrameServerMonitor"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 @{ UIDisplayName = "Sensors: Sensor Data Service (SensorDataService)"; Name = "SensorDataService"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Sensors: Sensor Service (SensorService)"; Name = "SensorService"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Sensors: Sensor Monitoring Service (SensrSvc)"; Name = "SensrSvc"; ExpectedStart = 4; DefaultStart = 3 }
@@ -6939,16 +7194,16 @@ $rules = @(
 @{ UIDisplayName = "Mobile: Payments and NFC/SE Manager (SEMgrSvc)"; Name = "SEMgrSvc"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Mobile: Phone Service (PhoneSvc)"; Name = "PhoneSvc"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Mobile: Cellular Time Synchronization (autotimesvc)"; Name = "autotimesvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Network: WWAN Cellular AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Network: Windows Mobile Hotspot Service (icssvc)"; Name = "icssvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+@{ UIDisplayName = "Network: WWAN Cellular AutoConfig (WwanSvc)"; Name = "WwanSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 @{ UIDisplayName = "Network: Internet Connection Sharing (SharedAccess)"; Name = "SharedAccess"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Network: SSDP Multicast Discovery (SSDPSRV)"; Name = "SSDPSRV"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Network: UPnP Device Host (upnphost)"; Name = "upnphost"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Network: TCP/IP NetBIOS Helper (lmhosts)"; Name = "lmhosts"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Xbox: Xbox Live Auth Manager (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Xbox: Xbox Live Game Save (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Xbox: Xbox Live Networking Service (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Xbox: Xbox Accessory Management (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Xbox: Xbox Live Auth Manager (XblAuthManager)"; Name = "XblAuthManager"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+@{ UIDisplayName = "Xbox: Xbox Live Game Save (XblGameSave)"; Name = "XblGameSave"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+@{ UIDisplayName = "Xbox: Xbox Live Networking Service (XboxNetApiSvc)"; Name = "XboxNetApiSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
+@{ UIDisplayName = "Xbox: Xbox Accessory Management (XboxGipSvc)"; Name = "XboxGipSvc"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 )
 return Invoke-ServicesAudit -Rules $rules
 }
@@ -8072,13 +8327,15 @@ $isReadOnlyActive = ($wpVal -eq 1 -and $denyWritePol -eq 1)
 $results.Add([PSCustomObject]@{
 UIDisplayName = "USB Read-Only Guard: Block Writing to USB Drives & MTP Phones (Prevents Data Leak)"
 IsDetected    = (-not $isReadOnlyActive)
-ActionData    = @{ Layer = "WriteProtect" }
+OptIn         = $true
+ActionData    = @{ Layer = "WriteProtect"; OptIn = $true }
 })
 $denyExecPol = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Execute" -ErrorAction SilentlyContinue).Deny_Execute
 $results.Add([PSCustomObject]@{
 UIDisplayName = "USB Execution Guard: Block Running Executables (.exe) from Removable Drives"
 IsDetected    = ($denyExecPol -ne 1)
-ActionData    = @{ Layer = "DenyExecute" }
+OptIn         = $true
+ActionData    = @{ Layer = "DenyExecute"; OptIn = $true }
 })
 $usbstorStart  = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
 $uaspstorStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor" -Name "Start" -ErrorAction SilentlyContinue).Start
@@ -8087,7 +8344,8 @@ $isHardLocked  = ($usbstorStart -eq 4 -and $uaspstorStart -eq 4 -and $denyReadPo
 $results.Add([PSCustomObject]@{
 UIDisplayName = "USB Total Blackout: Disable USBSTOR + UASPStor Drivers (Blocks all USB Sticks & SSDs)"
 IsDetected    = (-not $isHardLocked)
-ActionData    = @{ Layer = "TotalBlock" }
+OptIn         = $true
+ActionData    = @{ Layer = "TotalBlock"; OptIn = $true }
 })
 $dmaLock = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\FVE" -Name "DisableExternalDMAUnderLock" -ErrorAction SilentlyContinue).DisableExternalDMAUnderLock
 $usbLock = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "DisableUsbEnumerationOnLock" -ErrorAction SilentlyContinue).DisableUsbEnumerationOnLock
@@ -8616,11 +8874,7 @@ Write-GUI " -> [!] [$($res.Title)] finished with non-zero Exit Code: $code ($hex
 }
 function Get-WinSxSState {
 if ($null -ne $UltixSync) { $UltixSync.Progress = 5 }
-$tiRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-$tiStart   = (Get-ItemProperty -LiteralPath $tiRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
-if ($tiStart -eq 4) {
-Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-}
+Unlock-UltixTrustedInstaller
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName               = "dism.exe"
 $psi.Arguments              = "/Online /Cleanup-Image /AnalyzeComponentStore /English"
@@ -8665,7 +8919,7 @@ $idleTicksAfterTable = 0
 $curText = $sbOutput.ToString()
 $hasTableEnd = (
 $curText -match '(?s)\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}.*?:\s*\d+\s*\r?\n[^\r\n:]+:\s*\S+' -or
-$curText -match '(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*\S+'
+$curText -match '(?im)Recommended.*?:\s*\S+'
 )
 if ($proc.HasExited) {
 $idleTicksAfterTable++
@@ -8706,7 +8960,7 @@ $reclaimableCount = [int]$matches[1]
 }
 $recommended = (
 $reclaimableCount -gt 0 -or
-($dismOutput -match "(?im)(Recommended|Zalecane|Empfohlen|Recommand).*?:\s*(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)\b")
+($dismOutput -match "(?im)Recommended.*?:\s*(Yes|True|1)\b")
 )
 $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
 return [PSCustomObject]@{
@@ -8728,10 +8982,7 @@ return
 }
 }
 $cmd = "echo Aggressive WinSxS compression in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
-$tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
-Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-}
+Unlock-UltixTrustedInstaller
 Start-ExternalConsoleAsync -Title "WinUltix - WinSxS ResetBase" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 function Invoke-SystemHealthAudit {
@@ -8739,10 +8990,7 @@ param([AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable
 Write-GUI "--- AUDIT: OS Image, CBS & NTFS Volume Health (Background Thread) ---"
 Update-Progress 15
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-$tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
-Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-}
+Unlock-UltixTrustedInstaller
 $UltixSync.Progress = 35
 $null = & dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
 $dismExit = $LASTEXITCODE
@@ -8755,15 +9003,15 @@ $hasRegCorr = ($null -ne $cbsProps) -and (
 )
 $isHealthy = ($dismExit -eq 0 -and -not $hasRegCorr)
 $UltixSync.Progress = 70
-$sysDrive = $env:SystemDrive.TrimEnd('\')
-$isDirty  = $false
+$sysDrive  = $env:SystemDrive.TrimEnd('\')
 $dirtyCode = [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+$isDirty   = ($dirtyCode -eq 1)
 if ($dirtyCode -ge 0) {
 $isDirty = ($dirtyCode -eq 1)
 } else {
 $fsOut = (& fsutil.exe dirty query $sysDrive 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($fsOut)) {
-if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[A\u00C3]O|EI|INTE|IKKE|NE|NINCS)\b') {
+if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[AÃ]O|EI|INTE|IKKE|NE|NINCS)\b') {
 $isDirty = $true
 }
 }
@@ -8815,10 +9063,7 @@ Write-GUI " -> System Integrity Repair cancelled by user.`n"
 return
 }
 $cmd = "echo [1/3] Running Online CheckDisk Scan... & chkdsk $sysDrive /scan & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [2/3] Running DISM RestoreHealth... & dism /online /cleanup-image /restorehealth & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!) & echo. & echo [3/3] Running SFC Scan... & sfc /scannow & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
-$tiReg = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
-if ((Get-ItemProperty -LiteralPath $tiReg -Name "Start" -ErrorAction SilentlyContinue).Start -eq 4) {
-Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
-}
+Unlock-UltixTrustedInstaller
 Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandChain $cmd -ControlsToDisable $ControlsToDisable
 }
 function Clear-NetworkStack {
@@ -9140,11 +9385,7 @@ Update-Progress 10
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 try {
 $UltixSync.Progress = 25
-$UltixSync.Logs.Enqueue(" -> [1/4] Enforcing UTC hardware RTC clock (RealTimeIsUniversal=1) & unlocking W32Time...")
-$tzPath = "HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation"
-if (Test-Path -LiteralPath $tzPath) {
-Set-ItemProperty -LiteralPath $tzPath -Name "RealTimeIsUniversal" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-}
+$UltixSync.Logs.Enqueue(" -> [1/4] Re-registering Windows Time service (W32Time) & unlocking SCM configuration...")
 Stop-Service -Name "W32Time" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
 & w32tm.exe /unregister 2>$null | Out-Null
 Start-Sleep -Milliseconds 300
@@ -9232,7 +9473,7 @@ $allTabButtons = [System.Collections.Generic.List[System.Windows.Forms.Control]]
 $rowCheckSystem = New-UltixActionRow -Parent $tabWinSXS -Y 20 -MainRGB @(55, 58, 64) `
 -Text "Scan System (ChkDisk + SFC + DISM)" `
 -Description "System First-Aid: Scans core Windows OS files for corruption and replaces damaged components using ChkDisk, DISM RestoreHealth, and SFC." `
--AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit via fsutil, and inspects CBS pending repair flags." `
+-AuditDescription "AUDIT: Runs a fast (<3s) DISM /CheckHealth scan, checks the NTFS dirty bit via native FSCTL_IS_VOLUME_DIRTY, and inspects CBS pending repair flags." `
 -OnClick ({ Repair-SystemIntegrity -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure()) `
 -OnAudit ({ Invoke-SystemHealthAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 $rowWinSxS = New-UltixActionRow -Parent $tabWinSXS -Y 70 -MainRGB @(135, 50, 50) `
@@ -9287,7 +9528,7 @@ $btnFixIcons = New-UltixButton -Parent $tabWinSXS -X 15 -Y 320 -RGB @(55, 58, 64
 -OnClick ({ Clear-ShellIconCache -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 $btnFixTime = New-UltixButton -Parent $tabWinSXS -X 15 -Y 370 -RGB @(55, 58, 64) `
 -Text "Repair Time & NTP Clock Sync (w32time)" `
--Description "Time First-Aid: Enforces UTC hardware RTC clock (fixes dual-boot drift), re-registers W32Time, sets Cloudflare/NTP.org peers, and forces immediate clock resync." `
+-Description "Time First-Aid: Re-registers W32Time service, configures resilient Cloudflare/NTP.org peers, and forces immediate clock resynchronization." `
 -OnClick ({ Repair-TimeSynchronization -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 $btnFixUwp = New-UltixButton -Parent $tabWinSXS -X 15 -Y 420 -RGB @(45, 85, 125) `
 -Text "Repair UWP, Store & Gaming Services" `
@@ -9783,10 +10024,10 @@ $msiVal = $msiKey.GetValue("MSISupported", $null)
 } finally {
 $msiKey.Dispose()
 }
-$rawDevName = [string]$instKey.GetValue("FriendlyName", "")
-if ([string]::IsNullOrWhiteSpace($rawDevName)) { $rawDevName = [string]$instKey.GetValue("DeviceDesc", "") }
+$rawDescAttr = [string]$instKey.GetValue("DeviceDesc", "")
+$rawFriendly = [string]$instKey.GetValue("FriendlyName", "")
+$rawDevName  = if ($rawDescAttr -match '^@(usbxhci|hdaudbus|hdaudio|stornvme|mshdc)\.inf,') { $rawDescAttr } elseif (-not [string]::IsNullOrWhiteSpace($rawFriendly)) { $rawFriendly } else { $rawDescAttr }
 $devName = Format-UltixDeviceName -RawName $rawDevName
-if ([string]::IsNullOrWhiteSpace($devName)) { $devName = "Unknown PCI Device" }
 $svcName  = [string]$instKey.GetValue("Service", "")
 $devClass = [string]$instKey.GetValue("Class", "")
 $clsGuid  = [string]$instKey.GetValue("ClassGUID", "")
@@ -9887,12 +10128,12 @@ $childKey.Dispose()
 }
 }
 }
-$shortCtrl = if ($svcName -match '^(?i)(stornvme|secnvme)$' -or $rawDevName -match '^(?i)@stornvme\.inf,') {
+$shortCtrl = if ($svcName -match '^(?i)(stornvme|secnvme)$' -or $rawDescAttr -match '^(?i)@stornvme\.inf,') {
 "NVMe Controller"
-} elseif ($svcName -match '^(?i)(storahci|iaStor)' -or $rawDevName -match '^(?i)@mshdc\.inf,') {
+} elseif ($svcName -match '^(?i)(storahci|iaStor)' -or $rawDescAttr -match '^(?i)@mshdc\.inf,') {
 "SATA AHCI Controller"
 } else {
-($devName -replace '^(?i)(Standard|Standardowy)\s+', '').Trim()
+($devName -replace '^(?i)Standard\s+', '').Trim()
 }
 if ($diskNames.Count -gt 0) {
 $devName = "$shortCtrl [$($diskNames -join ', ')]"
@@ -9902,7 +10143,7 @@ $devName = "$shortCtrl [Empty $bdfTag]"
 $devName = $shortCtrl
 }
 } elseif ($isUsb -and -not [string]::IsNullOrEmpty($bdfTag)) {
-$shortUsb = ($devName -replace '(?i)^(Rozszerzalny kontroler hosta|Kontroler hosta)\s+', '' -replace '\s*[----]\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
+$shortUsb = ($devName -replace '\s*[----]\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
 if ($shortUsb -notmatch '(?i)XHCI' -and $svcName -match '^(?i)USBXHCI$') {
 $shortUsb = "$shortUsb XHCI"
 }
@@ -9935,12 +10176,12 @@ $cDrvKey.Dispose()
 }
 }
 }
-if ([string]::IsNullOrWhiteSpace($cResolved)) {
+if ($cRawDesc -match '^@hdaudio\.inf,' -or [string]::IsNullOrWhiteSpace($cResolved)) {
 $cResolved = Format-UltixDeviceName -RawName $cRawDesc
 }
 $isGenericInbox = ($cRawDesc -match '^(?i)@hdaudio\.inf,' -or $cInfPath -match '^(?i)hdaudio\.inf$')
 $cClean = ($cResolved -replace '(?i)\(R\)|\(TM\)', '' -replace '(?i)\s*High Definition Audio(\s+Device|\s+Controller)?', ' HD Audio' -replace '(?i)\s*Audio Device\s*$', ' Audio' -replace '\s+', ' ').Trim()
-if ($isGenericInbox -or [string]::IsNullOrWhiteSpace($cClean) -or $cClean -match '^(?i)(HD Audio|Microsoft.*|Urządzenie.*|Kontroler.*)$') {
+if ($isGenericInbox -or [string]::IsNullOrWhiteSpace($cClean) -or $cClean -match '^(?i)(HD Audio|Microsoft.*)$') {
 $cClean = if ($childId -match 'VEN_10DE')     { "NVIDIA HD Audio" }
 elseif ($childId -match 'VEN_10EC')           { "Realtek HD Audio" }
 elseif ($childId -match 'VEN_1002')           { "AMD HDMI Audio" }
@@ -10000,10 +10241,10 @@ $deviceRole = "NIC"
 if ($isOnCore0) {
 $sortRank      = 2
 $isRecommended = $true
-$adviceText    = "$([char]0x2605) OFFLOAD TO C1 (Drives ndis.sys)"
+$adviceText    = "$([char]0x2605) OFFLOAD TO C1 (Drives tcpip/ndis)"
 } else {
 $sortRank   = 4
-$adviceText = "$([char]0x2713) Offloaded (Drives ndis.sys)"
+$adviceText = "$([char]0x2713) Offloaded (Drives tcpip/ndis)"
 }
 } elseif ($isUsb) {
 $deviceRole = "USB"
@@ -10278,8 +10519,8 @@ if ($null -ne $platBytes -and $platBytes.Length -ge 1 -and $platBytes[0] -eq 1) 
 $platClockOpt = $false
 }
 } else {
-$dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)")
-$platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|Tak|Ja|Oui|S[i\u00ED]|True|1)"))
+$dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|True|1)")
+$platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|True|1)"))
 }
 }
 $results.Add([PSCustomObject]@{
@@ -10312,8 +10553,9 @@ $nvmePath = "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device"
 $nvmeIdle = (Get-ItemProperty -LiteralPath $nvmePath -Name "IdlePowerMode" -ErrorAction SilentlyContinue).IdlePowerMode
 $isNvmeIdleOpt = ($null -ne $nvmeIdle -and $nvmeIdle -eq 0)
 $results.Add([PSCustomObject]@{ UIDisplayName = "StorNVMe APST Driver Lock (IdlePowerMode)"; IsOptimized = $isNvmeIdleOpt; ActionData = @{ Type="Reg"; Path=$nvmePath; Name="IdlePowerMode"; Val=0 } })
+$sysMainStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain" -Name "Start" -ErrorAction SilentlyContinue).Start
 $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
-$isMemOpt = ($null -ne $mmAgent -and $mmAgent.MemoryCompression -eq $false)
+$isMemOpt = if ($null -ne $mmAgent) { ($mmAgent.MemoryCompression -eq $false) } else { ($sysMainStart -eq 4) }
 $results.Add([PSCustomObject]@{ UIDisplayName = "System Memory Compression (MMAgent)"; IsOptimized = $isMemOpt; ActionData = @{ Type="MMAgent" } })
 return @($results)
 }
@@ -10674,7 +10916,17 @@ if ($data.Type -eq "Reg") {
 if (-not (Test-Path -LiteralPath $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
 Set-ItemProperty -LiteralPath $data.Path -Name $data.Name -Value $data.Val -Type DWord -Force -ErrorAction Stop
 } elseif ($data.Type -eq "MMAgent") {
+$smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
+$smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
+if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+try {
 Disable-MMAgent -MemoryCompression -ErrorAction Stop
+} finally {
+if ($smStart -eq 4) {
+Stop-Service -Name "SysMain" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4
+}
+}
 }
 } catch {
 Write-GUI "    [!] Failed to apply: $($item.UIDisplayName)"
@@ -11212,7 +11464,7 @@ $kernelRoleCatalog = @{
 "dxgmms2"   = @{ Name = "[OS] DirectX Video Memory Manager";   Role = "GPU";     Advice = "Follows GPU VRAM Paging / IRQ" }
 "wdf01000"  = @{ Name = "[OS] KMDF Driver Framework Runtime";  Role = "USB";     Advice = "Aggregates USBXHCI / HID / Audio DPCs" }
 "ndis"      = @{ Name = "[OS] NDIS Network Subsystem";         Role = "NIC";     Advice = "Aggregates NIC IRQ (Offload NIC -> C1)" }
-"tcpip"     = @{ Name = "[OS] Windows TCP/IP Network Stack";   Role = "NIC";     Advice = "Follows NIC RSS / Interrupt Core" }
+"tcpip"     = @{ Name = "[OS] Windows TCP/IP Network Stack";   Role = "NIC";     Advice = "Direct RSS / NIC Stack (Offload NIC -> C1)" }
 "usbport"   = @{ Name = "[OS] USB 2.0 EHCI Port Driver";       Role = "USB";     Advice = "Legacy USB 2.0 EHCI Host Wrapper" }
 "usbaudio2" = @{ Name = "[OS] USB Audio 2.0 Class Driver";     Role = "USB";     Advice = "Follows USB XHCI Controller Core" }
 "portcls"   = @{ Name = "[OS] PortCls Audio Class Driver";     Role = "Audio";   Advice = "Follows HD Audio / PCIe Sound Core" }
@@ -11373,7 +11625,10 @@ $avgText = "   0.0 $([char]0x00B5)s/s"
 if ($svcKey -match '^(usbxhci|usb4hostrouter|hdaudbus)$') {
 $peakText = "Max:    0 $([char]0x00B5)s (via Wdf01000)"
 } elseif ($dev.SortRank -in @(2, 4)) {
-$peakText = "Max:    0 $([char]0x00B5)s (via ndis.sys)"
+$hasTcp = ($drvLookup.ContainsKey("tcpip") -and $drvLookup["tcpip"].AvgUsPerSec -ge 0.5)
+$hasNds = ($drvLookup.ContainsKey("ndis")  -and $drvLookup["ndis"].AvgUsPerSec  -ge 0.5)
+$viaNet = if ($hasTcp -and -not $hasNds) { "via tcpip.sys" } elseif ($hasNds -and -not $hasTcp) { "via ndis.sys" } else { "via tcpip/ndis" }
+$peakText = "Max:    0 $([char]0x00B5)s ($viaNet)"
 } elseif ($svcKey -match '^(storahci|stornvme|secnvme|iastor)') {
 $peakText = "Max:    0 $([char]0x00B5)s (via storport)"
 } else {
@@ -11766,8 +12021,24 @@ $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 560); $m
 $modal.MinimumSize = New-Object System.Drawing.Size(760, 560)
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
-$lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(710, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+$lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(480, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+$btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 515 -Y 48 -Width 100 -Height 26 -RGB @(50, 53, 58)
+$btnSelAllNet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$btnSelAllNet.Anchor = 'Top, Right'
+$btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 625 -Y 48 -Width 100 -Height 26 -RGB @(50, 53, 58)
+$btnSelNoneNet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$btnSelNoneNet.Anchor = 'Top, Right'
 $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 375); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$btnSelAllNet.Add_Click({
+$chkList.BeginUpdate()
+for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $true) }
+$chkList.EndUpdate()
+}.GetNewClosure())
+$btnSelNoneNet.Add_Click({
+$chkList.BeginUpdate()
+for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $false) }
+$chkList.EndUpdate()
+}.GetNewClosure())
 $localData = New-Object System.Collections.ArrayList
 $btnEngage  = New-UltixButton -Parent $modal -Text "Optimize Checked" -X 15 -Y 470 -Width 175 -Height 35 -RGB @(150, 60, 60)
 $btnEngage.Anchor = 'Bottom, Left'
@@ -11990,7 +12261,14 @@ $modal.UseWaitCursor = $true
 try {
 Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters" -Name "DisableASPM" -Force -ErrorAction SilentlyContinue | Out-Null
 Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device" -Name "IdlePowerMode" -Force -ErrorAction SilentlyContinue | Out-Null
+$smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
+$smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
+if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+try {
 Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+} finally {
+if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 }
+}
 } finally {
 $modal.UseWaitCursor = $false
 [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
@@ -12281,7 +12559,7 @@ $props = Get-ItemProperty -LiteralPath $instKey.PSPath -Name "Service", "Friendl
 if ($null -eq $props -or $props.Service -notmatch '^(?i)(USBXHCI|USB4|usbehci)$') { continue }
 $instanceId = "PCI\$($venKey.PSChildName)\$($instKey.PSChildName)"
 if ([WinUltix.PnpTree]::GetDeviceConfigStatus($instanceId) -ne 0) { continue }
-$rawCtrlName = if ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
+$rawCtrlName = if ([string]$props.DeviceDesc -match '^@usbxhci\.inf,') { $props.DeviceDesc } elseif ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
 $ctrlName    = Format-UltixDeviceName -RawName $rawCtrlName
 $parents = @([WinUltix.PnpTree]::GetParentChain($instanceId))
 $pciBridgeHops = @($parents | Where-Object { $_ -like "PCI\*" }).Count
@@ -12337,7 +12615,7 @@ if ($devId -match '^(?i)(BTHENUM|BTHLE|SWD|MMDEVAPI)\\') { continue }
 $regNode = "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId"
 $dProps  = Get-ItemProperty -LiteralPath $regNode -Name "FriendlyName", "DeviceDesc", "Service", "Class", "Address", "LocationInformation" -ErrorAction SilentlyContinue
 if ($null -eq $dProps) { continue }
-$rawDName = if ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
+$rawDName = if ([string]$dProps.DeviceDesc -match '^@(usb|input|keyboard|msmouse|usbhub3|hidclass|hidserv)\.inf,') { $dProps.DeviceDesc } elseif ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
 $dName    = Format-UltixDeviceName -RawName $rawDName
 $dSvc     = [string]$dProps.Service
 $dCls     = [string]$dProps.Class
@@ -12400,7 +12678,7 @@ break
 }
 if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Composite Device|Generic|USB Input Device|HID-compliant)') {
 foreach ($n in $deviceNodes) {
-if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|Urz.dzenie kompozytowe|USB Input Device|Urz.dzenie wej.ciowe|HID Keyboard Device|Urz.dzenie klawiatury HID|HID-compliant|Zgodne z HID|Generic)') {
+if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|USB Input Device|HID Keyboard Device|HID-compliant|Generic)') {
 $bestName = $n.Name
 break
 }
@@ -13075,7 +13353,7 @@ $lblAbout.Location = New-Object System.Drawing.Point(98, 46)
 $lblAbout.Size = New-Object System.Drawing.Size(295, 65)
 $lblAbout.ForeColor = [System.Drawing.Color]::LightGray
 $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
-$lblAbout.Text = "Ultimate Windows System and Hardware Toolkit`nConcept, architecture and combat tests: Firever`nCoding assistance: Gemini AI"
+$lblAbout.Text = "Ultimate Windows System and Hardware Toolkit`nArchitecture, Low-Level Engineering, Tests: Firever`n100% Native Zero-WMI | Symmetric Revert Engine"
 $linkGit = New-Object System.Windows.Forms.LinkLabel
 $linkGit.Location = New-Object System.Drawing.Point(20, 120)
 $linkGit.Size = New-Object System.Drawing.Size(370, 20)

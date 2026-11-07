@@ -13,6 +13,79 @@ function Get-UltixProtectedAppxRegex {
     return "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
 }
 
+function Get-UltixInboxNicFodStatus {
+    # Inspects active physical Net class devices (GUID {4d36e972-e325-11ce-bfc1-08002be10318})
+    # to check if any active adapter relies on a Microsoft inbox driver instead of an OEM (oemXX.inf) package.
+    $usingInboxWifi = $false
+    $usingInboxEth  = $false
+
+    $classRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}", $false)
+    if ($null -eq $classRoot) {
+        return [PSCustomObject]@{ InboxWifiActive = $false; InboxEthActive = $false }
+    }
+
+    try {
+        foreach ($subName in $classRoot.GetSubKeyNames()) {
+            if ($subName -notmatch '^\d{4}$') { continue }
+            $drvKey = $classRoot.OpenSubKey($subName, $false)
+            if ($null -eq $drvKey) { continue }
+            try {
+                $infPath = [string]$drvKey.GetValue("InfPath", "")
+                # If InfPath starts with oemXX.inf, the card uses a vendor-supplied driver package (FOD not needed)
+                if ([string]::IsNullOrWhiteSpace($infPath) -or $infPath -match '^(?i)oem\d+\.inf$') { continue }
+
+                # Inbox driver only matters for physical PCI/USB hardware (ignore virtual WAN Miniports / SWD)
+                $matchingId = [string]$drvKey.GetValue("MatchingDeviceId", "")
+                if ($matchingId -notmatch '^(?i)(PCI|USB)\\') { continue }
+
+                $drvDesc = [string]$drvKey.GetValue("DriverDesc", "")
+
+                # Verify if a bound physical device instance is currently active in CfgMgr32
+                $isActiveHw = $false
+                $devInstId  = [string]$drvKey.GetValue("DeviceInstanceID", "")
+                if ($devInstId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($devInstId) -eq 0) {
+                    $isActiveHw = $true
+                }
+
+                if (-not $isActiveHw) {
+                    $linkKey = $drvKey.OpenSubKey("Linkage", $false)
+                    if ($null -ne $linkKey) {
+                        try {
+                            [string[]]$rootDev = $linkKey.GetValue("RootDevice", @())
+                            foreach ($pnpId in $rootDev) {
+                                if ($pnpId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($pnpId) -eq 0) {
+                                    $isActiveHw = $true
+                                    break
+                                }
+                            }
+                        } finally {
+                            $linkKey.Dispose()
+                        }
+                    }
+                }
+
+                if ($isActiveHw) {
+                    if ($infPath -match '(?i)(wlan|wifi|netwtw|netrtwl|netr28|netathr|netbc6)' -or $drvDesc -match '(?i)(Wi-Fi|WiFi|Wireless|802\.11|WLAN)') {
+                        $usingInboxWifi = $true
+                    } else {
+                        $usingInboxEth = $true
+                    }
+                }
+            } finally {
+                $drvKey.Dispose()
+            }
+        }
+    } finally {
+        $classRoot.Dispose()
+    }
+
+    return [PSCustomObject]@{
+        InboxWifiActive = $usingInboxWifi
+        InboxEthActive  = $usingInboxEth
+    }
+}
+
+
 # ------------------------------------------
 # Z2: BLOATWARE AUDITS (PURE RUNSPACE WORKERS)
 # ------------------------------------------
@@ -173,15 +246,18 @@ function Get-OneDriveState {
 }
 
 function Get-CapabilitiesState {
+    Unlock-UltixTrustedInstaller
     if ($null -ne $UltixSync) { $UltixSync.Progress = 15 }
     $capsWildcards = @(
         "*Print.Fax.Scan*", "*App.StepsRecorder*", "*Media.WindowsMediaPlayer*",
         "*MathRecognizer*", "*App.Support.QuickAssist*", "*Microsoft.Windows.WordPad*",
         "*Hello.Face*", "*OneCoreUAP.OneSync*", "*Browser.InternetExplorer*",
         "*Microsoft.Wallpapers.Extended*", "*Print.Management.Console*",
-        "*Language.Handwriting*", "*Language.Speech*", "*Wifi.Client*"
+        "*Language.Handwriting*", "*Language.Speech*", "*XPS.Viewer*",
+        "*Ethernet.Client*", "*Wifi.Client*"
     )
 
+    $nicFodStatus  = Get-UltixInboxNicFodStatus
     $installedCaps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Installed' })
     if ($null -ne $UltixSync) { $UltixSync.Progress = 65 }
 
@@ -197,10 +273,31 @@ function Get-CapabilitiesState {
         $found      = @($installedCaps | Where-Object { $_.Name -like $capName })
         $isDetected = ($found.Count -gt 0)
         $cleanName  = $capName.Replace("*", "")
+        $dispLabel  = "FOD: $cleanName"
+        $isOptIn    = ($cleanName -match '^(?i)(Hello\.Face|Language\.|Ethernet\.Client|Wifi\.Client)')
+
+        if ($cleanName -eq "Ethernet.Client") {
+            if ($nicFodStatus.InboxEthActive) {
+                $isDetected = $false
+                $found      = @()
+                $dispLabel  = "FOD: Ethernet.Client [LOCKED - Active NIC is using MS Inbox Driver; install OEM driver first]"
+            } else {
+                $dispLabel  = "FOD: Ethernet.Client (MS Inbox LAN Drivers - Safe: OEM driver active, install OEM driver first if changing NIC)"
+            }
+        } elseif ($cleanName -eq "Wifi.Client") {
+            if ($nicFodStatus.InboxWifiActive) {
+                $isDetected = $false
+                $found      = @()
+                $dispLabel  = "FOD: Wifi.Client [LOCKED - Active Wi-Fi is using MS Inbox Driver; install OEM driver first]"
+            } else {
+                $dispLabel  = "FOD: Wifi.Client (MS Inbox WLAN Drivers - Safe: OEM driver active, install OEM driver first if changing Wi-Fi)"
+            }
+        }
 
         $results.Add([PSCustomObject]@{
-            UIDisplayName = "FOD: $cleanName"
+            UIDisplayName = $dispLabel
             IsDetected    = $isDetected
+            OptIn         = $isOptIn
             ActionData    = $found
         })
     }
@@ -326,15 +423,15 @@ function Get-BloatwareState {
         @{ Label = "Windows Maps";                                Pattern = "*WindowsMaps*" }
         @{ Label = "Windows Alarms & Clock";                      Pattern = "*WindowsAlarms*" }
         @{ Label = "Windows Voice Recorder (SoundRecorder)";      Pattern = "*SoundRecorder*" }
-        @{ Label = "Windows Camera";                              Pattern = "*WindowsCamera*" }
-        @{ Label = "Windows Photos";                              Pattern = "*Windows.Photos*" }
+        @{ Label = "Windows Camera";                              Pattern = "*WindowsCamera*"; OptIn = $true }
+        @{ Label = "Windows Photos";                              Pattern = "*Windows.Photos*"; OptIn = $true }
         @{ Label = "Media Player / Groove Music (ZuneMusic)";     Pattern = "*ZuneMusic*" }
         @{ Label = "Movies & TV (ZuneVideo)";                     Pattern = "*ZuneVideo*" }
         @{ Label = "Microsoft Solitaire Collection";              Pattern = "*SolitaireCollection*" }
-        @{ Label = "Xbox App (GamingApp)";                        Pattern = "*GamingApp*|*XboxApp*" }
-        @{ Label = "Xbox Game Bar (XboxGamingOverlay)";           Pattern = "*XboxGamingOverlay*" }
-        @{ Label = "Xbox Speech To Text Overlay";                 Pattern = "*XboxSpeechToTextOverlay*" }
-        @{ Label = "Xbox TCUI (Live In-Game Experience)";         Pattern = "*Xbox.TCUI*" }
+        @{ Label = "Xbox App (GamingApp)";                        Pattern = "*GamingApp*|*XboxApp*"; OptIn = $true }
+        @{ Label = "Xbox Game Bar (XboxGamingOverlay)";           Pattern = "*XboxGamingOverlay*"; OptIn = $true }
+        @{ Label = "Xbox Speech To Text Overlay";                 Pattern = "*XboxSpeechToTextOverlay*"; OptIn = $true }
+        @{ Label = "Xbox TCUI (Live In-Game Experience)";         Pattern = "*Xbox.TCUI*"; OptIn = $true }
         @{ Label = "Microsoft People";                            Pattern = "*Microsoft.People*" }
         @{ Label = "Skype UWP";                                   Pattern = "*SkypeApp*" }
         @{ Label = "Cortana";                                     Pattern = "*Cortana*" }
@@ -477,8 +574,10 @@ function Get-BloatwareState {
         $results.Add([PSCustomObject]@{
             UIDisplayName = "$($entry.Label)$sizeLabel"
             IsDetected    = $isDetected
+            OptIn         = [bool]$entry.OptIn
             ActionData    = @{
                 IsRecall    = $false
+                OptIn       = [bool]$entry.OptIn
                 Installed   = @($foundInstalled)
                 Provisioned = @($foundProv)
             }
@@ -490,6 +589,7 @@ function Get-BloatwareState {
 }
 
 function Get-CapabilityStubState {
+    Unlock-UltixTrustedInstaller
     if ($null -ne $UltixSync) { $UltixSync.Progress = 20 }
     $cbsStubs = @(Get-WindowsPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.PackageName -match "(?i)stub" -and $_.PackageState -eq "Installed" })
     if ($null -ne $UltixSync) { $UltixSync.Progress = 80 }
@@ -529,8 +629,7 @@ function Invoke-RemoveOneDrive {
             param([string]$TargetDir)
             if ([string]::IsNullOrWhiteSpace($TargetDir) -or -not (Test-Path -LiteralPath $TargetDir)) { return }
 
-            & takeown.exe /F "$TargetDir" /R /A /D Y 2>$null | Out-Null
-            & icacls.exe "$TargetDir" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+            Grant-UltixDirectoryAdminAccess -TargetPath $TargetDir
 
             # Evacuate memory-mapped shell extensions & binaries (e.g., FileSyncShell64.dll locked by explorer.exe)
             $binFiles = @(Get-ChildItem -LiteralPath $TargetDir -Include "*.dll", "*.exe" -Recurse -File -Force -ErrorAction SilentlyContinue)
@@ -759,6 +858,7 @@ function Invoke-RemoveCapabilities {
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$SelectedItems) -ScriptBlock {
         param([array]$Items)
+        Unlock-UltixTrustedInstaller
         $total   = $Items.Count
         $current = 0
 
@@ -985,6 +1085,7 @@ function Invoke-RemoveCapabilityStubs {
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$SelectedItems) -ScriptBlock {
         param([array]$Items)
+        Unlock-UltixTrustedInstaller
         $total   = $Items.Count
         $current = 0
 
@@ -1155,16 +1256,36 @@ function Show-CapsGrid {
     Update-Progress 25
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
-        # Lock critical DirectX database, Ethernet NDIS client drivers, and Defender Sense core
-        $criticalFodRegex = '^(?i)(DirectX\.Configuration\.Database|Microsoft\.Windows\.Ethernet\.Client|Microsoft\.Windows\.Sense\.Client)'
+        Unlock-UltixTrustedInstaller
+        $nicFodStatus = Get-UltixInboxNicFodStatus
 
         $caps = @(Get-WindowsCapability -Online -ErrorAction SilentlyContinue |
             Where-Object { $_.State -eq 'Installed' } |
             ForEach-Object {
-                $isCrit = ($_.Name -match $criticalFodRegex)
-                $stateDisp = if ($isCrit) { "Installed [CRITICAL - LOCKED]" } else { [string]$_.State }
+                $cName  = $_.Name
+                $isCrit = ($cName -match '^(?i)(DirectX\.Configuration\.Database|Microsoft\.Windows\.Sense\.Client)')
+                $stateDisp = [string]$_.State
+
+                if ($isCrit) {
+                    $stateDisp = "Installed [CRITICAL - LOCKED]"
+                } elseif ($cName -match '^(?i)Microsoft\.Windows\.Ethernet\.Client') {
+                    if ($nicFodStatus.InboxEthActive) {
+                        $isCrit    = $true
+                        $stateDisp = "Installed [INBOX LAN IN USE - LOCKED]"
+                    } else {
+                        $stateDisp = "Installed [OEM Driver Active - Removable]"
+                    }
+                } elseif ($cName -match '^(?i)Microsoft\.Windows\.Wifi\.Client') {
+                    if ($nicFodStatus.InboxWifiActive) {
+                        $isCrit    = $true
+                        $stateDisp = "Installed [INBOX WIFI IN USE - LOCKED]"
+                    } else {
+                        $stateDisp = "Installed [OEM Driver Active - Removable]"
+                    }
+                }
+
                 [PSCustomObject]@{
-                    Name     = $_.Name
+                    Name     = $cName
                     State    = $stateDisp
                     IsLocked = $isCrit
                 }
@@ -1180,12 +1301,12 @@ function Show-CapsGrid {
         }
 
         $cols = @(
-            @{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 650 }
-            @{ Header = "State";                 Property = "State"; Width = 190 }
+            @{ Header = "Capability Name (FOD)"; Property = "Name";  Width = 590 }
+            @{ Header = "State / Driver Check";  Property = "State"; Width = 250 }
         )
 
         $res = Show-UltixGridModal -Title "WinUltix - Windows Capabilities (FOD)" `
-            -Description "Select installed Features on Demand (FOD) to uninstall. Critical DirectX, Ethernet LAN, and Defender FODs (Red) are locked." `
+            -Description "Select installed FODs to uninstall. DirectX, Defender, and any NIC FOD currently used by an inbox driver (Red) are locked. Install OEM NIC drivers before removing Ethernet/Wi-Fi FODs." `
             -Data $caps -Columns $cols -PrimaryButtonText "Uninstall Selected FODs"
 
         if ($null -eq $res -or $res.Items.Count -eq 0) {
@@ -1195,6 +1316,7 @@ function Show-CapsGrid {
 
         Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
             param([array]$Selected)
+            Unlock-UltixTrustedInstaller
             $total = $Selected.Count
             $current = 0
             foreach ($cap in $Selected) {
@@ -1221,51 +1343,72 @@ function Show-CapsGrid {
 function Show-OptFeaturesGrid {
     param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 
-    Write-GUI " -> Querying enabled Windows Optional Features (Background Thread)..."
+    Write-GUI " -> Querying Windows Optional Features (Background Thread)..."
     Update-Progress 25
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+        Unlock-UltixTrustedInstaller
+        # Lock core .NET Framework 4.8 runtime required by WinForms/MMC/PowerShell UI tools
+        $criticalFeatRegex = '^(?i)(NetFx4-AdvSrvs|NetFx4Extended-ASPNET45)$'
+
         $feats = @(Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue |
-            Where-Object { $_.State -eq 'Enabled' } |
-            Select-Object FeatureName, State |
-            Sort-Object FeatureName)
+            ForEach-Object {
+                $isCrit    = ($_.FeatureName -match $criticalFeatRegex)
+                $stateDisp = if ($isCrit) { "$($_.State) [CRITICAL - LOCKED]" } else { [string]$_.State }
+                [PSCustomObject]@{
+                    FeatureName = $_.FeatureName
+                    State       = $stateDisp
+                    RawState    = [string]$_.State
+                    IsLocked    = $isCrit
+                }
+            } | Sort-Object IsLocked, @{Expression={ if ($_.RawState -match '^Enabled') { 0 } else { 1 } }}, FeatureName)
         return $feats
     } -OnComplete ({
         param($output)
         Update-Progress 0
         [array]$feats = @($output | Where-Object { $null -ne $_ })
         if ($feats.Count -eq 0) {
-            Write-GUI " -> No enabled Optional Features found.`n"
+            Write-GUI " -> No Optional Features returned from DISM.`n"
             return
         }
 
         $cols = @(
-            @{ Header = "Optional Feature Name"; Property = "FeatureName"; Width = 680 }
-            @{ Header = "State";                 Property = "State";       Width = 160 }
+            @{ Header = "Optional Feature Name"; Property = "FeatureName"; Width = 640 }
+            @{ Header = "State";                 Property = "State";       Width = 200 }
         )
 
-        $res = Show-UltixGridModal -Title "WinUltix - Windows Optional Features" `
-            -Description "Select enabled Optional Features to disable (e.g., Legacy Components, SMB1, Hypervisor modules)." `
-            -Data $feats -Columns $cols -PrimaryButtonText "Disable Selected Features"
+        $res = Show-UltixGridModal -Title "WinUltix - Windows Optional Features (DISM)" `
+            -Description "Inspect and toggle Windows Optional Features (e.g., Hyper-V, WSL, Sandbox, SMB1). Core .NET 4.8 runtime (Red) is locked." `
+            -Data $feats -Columns $cols -PrimaryButtonText "Disable Selected Features" `
+            -SecondaryButtonText "Enable Selected Features"
 
         if ($null -eq $res -or $res.Items.Count -eq 0) {
             Write-GUI " -> Optional feature configuration cancelled.`n"
             return
         }
 
-        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$res.Items) -ScriptBlock {
-            param([array]$Selected)
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($res.Items, $res.Action) -ScriptBlock {
+            param([array]$Selected, [string]$Action)
+            Unlock-UltixTrustedInstaller
             $total = $Selected.Count
             $current = 0
             foreach ($feat in $Selected) {
                 $current++
                 $UltixSync.Progress = [int](($current / $total) * 100)
-                $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
+                if ($feat.IsLocked) { continue }
+
                 try {
-                    Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
-                    $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
+                    if ($Action -eq "Primary") {
+                        $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
+                        Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+                        $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
+                    } else {
+                        $UltixSync.Logs.Enqueue(" -> Enabling feature: $($feat.FeatureName)")
+                        Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop | Out-Null
+                        $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) enabled (Reboot may be required).")
+                    }
                 } catch {
-                    $UltixSync.Logs.Enqueue("    [!] Failed to disable $($feat.FeatureName): $($_.Exception.Message)")
+                    $UltixSync.Logs.Enqueue("    [!] Failed to modify $($feat.FeatureName): $($_.Exception.Message)")
                 }
             }
         } -OnComplete ({
@@ -1315,7 +1458,7 @@ function Initialize-Z2UI {
     # 3. Capabilities (FOD Preset)
     $rowCaps = New-UltixActionRow -Parent $tabApps -Y 120 -MainRGB @(55, 58, 64) `
         -Text "Remove System Features (FOD Preset)" `
-        -Description "Interactive removal of 14 unnecessary built-in Features on Demand (Steps Recorder, Quick Assist, WordPad, Fax, Hello Face) in a background CBS thread." `
+        -Description "Interactive removal of 16 unnecessary built-in Features on Demand (Steps Recorder, Quick Assist, WordPad, Fax, Hello Face) in a background CBS thread." `
         -AuditDescription "AUDIT: Verifies installed unnecessary Capabilities (FOD)." `
         -OnClick ({
             Invoke-UltixAuditFlow -ScannerFunction "Get-CapabilitiesState" -AuditLabel "Built-in Features (FOD)" -ModalTitle "WinUltix - FOD Removal" -ModalDescription "Select features to remove." -ExecutorFunction "Invoke-RemoveCapabilities" -ControlsToDisable $allTabButtons.ToArray()

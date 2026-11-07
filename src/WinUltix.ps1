@@ -209,7 +209,7 @@ $btnCredits.Add_Click({
     $lblAbout.Size = New-Object System.Drawing.Size(295, 65)
     $lblAbout.ForeColor = [System.Drawing.Color]::LightGray
     $lblAbout.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
-    $lblAbout.Text = "Ultimate Windows System and Hardware Toolkit`nConcept, architecture and combat tests: Firever`nCoding assistance: Gemini AI"
+    $lblAbout.Text = "Ultimate Windows System and Hardware Toolkit`nArchitecture, Low-Level Engineering, Tests: Firever`n100% Native Zero-WMI | Symmetric Revert Engine"
     
     $linkGit = New-Object System.Windows.Forms.LinkLabel
     $linkGit.Location = New-Object System.Drawing.Point(20, 120)

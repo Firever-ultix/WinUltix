@@ -574,10 +574,10 @@ function Get-HardwareState_IRQ {
                             $msiKey.Dispose()
                         }
 
-                        $rawDevName = [string]$instKey.GetValue("FriendlyName", "")
-                        if ([string]::IsNullOrWhiteSpace($rawDevName)) { $rawDevName = [string]$instKey.GetValue("DeviceDesc", "") }
+                        $rawDescAttr = [string]$instKey.GetValue("DeviceDesc", "")
+                        $rawFriendly = [string]$instKey.GetValue("FriendlyName", "")
+                        $rawDevName  = if ($rawDescAttr -match '^@(usbxhci|hdaudbus|hdaudio|stornvme|mshdc)\.inf,') { $rawDescAttr } elseif (-not [string]::IsNullOrWhiteSpace($rawFriendly)) { $rawFriendly } else { $rawDescAttr }
                         $devName = Format-UltixDeviceName -RawName $rawDevName
-                        if ([string]::IsNullOrWhiteSpace($devName)) { $devName = "Unknown PCI Device" }
 
                         $svcName  = [string]$instKey.GetValue("Service", "")
                         $devClass = [string]$instKey.GetValue("Class", "")
@@ -691,12 +691,12 @@ function Get-HardwareState_IRQ {
                                     }
                                 }
                             }
-                            $shortCtrl = if ($svcName -match '^(?i)(stornvme|secnvme)$' -or $rawDevName -match '^(?i)@stornvme\.inf,') {
+                            $shortCtrl = if ($svcName -match '^(?i)(stornvme|secnvme)$' -or $rawDescAttr -match '^(?i)@stornvme\.inf,') {
                                 "NVMe Controller"
-                            } elseif ($svcName -match '^(?i)(storahci|iaStor)' -or $rawDevName -match '^(?i)@mshdc\.inf,') {
+                            } elseif ($svcName -match '^(?i)(storahci|iaStor)' -or $rawDescAttr -match '^(?i)@mshdc\.inf,') {
                                 "SATA AHCI Controller"
                             } else {
-                                ($devName -replace '^(?i)(Standard|Standardowy)\s+', '').Trim()
+                                ($devName -replace '^(?i)Standard\s+', '').Trim()
                             }
                             if ($diskNames.Count -gt 0) {
                                 $devName = "$shortCtrl [$($diskNames -join ', ')]"
@@ -706,7 +706,7 @@ function Get-HardwareState_IRQ {
                                 $devName = $shortCtrl
                             }
                         } elseif ($isUsb -and -not [string]::IsNullOrEmpty($bdfTag)) {
-                            $shortUsb = ($devName -replace '(?i)^(Rozszerzalny kontroler hosta|Kontroler hosta)\s+', '' -replace '\s*[-–—]\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
+                            $shortUsb = ($devName -replace '\s*[-–—]\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
                             if ($shortUsb -notmatch '(?i)XHCI' -and $svcName -match '^(?i)USBXHCI$') {
                                 $shortUsb = "$shortUsb XHCI"
                             }
@@ -740,15 +740,15 @@ function Get-HardwareState_IRQ {
                                                     }
                                                 }
                                             }
-                                            if ([string]::IsNullOrWhiteSpace($cResolved)) {
+                                            if ($cRawDesc -match '^@hdaudio\.inf,' -or [string]::IsNullOrWhiteSpace($cResolved)) {
                                                 $cResolved = Format-UltixDeviceName -RawName $cRawDesc
                                             }
 
                                             $isGenericInbox = ($cRawDesc -match '^(?i)@hdaudio\.inf,' -or $cInfPath -match '^(?i)hdaudio\.inf$')
                                             $cClean = ($cResolved -replace '(?i)\(R\)|\(TM\)', '' -replace '(?i)\s*High Definition Audio(\s+Device|\s+Controller)?', ' HD Audio' -replace '(?i)\s*Audio Device\s*$', ' Audio' -replace '\s+', ' ').Trim()
 
-                                            # 100% locale-independent fallback when Microsoft's generic hdaudio.inf driver is bound
-                                            if ($isGenericInbox -or [string]::IsNullOrWhiteSpace($cClean) -or $cClean -match '^(?i)(HD Audio|Microsoft.*|Urządzenie.*|Kontroler.*)$') {
+                                            # 100% locale-independent hardware VEN_XXXX lookup when Microsoft's generic hdaudio.inf driver is bound
+                                            if ($isGenericInbox -or [string]::IsNullOrWhiteSpace($cClean) -or $cClean -match '^(?i)(HD Audio|Microsoft.*)$') {
                                                 $cClean = if ($childId -match 'VEN_10DE')     { "NVIDIA HD Audio" }
                                                 elseif ($childId -match 'VEN_10EC')           { "Realtek HD Audio" }
                                                 elseif ($childId -match 'VEN_1002')           { "AMD HDMI Audio" }
@@ -817,10 +817,10 @@ function Get-HardwareState_IRQ {
                             if ($isOnCore0) {
                                 $sortRank      = 2
                                 $isRecommended = $true
-                                $adviceText    = "★ OFFLOAD TO C1 (Drives ndis.sys)"
+                                $adviceText    = "★ OFFLOAD TO C1 (Drives tcpip/ndis)"
                             } else {
                                 $sortRank   = 4
-                                $adviceText = "✓ Offloaded (Drives ndis.sys)"
+                                $adviceText = "✓ Offloaded (Drives tcpip/ndis)"
                             }
                         } elseif ($isUsb) {
                             $deviceRole = "USB"
@@ -1137,8 +1137,8 @@ function Get-HardwareState_Timer {
                 $platClockOpt = $false
             }
         } else {
-            $dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|Tak|Ja|Oui|S[ií]|True|1)")
-            $platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|Tak|Ja|Oui|S[ií]|True|1)"))
+            $dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|True|1)")
+            $platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|True|1)"))
         }
     }
 
@@ -1179,8 +1179,10 @@ function Get-HardwareState_NVMe {
     $isNvmeIdleOpt = ($null -ne $nvmeIdle -and $nvmeIdle -eq 0)
     $results.Add([PSCustomObject]@{ UIDisplayName = "StorNVMe APST Driver Lock (IdlePowerMode)"; IsOptimized = $isNvmeIdleOpt; ActionData = @{ Type="Reg"; Path=$nvmePath; Name="IdlePowerMode"; Val=0 } })
 
+    $sysMainStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain" -Name "Start" -ErrorAction SilentlyContinue).Start
     $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
-    $isMemOpt = ($null -ne $mmAgent -and $mmAgent.MemoryCompression -eq $false)
+    # When SysMain is disabled (Start=4), Memory Compression is inactive at the kernel level and Get-MMAgent returns $null
+    $isMemOpt = if ($null -ne $mmAgent) { ($mmAgent.MemoryCompression -eq $false) } else { ($sysMainStart -eq 4) }
     $results.Add([PSCustomObject]@{ UIDisplayName = "System Memory Compression (MMAgent)"; IsOptimized = $isMemOpt; ActionData = @{ Type="MMAgent" } })
 
     return @($results)
@@ -1594,7 +1596,17 @@ function Invoke-ApplyNVMeTweaks {
                 if (-not (Test-Path -LiteralPath $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
                 Set-ItemProperty -LiteralPath $data.Path -Name $data.Name -Value $data.Val -Type DWord -Force -ErrorAction Stop
             } elseif ($data.Type -eq "MMAgent") {
-                Disable-MMAgent -MemoryCompression -ErrorAction Stop
+                $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
+                $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
+                if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+                try {
+                    Disable-MMAgent -MemoryCompression -ErrorAction Stop
+                } finally {
+                    if ($smStart -eq 4) {
+                        Stop-Service -Name "SysMain" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                        Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4
+                    }
+                }
             }
         } catch { 
             Write-GUI "    [!] Failed to apply: $($item.UIDisplayName)"
@@ -2218,7 +2230,7 @@ function Show-MsiModal {
         "dxgmms2"   = @{ Name = "[OS] DirectX Video Memory Manager";   Role = "GPU";     Advice = "Follows GPU VRAM Paging / IRQ" }
         "wdf01000"  = @{ Name = "[OS] KMDF Driver Framework Runtime";  Role = "USB";     Advice = "Aggregates USBXHCI / HID / Audio DPCs" }
         "ndis"      = @{ Name = "[OS] NDIS Network Subsystem";         Role = "NIC";     Advice = "Aggregates NIC IRQ (Offload NIC -> C1)" }
-        "tcpip"     = @{ Name = "[OS] Windows TCP/IP Network Stack";   Role = "NIC";     Advice = "Follows NIC RSS / Interrupt Core" }
+        "tcpip"     = @{ Name = "[OS] Windows TCP/IP Network Stack";   Role = "NIC";     Advice = "Direct RSS / NIC Stack (Offload NIC -> C1)" }
         "usbport"   = @{ Name = "[OS] USB 2.0 EHCI Port Driver";       Role = "USB";     Advice = "Legacy USB 2.0 EHCI Host Wrapper" }
         "usbaudio2" = @{ Name = "[OS] USB Audio 2.0 Class Driver";     Role = "USB";     Advice = "Follows USB XHCI Controller Core" }
         "portcls"   = @{ Name = "[OS] PortCls Audio Class Driver";     Role = "Audio";   Advice = "Follows HD Audio / PCIe Sound Core" }
@@ -2391,11 +2403,14 @@ function Show-MsiModal {
                     $peakText = ("Max: {0,4:0} µs (1s: {1:0.0})" -f $rec.MaxPeakUs, $rec.UsPerSec)
                 } else {
                     $avgText = "   0.0 µs/s"
-                    # Indicate kernel dispatcher wrapper when PCI miniport delegates ISR/DPC to Wdf01000 / ndis / storport
+                    # Indicate kernel dispatcher wrapper when PCI miniport delegates ISR/DPC to Wdf01000 / tcpip / ndis / storport
                     if ($svcKey -match '^(usbxhci|usb4hostrouter|hdaudbus)$') {
                         $peakText = "Max:    0 µs (via Wdf01000)"
                     } elseif ($dev.SortRank -in @(2, 4)) {
-                        $peakText = "Max:    0 µs (via ndis.sys)"
+                        $hasTcp = ($drvLookup.ContainsKey("tcpip") -and $drvLookup["tcpip"].AvgUsPerSec -ge 0.5)
+                        $hasNds = ($drvLookup.ContainsKey("ndis")  -and $drvLookup["ndis"].AvgUsPerSec  -ge 0.5)
+                        $viaNet = if ($hasTcp -and -not $hasNds) { "via tcpip.sys" } elseif ($hasNds -and -not $hasTcp) { "via ndis.sys" } else { "via tcpip/ndis" }
+                        $peakText = "Max:    0 µs ($viaNet)"
                     } elseif ($svcKey -match '^(storahci|stornvme|secnvme|iastor)') {
                         $peakText = "Max:    0 µs (via storport)"
                     } else {
@@ -2842,9 +2857,29 @@ function Show-NetworkModal {
 
     $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
     
-    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(710, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(480, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+
+    $btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 515 -Y 48 -Width 100 -Height 26 -RGB @(50, 53, 58)
+    $btnSelAllNet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelAllNet.Anchor = 'Top, Right'
+
+    $btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 625 -Y 48 -Width 100 -Height 26 -RGB @(50, 53, 58)
+    $btnSelNoneNet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelNoneNet.Anchor = 'Top, Right'
 
     $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 375); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+
+    $btnSelAllNet.Add_Click({
+        $chkList.BeginUpdate()
+        for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $true) }
+        $chkList.EndUpdate()
+    }.GetNewClosure())
+
+    $btnSelNoneNet.Add_Click({
+        $chkList.BeginUpdate()
+        for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $false) }
+        $chkList.EndUpdate()
+    }.GetNewClosure())
     
     $localData = New-Object System.Collections.ArrayList
 
@@ -3107,7 +3142,14 @@ function Show-NVMeModal {
         try {
             Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters" -Name "DisableASPM" -Force -ErrorAction SilentlyContinue | Out-Null
             Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device" -Name "IdlePowerMode" -Force -ErrorAction SilentlyContinue | Out-Null
-            Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+            $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
+            $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
+            if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+            try {
+                Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+            } finally {
+                if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 }
+            }
         } finally {
             $modal.UseWaitCursor = $false
             [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
@@ -3420,7 +3462,7 @@ function Get-UsbTopologyMap {
 
             $instanceId = "PCI\$($venKey.PSChildName)\$($instKey.PSChildName)"
             if ([WinUltix.PnpTree]::GetDeviceConfigStatus($instanceId) -ne 0) { continue }
-            $rawCtrlName = if ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
+            $rawCtrlName = if ([string]$props.DeviceDesc -match '^@usbxhci\.inf,') { $props.DeviceDesc } elseif ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
             $ctrlName    = Format-UltixDeviceName -RawName $rawCtrlName
 
             $parents = @([WinUltix.PnpTree]::GetParentChain($instanceId))
@@ -3489,7 +3531,7 @@ function Get-UsbTopologyMap {
                 $dProps  = Get-ItemProperty -LiteralPath $regNode -Name "FriendlyName", "DeviceDesc", "Service", "Class", "Address", "LocationInformation" -ErrorAction SilentlyContinue
                 if ($null -eq $dProps) { continue }
 
-                $rawDName = if ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
+                $rawDName = if ([string]$dProps.DeviceDesc -match '^@(usb|input|keyboard|msmouse|usbhub3|hidclass|hidserv)\.inf,') { $dProps.DeviceDesc } elseif ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
                 $dName    = Format-UltixDeviceName -RawName $rawDName
                 $dSvc     = [string]$dProps.Service
                 $dCls     = [string]$dProps.Class
@@ -3559,7 +3601,7 @@ function Get-UsbTopologyMap {
                 }
                 if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Composite Device|Generic|USB Input Device|HID-compliant)') {
                     foreach ($n in $deviceNodes) {
-                        if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|Urządzenie kompozytowe|USB Input Device|Urządzenie wejściowe|HID Keyboard Device|Urządzenie klawiatury HID|HID-compliant|Zgodne z HID|Generic)') {
+                        if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|USB Input Device|HID Keyboard Device|HID-compliant|Generic)') {
                             $bestName = $n.Name
                             break
                         }

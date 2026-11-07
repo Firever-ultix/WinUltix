@@ -21,7 +21,8 @@ function Get-UsbSecurityState {
     $results.Add([PSCustomObject]@{
         UIDisplayName = "USB Read-Only Guard: Block Writing to USB Drives & MTP Phones (Prevents Data Leak)"
         IsDetected    = (-not $isReadOnlyActive)
-        ActionData    = @{ Layer = "WriteProtect" }
+        OptIn         = $true
+        ActionData    = @{ Layer = "WriteProtect"; OptIn = $true }
     })
 
     # 2. USB Execute-Deny Policy (Blocks launching .exe payloads from USB sticks)
@@ -29,7 +30,8 @@ function Get-UsbSecurityState {
     $results.Add([PSCustomObject]@{
         UIDisplayName = "USB Execution Guard: Block Running Executables (.exe) from Removable Drives"
         IsDetected    = ($denyExecPol -ne 1)
-        ActionData    = @{ Layer = "DenyExecute" }
+        OptIn         = $true
+        ActionData    = @{ Layer = "DenyExecute"; OptIn = $true }
     })
 
     # 3. Hard Lock: Disable USBSTOR & UASPStor Kernel Drivers + Full Removable Storage & WPD Policy
@@ -40,7 +42,8 @@ function Get-UsbSecurityState {
     $results.Add([PSCustomObject]@{
         UIDisplayName = "USB Total Blackout: Disable USBSTOR + UASPStor Drivers (Blocks all USB Sticks & SSDs)"
         IsDetected    = (-not $isHardLocked)
-        ActionData    = @{ Layer = "TotalBlock" }
+        OptIn         = $true
+        ActionData    = @{ Layer = "TotalBlock"; OptIn = $true }
     })
 
     # 4. Anti-BadUSB / Lock-Screen Enumeration & Kernel DMA Guard

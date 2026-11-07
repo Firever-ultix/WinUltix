@@ -71,6 +71,7 @@ function Invoke-RegistryAudit {
             $results.Add([PSCustomObject]@{
                 UIDisplayName = $rule.UIDisplayName
                 IsDetected    = $isDetected
+                OptIn         = [bool]$rule.OptIn
                 ActionData    = $rule
             })
         }
@@ -106,10 +107,10 @@ function Get-RegState_Taskbar {
         @{ UIDisplayName = "Start Menu: Disable Tailored Search Suggestions"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowTailoredSearch"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Widgets: Disable News & Interests (Saves RAM/Network)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"; Name = "AllowNewsAndInterests"; Expected = 0; Default = 1; AltName = "DisableWidgetsBoard"; AltExpected = 1; Type = "DWord"; RestartShell = $true }
         @{ UIDisplayName = "Bloat: Disable Consumer Features (Stops auto-installing apps)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; Name = "DisableWindowsConsumerFeatures"; Expected = 1; Default = 0; Type = "DWord" }
-        @{ UIDisplayName = "UI: Disable Toast Notifications (Flyouts)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "ToastEnabled"; Expected = 0; Default = 1; Type = "DWord" }
-        @{ UIDisplayName = "UI: Disable Focus Assist (Global)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings"; Name = "NOC_GLOBAL_SETTING_TOASTS_ENABLED"; Expected = 0; Default = 1; Type = "DWord" }
-        @{ UIDisplayName = "UI: Disable App Push Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoCloudApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord" }
-        @{ UIDisplayName = "UI: Disable App Toast Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoToastApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord" }
+        @{ UIDisplayName = "UI: Disable Toast Notifications (Flyouts)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "ToastEnabled"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
+        @{ UIDisplayName = "UI: Disable Focus Assist (Global)"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings"; Name = "NOC_GLOBAL_SETTING_TOASTS_ENABLED"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
+        @{ UIDisplayName = "UI: Disable App Push Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoCloudApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
+        @{ UIDisplayName = "UI: Disable App Toast Notifications (Policy)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"; Name = "NoToastApplicationNotification"; Expected = 1; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
         @{ UIDisplayName = "Search: Disable Bing Web Results (Keeps local queries private)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "DisableWebSearch"; Expected = 1; Default = 0; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Search: Disable Connected Cloud Search Services"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchUseWeb"; Expected = 0; Default = 1; Type = "DWord"; RestartSearch = $true }
         @{ UIDisplayName = "Search: Disable Location Tracking in Search"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowSearchToUseLocation"; Expected = 0; Default = 1; Type = "DWord" }
@@ -139,7 +140,7 @@ function Get-RegState_Explorer {
 
 function Get-RegState_Annoyances {
     $rules = @(
-        @{ UIDisplayName = "Power: Disable Modern Standby S0 (Force Hardware S3 Sleep)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power"; Name = "PlatformAoAcOverride"; Expected = 0; Default = 1; Type = "DWord" }
+        @{ UIDisplayName = "Power: Disable Modern Standby S0 (Force Hardware S3 Sleep - Desktop/Supported BIOS)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power"; Name = "PlatformAoAcOverride"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
         @{ UIDisplayName = "Security: Disable AutoPlay for all drives"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoDriveTypeAutoRun"; Expected = 255; Default = 91; Type = "DWord" }
         @{ UIDisplayName = "Security: Disable Autoplay Handlers"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers"; Name = "DisableAutoplay"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "Accessibility: Disable Sticky Keys prompt (Shift x5)"; Path = "HKCU:\Control Panel\Accessibility\StickyKeys"; Name = "Flags"; Expected = "506"; Default = "510"; Type = "String" }
@@ -158,14 +159,17 @@ function Get-RegState_Privacy {
     $rules += @{ UIDisplayName = "Privacy: Disable Tailored Experiences"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"; Name = "TailoredExperiencesWithDiagnosticDataEnabled"; Expected = 0; Default = 1; Type = "DWord" }
     $rules += @{ UIDisplayName = "Privacy: Disable Cloud Speech Recognition"; Path = "HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy"; Name = "HasAccepted"; Expected = 0; Default = 1; Type = "DWord" }
     $rules += @{ UIDisplayName = "Privacy: Restrict Implicit Ink/Text Collection"; Path = "HKCU:\Software\Microsoft\InputPersonalization"; Name = "RestrictImplicitInkCollection"; Expected = 1; Default = 0; Type = "DWord" }
-    $rules += @{ UIDisplayName = "Background Apps: Block UWP apps from running globally"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; Name = "GlobalUserDisabled"; Expected = 1; Default = 0; Type = "DWord" }
+    $rules += @{ UIDisplayName = "Background Apps: Block UWP apps from running globally (Optional)"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; Name = "GlobalUserDisabled"; Expected = 1; Default = 0; Type = "DWord"; OptIn = $true }
     
-    $uwpBlocks = @("LetAppsRunInBackground", "LetAppsAccessSync", "LetAppsAccessIdentity", "LetAppsAccessBluetooth", "LetAppsActivateWithVoice", "LetAppsAccessNotifications", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessRadios", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar", "LetAppsAccessAccountInfo")
+    $uwpBlocks = @("LetAppsRunInBackground", "LetAppsAccessSync", "LetAppsActivateWithVoice", "LetAppsAccessCallHistory", "LetAppsAccessPhone", "LetAppsAccessMessaging", "LetAppsAccessEmail", "LetAppsAccessContacts", "LetAppsAccessDocuments", "LetAppsAccessDownloads", "LetAppsAccessMusic", "LetAppsAccessPictures", "LetAppsAccessVideos", "LetAppsAccessFileSystem", "LetAppsAccessLocation", "LetAppsAccessMotion", "LetAppsAccessTrustedDevices", "LetAppsSyncWithDevices", "LetAppsAccessDiagnostics", "LetAppsAccessTasks", "LetAppsAccessCalendar")
     foreach ($app in $uwpBlocks) { $rules += @{ UIDisplayName = "UWP Permissions: Block $app"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $app; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" } }
-    
-    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessCamera"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessCamera"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" }
-    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessMicrophone"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessMicrophone"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord" }
-    
+
+    $uwpOptInBlocks = @("LetAppsAccessIdentity", "LetAppsAccessAccountInfo", "LetAppsAccessBluetooth", "LetAppsAccessRadios", "LetAppsAccessNotifications")
+    foreach ($optApp in $uwpOptInBlocks) { $rules += @{ UIDisplayName = "UWP Permissions: Block $optApp (Optional - May affect Xbox/BT apps)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = $optApp; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true } }
+
+    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessCamera (Warning: Blocks Webcams globally)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessCamera"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
+    $rules += @{ UIDisplayName = "UWP Permissions: Block LetAppsAccessMicrophone (Warning: Blocks Mics globally)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; Name = "LetAppsAccessMicrophone"; Expected = 2; Default = "DELETE_VALUE"; Type = "DWord"; OptIn = $true }
+
     $rules += @{ UIDisplayName = "Edge: Disable Startup Boost (Background Process)"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "StartupBoostEnabled"; Expected = 0; Default = 1; Type = "DWord" }
     $rules += @{ UIDisplayName = "Edge: Disable Background Mode"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "BackgroundModeEnabled"; Expected = 0; Default = 1; Type = "DWord" }
     $rules += @{ UIDisplayName = "Defender: Prevent automatic sample submission"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet"; Name = "SubmitSamplesConsent"; Expected = 2; Default = 1; Type = "DWord" }
@@ -187,7 +191,7 @@ function Get-RegState_SystemBoot {
         @{ UIDisplayName = "Security: Block BIOS/UEFI Software Injections (WPBT)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"; Name = "DisableWpbtExecution"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "System: Block OneDrive File Sync Integration"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; Name = "DisableFileSyncNGSC"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "System: Block OneDrive Network Traffic Pre-Sign-In"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; Name = "PreventNetworkTrafficPreUserSignIn"; Expected = 1; Default = 0; Type = "DWord" }
-        @{ UIDisplayName = "Security: Disable Remote Desktop (RDP) access"; Path = "HKLM:\System\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections"; Expected = 1; Default = 0; Type = "DWord" }
+        @{ UIDisplayName = "Security: Disable Remote Desktop (RDP) access"; Path = "HKLM:\System\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections"; Expected = 1; Default = 0; Type = "DWord"; OptIn = $true }
         @{ UIDisplayName = "System: Disable Insider Preview Builds"; Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PreviewBuilds"; Name = "AllowBuildPreview"; Expected = 0; Default = 1; Type = "DWord" }
         @{ UIDisplayName = "Boot: Enable Verbose Status Messages"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"; Name = "verbosestatus"; Expected = 1; Default = 0; Type = "DWord" }
     )
@@ -220,8 +224,8 @@ function Get-RegState_Gaming {
         @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Scheduling Category (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Scheduling Category"; Expected = "High"; Default = "Medium"; Type = "String" }
-        @{ UIDisplayName = "Security: Disable Virtualization Based Security (VBS)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"; Name = "EnableVirtualizationBasedSecurity"; Expected = 0; Default = 1; Type = "DWord" }
-        @{ UIDisplayName = "Security: Disable Hypervisor-protected Code Integrity (HVCI)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"; Name = "Enabled"; Expected = 0; Default = 1; Type = "DWord" }
+        @{ UIDisplayName = "Security: Disable Virtualization Based Security (VBS)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"; Name = "EnableVirtualizationBasedSecurity"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
+        @{ UIDisplayName = "Security: Disable Hypervisor-protected Code Integrity (HVCI)(Warning: Lowers memory latency but removes kernel-mode malware protection)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"; Name = "Enabled"; Expected = 0; Default = 1; Type = "DWord"; OptIn = $true }
     )
     return Invoke-RegistryAudit -Rules $rules
 }
@@ -678,6 +682,36 @@ function Invoke-ApplyRegistry {
 # ------------------------------------------
 # Z3: START MENU NATIVE COMPILATION & POWER/DISPLAY TUNER
 # ------------------------------------------
+function Get-StartMenuState {
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 25 }
+    $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+    $isCleanActive = $false
+    $sizeTag       = ""
+
+    if ($null -ne $pkgDir) {
+        $binFile   = Get-Item -Path (Join-Path $pkgDir.FullName "LocalState\start2.bin") -Force -ErrorAction SilentlyContinue
+        $clearedSz = (Get-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -ErrorAction SilentlyContinue).StartMenuClearedSize
+        $viewMode  = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -ErrorAction SilentlyContinue).AllAppsViewMode
+        if ($null -ne $binFile) {
+            $szKB = [math]::Round($binFile.Length / 1KB, 1)
+            $sizeTag = " [Current: $szKB KB]"
+            if ($null -ne $clearedSz -and [math]::Abs($binFile.Length - $clearedSz) -le 512 -and $viewMode -eq 2) {
+                $isCleanActive = $true
+            }
+        }
+    }
+
+    $bakExists = Test-Path -LiteralPath "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
+    $bakTag    = if ($bakExists) { " | Backup: Ready" } else { "" }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
+    return @([PSCustomObject]@{
+        UIDisplayName = "Start Menu: Compile Clean 3-Icon Layout (Edge, Settings, Explorer) + Classic List$sizeTag$bakTag"
+        IsDetected    = (-not $isCleanActive)
+        ActionData    = @{ Type = "StartMenuReset" }
+    })
+}
+
 function Invoke-StartMenuAudit {
     param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 
@@ -738,7 +772,61 @@ function Invoke-StartMenuAudit {
 }
 
 function Clear-StartMenu {
-    param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+    param(
+        [array]$SelectedItems = @(),
+        [ValidateSet('Apply', 'Revert')][string]$Operation = 'Apply',
+        [System.Windows.Forms.Control[]]$ControlsToDisable = @()
+    )
+
+    if ($Operation -eq 'Revert') {
+        Write-GUI " -> Restoring original Start Menu layout from backup (start2_backup.bin)..."
+        Update-Progress 15
+
+        Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+            $pkgDir = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "Microsoft.Windows.StartMenuExperienceHost_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -eq $pkgDir) {
+                if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] StartMenuExperienceHost package directory not found.") }
+                return
+            }
+
+            $startStatePath = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
+            $origBin        = Join-Path $startStatePath "start2.bin"
+            $bakBin         = "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
+
+            $UltixSync.Progress = 40
+            Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 350
+
+            if (Test-Path -LiteralPath $bakBin) {
+                Copy-Item -LiteralPath $bakBin -Destination $origBin -Force -ErrorAction SilentlyContinue
+                $UltixSync.Logs.Enqueue("    [OK] Restored original start2.bin from $bakBin.")
+            } else {
+                $UltixSync.Logs.Enqueue("    [*] No start2_backup.bin found in %LOCALAPPDATA%\WinUltix; reverting registry view flags only.")
+            }
+
+            Remove-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "HideRecommendedSection" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoRecentDocsHistory" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+
+            $defaultJsonPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell\LayoutModification.json"
+            if (Test-Path -LiteralPath $defaultJsonPath) {
+                Remove-Item -LiteralPath $defaultJsonPath -Force -ErrorAction SilentlyContinue
+            }
+
+            if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+                Start-Process "explorer.exe"
+            }
+            $UltixSync.Progress = 100
+        } -OnComplete ({
+            param($nullOut)
+            Update-Progress 0
+            Write-GUI " -> Start Menu layout and view settings restored.`n"
+        }.GetNewClosure())
+        return
+    }
 
     Write-GUI " -> Initializing deterministic Start Menu reset (3-Icon + Classic List + No Recent Files)..."
     Update-Progress 5
@@ -852,7 +940,16 @@ function Clear-StartMenu {
             Set-ItemProperty -LiteralPath $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -LiteralPath $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
 
-            # Stage 4: Stop shell processes and wipe start*.bin (with attribute reset & locked-handle evacuation)
+            # Stage 4: Backup original start2.bin once, then stop shell processes and wipe start*.bin
+            $origBin = Join-Path $startStatePath "start2.bin"
+            $bakDir  = "$env:LOCALAPPDATA\WinUltix"
+            $bakBin  = "$bakDir\start2_backup.bin"
+            if ((Test-Path -LiteralPath $origBin) -and -not (Test-Path -LiteralPath $bakBin)) {
+                if (-not (Test-Path -LiteralPath $bakDir)) { New-Item -Path $bakDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
+                Copy-Item -LiteralPath $origBin -Destination $bakBin -Force -ErrorAction SilentlyContinue
+            }
+
+            # Stage 5: Stop shell processes and wipe start*.bin (with attribute reset & locked-handle evacuation)
             if ($null -ne $UltixSync) {
                 $UltixSync.Progress = 60
                 $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
@@ -881,7 +978,7 @@ function Clear-StartMenu {
                 Start-Sleep -Milliseconds 800
             }
 
-            # Stage 5: Trigger native compilation via Core_Helpers [WinUltix.AppActivator] COM interop
+            # Stage 6: Trigger native compilation via Core_Helpers [WinUltix.AppActivator] COM interop
             if ($null -ne $UltixSync) {
                 $UltixSync.Progress = 75
                 $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
@@ -926,7 +1023,7 @@ function Clear-StartMenu {
                 $UltixSync.Logs.Enqueue("    [!] Error during Start Menu native compilation: $($_.Exception.Message)")
             }
         } finally {
-            # Stage 6: Deterministic MDM cleanup so pins remain unlocked
+            # Stage 7: Deterministic MDM cleanup so pins remain unlocked
             if ($null -ne $UltixSync) {
                 $UltixSync.Progress = 90
                 $UltixSync.Logs.Enqueue(" -> [6/7] Stripping temporary MDM PolicyManager locks...")
@@ -950,7 +1047,7 @@ function Clear-StartMenu {
             }
         }
 
-        # Stage 7: Default User provisioning
+        # Stage 8: Default User provisioning
         if ($null -ne $UltixSync) {
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [7/7] Provisioning Default User profile LayoutModification.json...")
@@ -1161,19 +1258,13 @@ function Initialize-Z3UI {
         -OnClick ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -RefreshShell }.GetNewClosure()) `
         -OnAudit ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -AuditOnly }.GetNewClosure())
 
-    # 2. Reset Start Menu Layout (3-Icon Clean)
+    # 2. Reset Start Menu Layout (3-Icon Clean + Backup Restore)
     $rowStartMenu = New-UltixActionRow -Parent $tabReg -Y 70 -MainRGB @(55, 58, 64) `
         -Text "Reset Start Menu Layout (Clean 3-Icon)" `
-        -Description "Wipes promotional Start Menu tiles (start2.bin) and compiles a clean 3-icon layout (Edge, Settings, Explorer) with zero MDM locks left behind." `
-        -AuditDescription "AUDIT: Scans the size of the current Start Menu layout database (start2.bin) and checks for residual MDM locks." `
+        -Description "Backs up your current start2.bin database, wipes promotional tiles, and compiles a clean 3-icon layout (Edge, Settings, Explorer) with full Revert support." `
+        -AuditDescription "AUDIT: Scans the size of the current Start Menu layout database (start2.bin), backup state, and checks for residual MDM locks." `
         -OnClick ({
-            $msgText = "This action will permanently wipe your Start Menu pins and layout database.`n`nStartMenuExperienceHost will be restarted in the background (System Tray remains intact).`n`nDo you want to proceed?"
-            $msgResult = [System.Windows.Forms.MessageBox]::Show($msgText, "WinUltix - Reset Start Menu", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
-                Clear-StartMenu -ControlsToDisable $allTabButtons.ToArray()
-            } else {
-                Write-GUI " -> Start Menu reset aborted by user.`n"
-            }
+            Invoke-UltixAuditFlow -ScannerFunction "Get-StartMenuState" -AuditLabel "Start Menu Layout" -ModalTitle "WinUltix - Clean Start Menu Compiler" -ModalDescription "Click 'Execute Selected' to compile a clean 3-icon Start Menu (backs up start2.bin), or 'Revert Selected' to restore your original start2_backup.bin." -ExecutorFunction "Clear-StartMenu" -ControlsToDisable $allTabButtons.ToArray() -EnableRevert
         }.GetNewClosure()) `
         -OnAudit ({ Invoke-StartMenuAudit -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 

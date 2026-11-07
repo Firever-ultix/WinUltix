@@ -1981,6 +1981,27 @@ function Set-ProtectedServiceStart {
     }
 }
 
+function Unlock-UltixTrustedInstaller {
+    $tiRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
+    $tiStart   = (Get-ItemProperty -LiteralPath $tiRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+    if ($tiStart -eq 4) {
+        Set-ProtectedServiceStart -ServiceName "TrustedInstaller" -StartValue 3
+    }
+}
+
+function Grant-UltixDirectoryAdminAccess {
+    param([Parameter(Mandatory=$true)][string]$TargetPath)
+    if ([string]::IsNullOrWhiteSpace($TargetPath)) { return }
+    try {
+        [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
+        [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
+        [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeBackupPrivilege")
+    } catch { }
+    # 100% locale-independent ownership & ACL grant via well-known Administrators SID (*S-1-5-32-544)
+    & icacls.exe "$TargetPath" /setowner "*S-1-5-32-544" /T /C /Q 2>$null | Out-Null
+    & icacls.exe "$TargetPath" /grant "*S-1-5-32-544:F" /T /C /Q 2>$null | Out-Null
+}
+
 function Get-UltixPowerAcIndex {
     param(
         [Parameter(Mandatory=$true)][string]$SettingGuid,
@@ -2114,6 +2135,7 @@ function Format-UltixDeviceName {
                 }
             }
             "hdaudbus.inf" { return "High Definition Audio Controller" }
+            "hdaudio.inf"  { return "High Definition Audio Device" }
             "stornvme.inf" { return "Standard NVM Express Controller" }
             "mshdc.inf" {
                 if ($infToken -match 'storahci|ahci') { return "Standard SATA AHCI Controller" }
@@ -2130,6 +2152,8 @@ function Format-UltixDeviceName {
             "msmouse.inf" {
                 if ($infToken -match 'hid\.mousedevice') { return "HID-compliant mouse" }
             }
+            "hidclass.inf" { return "HID-compliant device" }
+            "hidserv.inf"  { return "HID-compliant consumer control device" }
             "usbhub3.inf" {
                 if ($infToken -match 'usb30hub') { return "Generic SuperSpeed USB Hub" }
                 if ($infToken -match 'usb20hub') { return "Generic USB Hub" }
@@ -2548,8 +2572,12 @@ function Invoke-AsyncTask {
 
     # Re-entrancy guard: if already executing inside a background Runspace, run synchronously on current worker thread
     if ($null -ne $UltixSync) {
+        $prevProg  = $UltixSync.Progress
         $nestedOut = & $ScriptBlock @Arguments
         if ($null -ne $OnComplete) { & $OnComplete $nestedOut }
+        if ($UltixSync.Progress -eq 0 -and $prevProg -gt 0) {
+            $UltixSync.Progress = $prevProg
+        }
         return
     }
 
@@ -2710,7 +2738,17 @@ function Invoke-UltixAuditFlow {
 
         if ($isAuditOnly) {
             if ($detected.Count -gt 0) {
-                foreach ($d in $detected) { Write-GUI "  [!] ${AuditPrefix}: $($d.UIDisplayName)" }
+                foreach ($d in $detected) {
+                    $isOpt = (
+                        ($d.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$d.OptIn) -or
+                        ($null -ne $d.ActionData -and $d.ActionData -is [hashtable] -and $d.ActionData.OptIn -eq $true)
+                    )
+                    if ($isOpt) {
+                        Write-GUI "  [*] Optional (${AuditPrefix}): $($d.UIDisplayName)"
+                    } else {
+                        Write-GUI "  [!] ${AuditPrefix}: $($d.UIDisplayName)"
+                    }
+                }
                 Write-GUI "-> STATUS: $($detected.Count) item(s) flagged.`n"
             } else {
                 Write-GUI "  [OK] Optimized / Clean.`n"
@@ -2829,8 +2867,16 @@ function Show-ActionModal {
     if ($hasValidItems) {
         $chkList.BeginUpdate()
         foreach ($item in $AuditResults) {
-            if ($item.IsDetected) { 
-                [void]$chkList.Items.Add("[ DETECTED ]  " + $item.UIDisplayName, $true) 
+            $isOptIn = (
+                ($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
+                ($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
+            )
+            if ($item.IsDetected) {
+                if ($isOptIn) {
+                    [void]$chkList.Items.Add("[ OPTIONAL ]  " + $item.UIDisplayName, $false)
+                } else {
+                    [void]$chkList.Items.Add("[ DETECTED ]  " + $item.UIDisplayName, $true)
+                }
             } else { 
                 [void]$chkList.Items.Add("[ OPTIMIZED ] " + $item.UIDisplayName, $false) 
             }
@@ -2872,7 +2918,12 @@ function Show-ActionModal {
     $btnSelDet.Add_Click({
         $chkList.BeginUpdate()
         for ($i = 0; $i -lt $AuditResults.Count; $i++) {
-            $chkList.SetItemChecked($i, [bool]$AuditResults[$i].IsDetected)
+            $item = $AuditResults[$i]
+            $isOptIn = (
+                ($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
+                ($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
+            )
+            $chkList.SetItemChecked($i, ([bool]$item.IsDetected -and -not $isOptIn))
         }
         $chkList.EndUpdate()
         & $updateCounter 0
@@ -2930,6 +2981,10 @@ function Show-ActionModal {
             $selectedItems = [System.Collections.Generic.List[object]]::new()
             foreach ($idx in $chkList.CheckedIndices) {
                 $selectedItems.Add($AuditResults[$idx])
+            }
+            # Convenience for single-item modals (e.g. Clean Start Menu Compiler): auto-select the sole item if clicked directly
+            if ($selectedItems.Count -eq 0 -and $AuditResults.Count -eq 1) {
+                $selectedItems.Add($AuditResults[0])
             }
             $actionData = if ($result -eq "OK") { "Apply" } else { "Revert" }
             return [PSCustomObject]@{ Action = $actionData; Items = @($selectedItems) }
