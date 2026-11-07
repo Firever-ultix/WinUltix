@@ -207,19 +207,61 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             }
         }
 
-        // Token Privilege Escalation for TrustedInstaller-Protected Keys
+        // Token Privilege Escalation & Live SCM Service Configurator for TrustedInstaller/SYSTEM-Protected Services
         public static class PrivilegeEnabler {
+            private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+            private const uint TOKEN_DUPLICATE = 0x0002;
+            private const uint TOKEN_IMPERSONATE = 0x0004;
+            private const uint TOKEN_QUERY = 0x0008;
+            private const uint TOKEN_ALL_ACCESS = 0x000F01FF;
+            private const uint SC_MANAGER_CONNECT = 0x0001;
+            private const uint SERVICE_CHANGE_CONFIG = 0x0002;
+            private const uint SERVICE_START = 0x0010;
+            private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF;
+
             [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
             private static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
 
             [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-            private static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);
+            private static extern bool OpenProcessToken(IntPtr h, uint acc, ref IntPtr phtok);
 
             [DllImport("advapi32.dll", SetLastError = true)]
             private static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
 
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool DuplicateTokenEx(
+                IntPtr hExistingToken, uint dwDesiredAccess, IntPtr lpTokenAttributes,
+                int ImpersonationLevel, int TokenType, out IntPtr phNewToken);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool RevertToSelf();
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint dwAccess);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr OpenServiceW(IntPtr hSCManager, string lpServiceName, uint dwDesiredAccess);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool ChangeServiceConfigW(
+                IntPtr hService, uint dwServiceType, uint dwStartType, uint dwErrorControl,
+                string lpBinaryPathName, string lpLoadOrderGroup, IntPtr lpdwTagId,
+                string lpDependencies, string lpServiceStartName, string lpPassword, string lpDisplayName);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool StartServiceW(IntPtr hService, uint dwNumServiceArgs, IntPtr lpServiceArgVectors);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool CloseServiceHandle(IntPtr hSCObject);
+
             [DllImport("kernel32.dll", ExactSpelling = true)]
             private static extern IntPtr GetCurrentProcess();
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool CloseHandle(IntPtr hObject);
@@ -233,7 +275,7 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
 
             public static void EnablePrivilege(string privilege) {
                 IntPtr htok = IntPtr.Zero;
-                if (!OpenProcessToken(GetCurrentProcess(), 0x00000028, ref htok)) return;
+                if (!OpenProcessToken(GetCurrentProcess(), 0x00000028U, ref htok)) return;
                 try {
                     TokPriv1Luid tp = new TokPriv1Luid { Count = 1, Luid = 0, Attr = 0x00000002 };
                     if (LookupPrivilegeValue(null, privilege, ref tp.Luid)) {
@@ -241,6 +283,126 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     }
                 } finally {
                     if (htok != IntPtr.Zero) CloseHandle(htok);
+                }
+            }
+
+            private static bool ImpersonateSystem() {
+                EnablePrivilege("SeDebugPrivilege");
+                foreach (string procName in new string[] { "winlogon", "services" }) {
+                    System.Diagnostics.Process[] procs = System.Diagnostics.Process.GetProcessesByName(procName);
+                    foreach (System.Diagnostics.Process p in procs) {
+                        IntPtr hProc = IntPtr.Zero;
+                        IntPtr hTok  = IntPtr.Zero;
+                        IntPtr hDup  = IntPtr.Zero;
+                        try {
+                            hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, p.Id);
+                            if (hProc == IntPtr.Zero) continue;
+                            if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY, ref hTok)) continue;
+                            if (!DuplicateTokenEx(hTok, TOKEN_ALL_ACCESS, IntPtr.Zero, 2, 2, out hDup)) continue;
+                            if (ImpersonateLoggedOnUser(hDup)) return true;
+                        } catch {
+                        } finally {
+                            if (hDup  != IntPtr.Zero) CloseHandle(hDup);
+                            if (hTok  != IntPtr.Zero) CloseHandle(hTok);
+                            if (hProc != IntPtr.Zero) CloseHandle(hProc);
+                            p.Dispose();
+                        }
+                    }
+                }
+                return false;
+            }
+
+            private const uint SERVICE_STOP = 0x0020;
+            private const uint SERVICE_CONTROL_STOP = 0x00000001;
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct SERVICE_STATUS {
+                public uint dwServiceType;
+                public uint dwCurrentState;
+                public uint dwControlsAccepted;
+                public uint dwWin32ExitCode;
+                public uint dwServiceSpecificExitCode;
+                public uint dwCheckPoint;
+                public uint dwWaitHint;
+            }
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool ControlService(IntPtr hService, uint dwControl, out SERVICE_STATUS lpServiceStatus);
+
+            public static bool SetServiceConfigLive(string serviceName, int startType, bool startNow) {
+                if (string.IsNullOrWhiteSpace(serviceName)) return false;
+                bool changeConfig = (startType >= 0 && startType <= 4);
+                uint access = (changeConfig ? SERVICE_CHANGE_CONFIG : 0U) | (startNow ? SERVICE_START : 0U);
+                if (access == 0U) return false;
+
+                bool impersonated = false;
+                IntPtr hScm = IntPtr.Zero;
+                IntPtr hSvc = IntPtr.Zero;
+
+                try {
+                    hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                    if (hScm != IntPtr.Zero) {
+                        hSvc = OpenServiceW(hScm, serviceName, access);
+                    }
+
+                    if (hSvc == IntPtr.Zero) {
+                        if (hScm != IntPtr.Zero) { CloseServiceHandle(hScm); hScm = IntPtr.Zero; }
+                        impersonated = ImpersonateSystem();
+                        if (!impersonated) return false;
+
+                        hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                        if (hScm == IntPtr.Zero) return false;
+                        hSvc = OpenServiceW(hScm, serviceName, access);
+                        if (hSvc == IntPtr.Zero) return false;
+                    }
+
+                    bool ok = true;
+                    if (changeConfig) {
+                        ok = ChangeServiceConfigW(
+                            hSvc, SERVICE_NO_CHANGE, (uint)startType, SERVICE_NO_CHANGE,
+                            null, null, IntPtr.Zero, null, null, null, null);
+                    }
+
+                    if (startNow && startType != 4) {
+                        StartServiceW(hSvc, 0, IntPtr.Zero);
+                    }
+                    return ok;
+                } finally {
+                    if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
+                    if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
+                    if (impersonated) RevertToSelf();
+                }
+            }
+
+            public static bool StopServiceLive(string serviceName) {
+                if (string.IsNullOrWhiteSpace(serviceName)) return false;
+                bool impersonated = false;
+                IntPtr hScm = IntPtr.Zero;
+                IntPtr hSvc = IntPtr.Zero;
+
+                try {
+                    hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                    if (hScm != IntPtr.Zero) {
+                        hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+                    }
+
+                    if (hSvc == IntPtr.Zero) {
+                        if (hScm != IntPtr.Zero) { CloseServiceHandle(hScm); hScm = IntPtr.Zero; }
+                        impersonated = ImpersonateSystem();
+                        if (!impersonated) return false;
+
+                        hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                        if (hScm == IntPtr.Zero) return false;
+                        hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+                        if (hSvc == IntPtr.Zero) return false;
+                    }
+
+                    SERVICE_STATUS status;
+                    return ControlService(hSvc, SERVICE_CONTROL_STOP, out status);
+                } finally {
+                    if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
+                    if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
+                    if (impersonated) RevertToSelf();
                 }
             }
         }
@@ -1764,7 +1926,8 @@ function Get-UltixFastSize {
 function Set-ProtectedServiceStart {
     param(
         [Parameter(Mandatory=$true)][string]$ServiceName,
-        [Parameter(Mandatory=$true)][int]$StartValue
+        [Parameter(Mandatory=$true)][int]$StartValue,
+        [switch]$StartService
     )
     $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
     if (-not (Test-Path -LiteralPath $regPath)) { return }
@@ -1808,6 +1971,13 @@ function Set-ProtectedServiceStart {
         }
 
         Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+    }
+
+    # Synchronize live in-memory SCM database (services.exe) via ChangeServiceConfigW & optionally start immediately
+    if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
+        [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
+    } elseif ($StartService.IsPresent -and $StartValue -ne 4) {
+        Start-Service -Name $ServiceName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     }
 }
 

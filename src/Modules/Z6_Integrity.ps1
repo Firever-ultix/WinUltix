@@ -500,19 +500,18 @@ function Repair-WindowsUpdateSubsystem {
         } catch {
             $UltixSync.Logs.Enqueue(" [!] Error during Windows Update subsystem repair: $($_.Exception.Message)")
         } finally {
-            # Stage 5: Deterministic restoration of core services (auto-unlocks Start=4 if blocked by 3rd-party tools)
+            # Stage 5: Deterministic restoration of core services (auto-unlocks Start=4 in live SCM if blocked)
             $UltixSync.Progress = 95
-            $svcDefaults = @{ "cryptSvc" = 2; "bits" = 3; "wuauserv" = 3 }
-            foreach ($svc in @("cryptSvc", "bits", "wuauserv")) {
+            $svcDefaults = @{ "cryptSvc" = 2; "bits" = 3; "wuauserv" = 3; "dosvc" = 2; "msiserver" = 3 }
+            foreach ($svc in @("cryptSvc", "bits", "wuauserv", "dosvc", "msiserver")) {
                 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
                 $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-                if ($curSt -eq 4) {
-                    Set-ProtectedServiceStart -ServiceName $svc -StartValue $svcDefaults[$svc]
-                }
-                Start-Service -Name $svc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                $targetSt = if ($curSt -eq 4) { $svcDefaults[$svc] } else { [int]$curSt }
+                $startNow = ($svc -in @("cryptSvc", "bits", "wuauserv", "dosvc"))
+                Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService:$startNow
             }
             $UltixSync.Progress = 100
-            $UltixSync.Logs.Enqueue(" -> [5/5] [OK] Windows Update & Cryptographic services restored and online.")
+            $UltixSync.Logs.Enqueue(" -> [5/5] [OK] Windows Update, Delivery Optimization & Cryptographic services restored and online.")
         }
     } -OnComplete {
         param($nullOut)
@@ -722,15 +721,13 @@ function Repair-UwpGamingRuntime {
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         try {
             $UltixSync.Progress = 20
-            $UltixSync.Logs.Enqueue(" -> [1/4] Verifying core UWP licensing & Xbox Gaming Services (AppXSvc, ClipSVC, GamingServices)...")
-            foreach ($svc in @("AppXSvc", "ClipSVC", "StateRepository", "LicenseManager", "GamingServices", "GamingServicesNet")) {
+            $UltixSync.Logs.Enqueue(" -> [1/4] Verifying core UWP licensing, Delivery Optimization & Xbox Gaming Services...")
+            foreach ($svc in @("AppXSvc", "ClipSVC", "StateRepository", "LicenseManager", "InstallService", "dosvc", "wuauserv", "GamingServices", "GamingServicesNet")) {
                 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
                 if (Test-Path -LiteralPath $sPath) {
                     $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-                    if ($curSt -eq 4) {
-                        Set-ProtectedServiceStart -ServiceName $svc -StartValue 3
-                    }
-                    Start-Service -Name $svc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                    $targetSt = if ($curSt -eq 4) { 3 } else { [int]$curSt }
+                    Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService
                 }
             }
 

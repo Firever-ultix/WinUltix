@@ -181,14 +181,46 @@ SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "Environment",
 }
 }
 public static class PrivilegeEnabler {
+private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+private const uint TOKEN_DUPLICATE = 0x0002;
+private const uint TOKEN_IMPERSONATE = 0x0004;
+private const uint TOKEN_QUERY = 0x0008;
+private const uint TOKEN_ALL_ACCESS = 0x000F01FF;
+private const uint SC_MANAGER_CONNECT = 0x0001;
+private const uint SERVICE_CHANGE_CONFIG = 0x0002;
+private const uint SERVICE_START = 0x0010;
+private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF;
 [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
 private static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
 [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-private static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);
+private static extern bool OpenProcessToken(IntPtr h, uint acc, ref IntPtr phtok);
 [DllImport("advapi32.dll", SetLastError = true)]
 private static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool DuplicateTokenEx(
+IntPtr hExistingToken, uint dwDesiredAccess, IntPtr lpTokenAttributes,
+int ImpersonationLevel, int TokenType, out IntPtr phNewToken);
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool RevertToSelf();
+[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint dwAccess);
+[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+private static extern IntPtr OpenServiceW(IntPtr hSCManager, string lpServiceName, uint dwDesiredAccess);
+[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+private static extern bool ChangeServiceConfigW(
+IntPtr hService, uint dwServiceType, uint dwStartType, uint dwErrorControl,
+string lpBinaryPathName, string lpLoadOrderGroup, IntPtr lpdwTagId,
+string lpDependencies, string lpServiceStartName, string lpPassword, string lpDisplayName);
+[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+private static extern bool StartServiceW(IntPtr hService, uint dwNumServiceArgs, IntPtr lpServiceArgVectors);
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool CloseServiceHandle(IntPtr hSCObject);
 [DllImport("kernel32.dll", ExactSpelling = true)]
 private static extern IntPtr GetCurrentProcess();
+[DllImport("kernel32.dll", SetLastError = true)]
+private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 [DllImport("kernel32.dll", SetLastError = true)]
 private static extern bool CloseHandle(IntPtr hObject);
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -199,7 +231,7 @@ public int Attr;
 }
 public static void EnablePrivilege(string privilege) {
 IntPtr htok = IntPtr.Zero;
-if (!OpenProcessToken(GetCurrentProcess(), 0x00000028, ref htok)) return;
+if (!OpenProcessToken(GetCurrentProcess(), 0x00000028U, ref htok)) return;
 try {
 TokPriv1Luid tp = new TokPriv1Luid { Count = 1, Luid = 0, Attr = 0x00000002 };
 if (LookupPrivilegeValue(null, privilege, ref tp.Luid)) {
@@ -207,6 +239,110 @@ AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
 }
 } finally {
 if (htok != IntPtr.Zero) CloseHandle(htok);
+}
+}
+private static bool ImpersonateSystem() {
+EnablePrivilege("SeDebugPrivilege");
+foreach (string procName in new string[] { "winlogon", "services" }) {
+System.Diagnostics.Process[] procs = System.Diagnostics.Process.GetProcessesByName(procName);
+foreach (System.Diagnostics.Process p in procs) {
+IntPtr hProc = IntPtr.Zero;
+IntPtr hTok  = IntPtr.Zero;
+IntPtr hDup  = IntPtr.Zero;
+try {
+hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, p.Id);
+if (hProc == IntPtr.Zero) continue;
+if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY, ref hTok)) continue;
+if (!DuplicateTokenEx(hTok, TOKEN_ALL_ACCESS, IntPtr.Zero, 2, 2, out hDup)) continue;
+if (ImpersonateLoggedOnUser(hDup)) return true;
+} catch {
+} finally {
+if (hDup  != IntPtr.Zero) CloseHandle(hDup);
+if (hTok  != IntPtr.Zero) CloseHandle(hTok);
+if (hProc != IntPtr.Zero) CloseHandle(hProc);
+p.Dispose();
+}
+}
+}
+return false;
+}
+private const uint SERVICE_STOP = 0x0020;
+private const uint SERVICE_CONTROL_STOP = 0x00000001;
+[StructLayout(LayoutKind.Sequential)]
+private struct SERVICE_STATUS {
+public uint dwServiceType;
+public uint dwCurrentState;
+public uint dwControlsAccepted;
+public uint dwWin32ExitCode;
+public uint dwServiceSpecificExitCode;
+public uint dwCheckPoint;
+public uint dwWaitHint;
+}
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool ControlService(IntPtr hService, uint dwControl, out SERVICE_STATUS lpServiceStatus);
+public static bool SetServiceConfigLive(string serviceName, int startType, bool startNow) {
+if (string.IsNullOrWhiteSpace(serviceName)) return false;
+bool changeConfig = (startType >= 0 && startType <= 4);
+uint access = (changeConfig ? SERVICE_CHANGE_CONFIG : 0U) | (startNow ? SERVICE_START : 0U);
+if (access == 0U) return false;
+bool impersonated = false;
+IntPtr hScm = IntPtr.Zero;
+IntPtr hSvc = IntPtr.Zero;
+try {
+hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+if (hScm != IntPtr.Zero) {
+hSvc = OpenServiceW(hScm, serviceName, access);
+}
+if (hSvc == IntPtr.Zero) {
+if (hScm != IntPtr.Zero) { CloseServiceHandle(hScm); hScm = IntPtr.Zero; }
+impersonated = ImpersonateSystem();
+if (!impersonated) return false;
+hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+if (hScm == IntPtr.Zero) return false;
+hSvc = OpenServiceW(hScm, serviceName, access);
+if (hSvc == IntPtr.Zero) return false;
+}
+bool ok = true;
+if (changeConfig) {
+ok = ChangeServiceConfigW(
+hSvc, SERVICE_NO_CHANGE, (uint)startType, SERVICE_NO_CHANGE,
+null, null, IntPtr.Zero, null, null, null, null);
+}
+if (startNow && startType != 4) {
+StartServiceW(hSvc, 0, IntPtr.Zero);
+}
+return ok;
+} finally {
+if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
+if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
+if (impersonated) RevertToSelf();
+}
+}
+public static bool StopServiceLive(string serviceName) {
+if (string.IsNullOrWhiteSpace(serviceName)) return false;
+bool impersonated = false;
+IntPtr hScm = IntPtr.Zero;
+IntPtr hSvc = IntPtr.Zero;
+try {
+hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+if (hScm != IntPtr.Zero) {
+hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+}
+if (hSvc == IntPtr.Zero) {
+if (hScm != IntPtr.Zero) { CloseServiceHandle(hScm); hScm = IntPtr.Zero; }
+impersonated = ImpersonateSystem();
+if (!impersonated) return false;
+hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+if (hScm == IntPtr.Zero) return false;
+hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+if (hSvc == IntPtr.Zero) return false;
+}
+SERVICE_STATUS status;
+return ControlService(hSvc, SERVICE_CONTROL_STOP, out status);
+} finally {
+if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
+if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
+if (impersonated) RevertToSelf();
 }
 }
 }
@@ -1481,7 +1617,8 @@ return $totalBytes
 function Set-ProtectedServiceStart {
 param(
 [Parameter(Mandatory=$true)][string]$ServiceName,
-[Parameter(Mandatory=$true)][int]$StartValue
+[Parameter(Mandatory=$true)][int]$StartValue,
+[switch]$StartService
 )
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 if (-not (Test-Path -LiteralPath $regPath)) { return }
@@ -1520,6 +1657,11 @@ $keyAcl.Dispose()
 }
 }
 Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+}
+if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
+[void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
+} elseif ($StartService.IsPresent -and $StartValue -ne 4) {
+Start-Service -Name $ServiceName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
 }
 }
 function Get-UltixPowerAcIndex {
@@ -6759,7 +6901,7 @@ $rules = @(
 @{ UIDisplayName = "Diagnostics: Diagnostic System Host (WdiSystemHost)"; Name = "WdiSystemHost"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Diagnostics: Performance Logs & Alerts (pla)"; Name = "pla"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Updates: Delivery Optimization P2P (DoSvc)"; Name = "DoSvc"; ExpectedStart = 4; DefaultStart = 2 }
+@{ UIDisplayName = "Updates: Delivery Optimization P2P (DoSvc)"; Name = "DoSvc"; ExpectedStart = 3; DefaultStart = 2 }
 @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2 }
 @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Performance: SysMain / Superfetch - Disables RAM caching (SysMain)"; Name = "SysMain"; ExpectedStart = 4; DefaultStart = 2 }
@@ -6896,7 +7038,8 @@ if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Missing 'DefaultSta
 continue
 }
 try {
-Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue
+$shouldAutoStart = ($Op -eq 'Revert' -and $targetValue -eq 2)
+Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue -StartService:$shouldAutoStart
 $svcType = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
 $isPerUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
 if ($isPerUserTemplate) {
@@ -6921,11 +7064,7 @@ Update-Progress 0
 Write-GUI " -> $ProfileName services enforcement completed ($Operation).`n"
 }.GetNewClosure())
 }
-function Show-ServicesGrid {
-param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
-Write-GUI " -> Generating complete system services table (Background Thread)..."
-Update-Progress 20
-Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
+function Get-SystemServicesTable_Worker {
 $criticalServices = "^(?i)(RpcSs|DcomLaunch|RpcEptMapper|LSM|SamSs|PlugPlay|EventLog|BFE|mpssvc|nsi|ProfSvc|gpsvc|CryptSvc|TrustedInstaller|WinDefend|WdNisSvc|MpDefenderCoreService|SecurityHealthService|wscsvc|Dhcp|Dnscache|Winmgmt|Schedule|UserManager|CoreMessagingRegistrar|SystemEventsBroker|Power|BrokerInfrastructure|Appinfo|StateRepository|TextInputManagementService|TimeBrokerSvc|ClipSVC|AppIDSvc|KeyIso|VaultSvc|Netlogon|LanmanWorkstation|LanmanServer|Wcmsvc|NlaSvc|AudioSrv|AudioEndpointBuilder|MMCSS|FontCache|StorSvc|vds|volmgr|partmgr|mountmgr|stornvme|storahci|Ntfs|FltMgr|Tcpip|AFD)$"
 $svcRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
 $rawServices = @(Get-Service -ErrorAction SilentlyContinue)
@@ -6971,6 +7110,7 @@ Name        = $sName
 DisplayName = $s.DisplayName
 Status      = [string]$s.Status
 StartType   = $startDisp
+RawStart    = if ($null -ne $startCode) { [int]$startCode } else { 3 }
 IsLocked    = $isCrit
 })
 }
@@ -6978,65 +7118,442 @@ IsLocked    = $isCrit
 if ($null -ne $svcRoot) { $svcRoot.Dispose() }
 }
 return @($svcs | Sort-Object Status, Name)
-} -OnComplete ({
+}
+function Show-ServicesGrid {
+param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
+Write-GUI " -> Generating complete system services table (Background Thread)..."
+Update-Progress 20
+$sb = (Get-Command -Name Get-SystemServicesTable_Worker).ScriptBlock
+Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock $sb -OnComplete ({
 param($output)
 Update-Progress 0
-[array]$svcs = @($output | Where-Object { $null -ne $_ })
-$cols = @(
-@{ Header = "Service Name"; Property = "Name";        Width = 200 }
-@{ Header = "Status";       Property = "Status";      Width = 95  }
-@{ Header = "Start Type";   Property = "StartType";   Width = 175 }
-@{ Header = "Display Name"; Property = "DisplayName"; Width = 375 }
+[array]$initialSvcs = @($output | Where-Object { $null -ne $_ })
+$modal = New-Object System.Windows.Forms.Form
+$modal.Text = "WinUltix - System Services Manager"
+$modal.Size = New-Object System.Drawing.Size(980, 700)
+$modal.MinimumSize = New-Object System.Drawing.Size(960, 580)
+$modal.StartPosition = "CenterParent"
+$modal.FormBorderStyle = "Sizable"
+$modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
+$modal.ForeColor = [System.Drawing.Color]::White
+$modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
+$lblDesc = New-Object System.Windows.Forms.Label
+$lblDesc.Text = "Full live control over Windows Services. 'Start' automatically unlocks Disabled (Start=4) services to Manual before starting. Critical OS services (Red) are locked."
+$lblDesc.Location = New-Object System.Drawing.Point(15, 12)
+$lblDesc.Size = New-Object System.Drawing.Size(935, 32)
+$lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9.8)
+$lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 215, 220, 228)
+$lblDesc.Anchor = 'Top, Left, Right'
+$lblSearch = New-Object System.Windows.Forms.Label
+$lblSearch.Text = "Filter:"
+$lblSearch.Location = New-Object System.Drawing.Point(15, 52)
+$lblSearch.Size = New-Object System.Drawing.Size(48, 22)
+$lblSearch.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblSearch.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$txtSearch = New-Object System.Windows.Forms.TextBox
+$txtSearch.Location = New-Object System.Drawing.Point(65, 50)
+$txtSearch.Size = New-Object System.Drawing.Size(270, 25)
+$txtSearch.BackColor = [System.Drawing.Color]::FromArgb(255, 38, 40, 45)
+$txtSearch.ForeColor = [System.Drawing.Color]::White
+$txtSearch.BorderStyle = "FixedSingle"
+$txtSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnSelVis = New-Object System.Windows.Forms.Button
+$btnSelVis.Text = "Select Visible"
+$btnSelVis.Location = New-Object System.Drawing.Point(345, 49)
+$btnSelVis.Size = New-Object System.Drawing.Size(110, 26)
+$btnSelVis.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+$btnSelVis.FlatStyle = "Flat"
+$btnSelVis.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$btnSelNone = New-Object System.Windows.Forms.Button
+$btnSelNone.Text = "Deselect All"
+$btnSelNone.Location = New-Object System.Drawing.Point(462, 49)
+$btnSelNone.Size = New-Object System.Drawing.Size(110, 26)
+$btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+$btnSelNone.FlatStyle = "Flat"
+$btnSelNone.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$btnRefresh = New-Object System.Windows.Forms.Button
+$btnRefresh.Text = "Refresh Table"
+$btnRefresh.Location = New-Object System.Drawing.Point(579, 49)
+$btnRefresh.Size = New-Object System.Drawing.Size(110, 26)
+$btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+$btnRefresh.FlatStyle = "Flat"
+$btnRefresh.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$lblCount = New-Object System.Windows.Forms.Label
+$lblCount.Location = New-Object System.Drawing.Point(695, 52)
+$lblCount.Size = New-Object System.Drawing.Size(255, 20)
+$lblCount.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblCount.ForeColor = [System.Drawing.Color]::LightGray
+$lblCount.TextAlign = "MiddleRight"
+$lblCount.Anchor = 'Top, Right'
+$listView = New-Object System.Windows.Forms.ListView
+$listView.Location = New-Object System.Drawing.Point(15, 84)
+$listView.Size = New-Object System.Drawing.Size(935, 504)
+$listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+$listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
+$listView.BorderStyle = "FixedSingle"
+$listView.Font = New-Object System.Drawing.Font("Segoe UI", 10.5)
+$listView.View = [System.Windows.Forms.View]::Details
+$listView.CheckBoxes = $true
+$listView.FullRowSelect = $true
+$listView.GridLines = $false
+$listView.Anchor = 'Top, Bottom, Left, Right'
+Enable-UltixDoubleBuffer -Control $listView
+$sorter = New-Object WinUltix.ListViewColumnSorter
+$listView.ListViewItemSorter = $sorter
+[void]$listView.Columns.Add("Service Name", 200)
+[void]$listView.Columns.Add("Status", 95)
+[void]$listView.Columns.Add("Start Type", 185)
+[void]$listView.Columns.Add("Display Name", 425)
+$bgEven    = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+$bgOdd     = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
+$bgLocked  = [System.Drawing.Color]::FromArgb(255, 54, 26, 28)
+$fgRunning = [System.Drawing.Color]::FromArgb(255, 155, 235, 175)
+$fgLocked  = [System.Drawing.Color]::FromArgb(255, 255, 155, 155)
+$fgStopped = [System.Drawing.Color]::FromArgb(255, 170, 188, 208)
+$fgMuted   = [System.Drawing.Color]::FromArgb(255, 125, 134, 145)
+$state = @{
+AllServices    = $initialSvcs
+ServiceMap     = @{}
+CheckedNames   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+SuppressEvents = $false
+}
+$rebuildMap = {
+$state.ServiceMap.Clear()
+foreach ($s in $state.AllServices) {
+$state.ServiceMap[$s.Name] = $s
+}
+}
+& $rebuildMap
+$updateCounter = {
+$lblCount.Text = "Selected: $($state.CheckedNames.Count) / $($state.AllServices.Count) (Shown: $($listView.Items.Count))"
+}
+$styleRow = {
+param([System.Windows.Forms.ListViewItem]$It, [int]$RowIdx)
+$obj = $state.ServiceMap[[string]$It.Tag]
+if ($null -eq $obj) { return }
+if ($obj.IsLocked) {
+$It.BackColor = $bgLocked
+$It.ForeColor = $fgLocked
+} else {
+$It.BackColor = if (($RowIdx % 2) -eq 0) { $bgEven } else { $bgOdd }
+if ($obj.StartType -match "^Disabled") {
+$It.ForeColor = $fgMuted
+} elseif ($obj.Status -eq "Running") {
+$It.ForeColor = $fgRunning
+} else {
+$It.ForeColor = $fgStopped
+}
+}
+}
+$applyRowShading = {
+for ($r = 0; $r -lt $listView.Items.Count; $r++) {
+& $styleRow $listView.Items[$r] $r
+}
+}
+$populateList = {
+param([string]$FilterText = "")
+$state.SuppressEvents = $true
+$listView.BeginUpdate()
+$listView.ListViewItemSorter = $null
+$listView.Items.Clear()
+$cleanFilter = $FilterText.Trim()
+$visIdx = 0
+foreach ($obj in $state.AllServices) {
+if ($cleanFilter.Length -gt 0) {
+$matched = (
+$obj.Name.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+$obj.DisplayName.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+$obj.Status.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+$obj.StartType.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 )
-$res = Show-UltixGridModal -Title "WinUltix - System Services Manager" `
--Description "Select services to HARD DISABLE or restore to Manual. Critical OS/RPC/Defender services (Red) are visible for inspection but locked against modification." `
--Data $svcs -Columns $cols -PrimaryButtonText "Stop & Disable Selected" `
--SecondaryButtonText "Restore to Manual (Demand)"
-if ($null -eq $res -or $res.Items.Count -eq 0) {
-Write-GUI " -> Service modification cancelled.`n"
+if (-not $matched) { continue }
+}
+$lvItem = New-Object System.Windows.Forms.ListViewItem([string]$obj.Name)
+[void]$lvItem.SubItems.Add([string]$obj.Status)
+[void]$lvItem.SubItems.Add([string]$obj.StartType)
+[void]$lvItem.SubItems.Add([string]$obj.DisplayName)
+$lvItem.Tag = $obj.Name
+$lvItem.Checked = (-not $obj.IsLocked) -and $state.CheckedNames.Contains($obj.Name)
+& $styleRow $lvItem $visIdx
+[void]$listView.Items.Add($lvItem)
+$visIdx++
+}
+$listView.ListViewItemSorter = $sorter
+if ($sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
+$listView.Sort()
+& $applyRowShading
+}
+$listView.EndUpdate()
+$state.SuppressEvents = $false
+& $updateCounter
+}
+$listView.Add_ItemCheck({
+param($src, $e)
+if ($state.SuppressEvents) { return }
+$lvItem = $src.Items[$e.Index]
+if ($null -ne $lvItem -and $null -ne $lvItem.Tag) {
+$obj = $state.ServiceMap[[string]$lvItem.Tag]
+if ($null -ne $obj -and $obj.IsLocked) {
+$e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
+}
+}
+}.GetNewClosure())
+$listView.Add_ItemChecked({
+param($src, $e)
+if ($state.SuppressEvents) { return }
+$sName = [string]$e.Item.Tag
+$obj   = $state.ServiceMap[$sName]
+if ($null -ne $obj -and $obj.IsLocked) {
+if ($e.Item.Checked) {
+$state.SuppressEvents = $true
+$e.Item.Checked = $false
+$state.SuppressEvents = $false
+}
+[void]$state.CheckedNames.Remove($sName)
 return
 }
-Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($res.Items, $res.Action) -ScriptBlock {
-param([array]$Selected, [string]$Action)
-$total = $Selected.Count
+if ($e.Item.Checked) {
+[void]$state.CheckedNames.Add($sName)
+} else {
+[void]$state.CheckedNames.Remove($sName)
+}
+& $updateCounter
+}.GetNewClosure())
+$listView.Add_ColumnClick({
+param($src, $e)
+$listView.BeginUpdate()
+if ($e.Column -eq $sorter.ColumnToSort) {
+if ($sorter.OrderOfSort -eq [System.Windows.Forms.SortOrder]::Ascending) {
+$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending
+} else {
+$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+}
+} else {
+$sorter.ColumnToSort = $e.Column
+$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+}
+$listView.Sort()
+& $applyRowShading
+$listView.EndUpdate()
+}.GetNewClosure())
+$txtSearch.Add_TextChanged({ & $populateList $txtSearch.Text }.GetNewClosure())
+$btnSelVis.Add_Click({
+$state.SuppressEvents = $true
+$listView.BeginUpdate()
+foreach ($lvItem in $listView.Items) {
+$sName = [string]$lvItem.Tag
+$obj   = $state.ServiceMap[$sName]
+if ($null -ne $obj -and $obj.IsLocked) {
+$lvItem.Checked = $false
+continue
+}
+$lvItem.Checked = $true
+[void]$state.CheckedNames.Add($sName)
+}
+$listView.EndUpdate()
+$state.SuppressEvents = $false
+& $updateCounter
+}.GetNewClosure())
+$btnSelNone.Add_Click({
+$state.SuppressEvents = $true
+$state.CheckedNames.Clear()
+$listView.BeginUpdate()
+foreach ($lvItem in $listView.Items) { $lvItem.Checked = $false }
+$listView.EndUpdate()
+$state.SuppressEvents = $false
+& $updateCounter
+}.GetNewClosure())
+$btnStart = New-Object System.Windows.Forms.Button
+$btnStart.Text = "Start"
+$btnStart.Location = New-Object System.Drawing.Point(15, 602)
+$btnStart.Size = New-Object System.Drawing.Size(140, 38)
+$btnStart.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 95, 60)
+$btnStart.ForeColor = [System.Drawing.Color]::White
+$btnStart.FlatStyle = "Flat"
+$btnStart.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$btnStart.Anchor = 'Bottom, Left'
+$btnStop = New-Object System.Windows.Forms.Button
+$btnStop.Text = "Stop"
+$btnStop.Location = New-Object System.Drawing.Point(163, 602)
+$btnStop.Size = New-Object System.Drawing.Size(140, 38)
+$btnStop.BackColor = [System.Drawing.Color]::FromArgb(255, 140, 85, 40)
+$btnStop.ForeColor = [System.Drawing.Color]::White
+$btnStop.FlatStyle = "Flat"
+$btnStop.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$btnStop.Anchor = 'Bottom, Left'
+$btnSetAuto = New-Object System.Windows.Forms.Button
+$btnSetAuto.Text = "Set Automatic"
+$btnSetAuto.Location = New-Object System.Drawing.Point(311, 602)
+$btnSetAuto.Size = New-Object System.Drawing.Size(155, 38)
+$btnSetAuto.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+$btnSetAuto.ForeColor = [System.Drawing.Color]::White
+$btnSetAuto.FlatStyle = "Flat"
+$btnSetAuto.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+$btnSetAuto.Anchor = 'Bottom, Left'
+$btnSetManual = New-Object System.Windows.Forms.Button
+$btnSetManual.Text = "Set Manual"
+$btnSetManual.Location = New-Object System.Drawing.Point(474, 602)
+$btnSetManual.Size = New-Object System.Drawing.Size(155, 38)
+$btnSetManual.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+$btnSetManual.ForeColor = [System.Drawing.Color]::White
+$btnSetManual.FlatStyle = "Flat"
+$btnSetManual.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+$btnSetManual.Anchor = 'Bottom, Left'
+$btnSetDisabled = New-Object System.Windows.Forms.Button
+$btnSetDisabled.Text = "Set Disabled"
+$btnSetDisabled.Location = New-Object System.Drawing.Point(637, 602)
+$btnSetDisabled.Size = New-Object System.Drawing.Size(155, 38)
+$btnSetDisabled.BackColor = [System.Drawing.Color]::FromArgb(255, 135, 50, 50)
+$btnSetDisabled.ForeColor = [System.Drawing.Color]::White
+$btnSetDisabled.FlatStyle = "Flat"
+$btnSetDisabled.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$btnSetDisabled.Anchor = 'Bottom, Left'
+$btnClose = New-Object System.Windows.Forms.Button
+$btnClose.Text = "Close"
+$btnClose.Location = New-Object System.Drawing.Point(800, 602)
+$btnClose.Size = New-Object System.Drawing.Size(150, 38)
+$btnClose.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+$btnClose.ForeColor = [System.Drawing.Color]::White
+$btnClose.FlatStyle = "Flat"
+$btnClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$btnClose.Anchor = 'Bottom, Right'
+$modalButtons = [System.Windows.Forms.Control[]]@($btnStart, $btnStop, $btnSetAuto, $btnSetManual, $btnSetDisabled, $btnSelVis, $btnSelNone, $btnRefresh)
+$refreshLiveTable = {
+$workerSb = (Get-Command -Name Get-SystemServicesTable_Worker).ScriptBlock
+Invoke-AsyncTask -ControlsToDisable $modalButtons -ScriptBlock $workerSb -OnComplete ({
+param($freshOut)
+Update-Progress 0
+if ($modal.IsDisposed -or $listView.IsDisposed) { return }
+$state.AllServices = @($freshOut | Where-Object { $null -ne $_ })
+& $rebuildMap
+& $populateList $txtSearch.Text
+}.GetNewClosure())
+}
+$btnRefresh.Add_Click({ & $refreshLiveTable }.GetNewClosure())
+$invokeServiceAction = {
+param([ValidateSet("Start", "Stop", "Auto", "Manual", "Disabled")][string]$Mode)
+if ($state.CheckedNames.Count -eq 0) {
+[System.Windows.Forms.MessageBox]::Show("Check at least one service in the table first.", "WinUltix - System Services Manager") | Out-Null
+return
+}
+$selectedItems = [System.Collections.Generic.List[object]]::new()
+foreach ($sName in $state.CheckedNames) {
+if ($state.ServiceMap.ContainsKey($sName)) {
+$obj = $state.ServiceMap[$sName]
+if (-not $obj.IsLocked) { $selectedItems.Add($obj) }
+}
+}
+if ($selectedItems.Count -eq 0) { return }
+Invoke-AsyncTask -ControlsToDisable $modalButtons -Arguments @(@($selectedItems), $Mode) -ScriptBlock {
+param([array]$Selected, [string]$OpMode)
+$total   = $Selected.Count
 $current = 0
 foreach ($svc in $Selected) {
 $current++
 $UltixSync.Progress = [int](($current / $total) * 100)
 if ($svc.IsLocked) { continue }
-$targetStart = if ($Action -eq "Primary") { 4 } else { 3 }
-$verbLabel   = if ($Action -eq "Primary") { "Disabling" } else { "Restoring to Manual" }
-$UltixSync.Logs.Enqueue(" -> $verbLabel service: $($svc.Name) ($($svc.DisplayName))")
-try {
-Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetStart
-$flagVal = if ($Action -eq "Primary") { 0 } else { 3 }
-$baseSvcName = if ($svc.Name -match '^(.+)_[0-9a-fA-F]{2,}$') { $matches[1] } else { $svc.Name }
+$sName       = $svc.Name
+$baseSvcName = if ($sName -match '^(.+)_[0-9a-fA-F]{2,}$') { $matches[1] } else { $sName }
+$svcRegPath  = "HKLM:\SYSTEM\CurrentControlSet\Services\$sName"
 $baseRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$baseSvcName"
+try {
+switch ($OpMode) {
+"Start" {
+$curStart  = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+$baseStart = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+if ($curStart -eq 4 -or $baseStart -eq 4) {
+$UltixSync.Logs.Enqueue(" -> Auto-unlocking Disabled service '$sName' to Manual (Start=3) & Starting...")
+Set-ProtectedServiceStart -ServiceName $sName -StartValue 3 -StartService
+if ($baseSvcName -ne $sName -and (Test-Path -LiteralPath $baseRegPath)) {
+Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue 3 -StartService
+}
+$svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
+if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
+Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+}
+} else {
+$UltixSync.Logs.Enqueue(" -> Starting service: $sName ($($svc.DisplayName))")
+if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
+[void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($sName, -1, $true)
+}
+}
+Start-Service -Name $sName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+$curStatus = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
+$UltixSync.Logs.Enqueue("    [OK] ${sName} -> Status: $curStatus.")
+}
+"Stop" {
+$UltixSync.Logs.Enqueue(" -> Stopping service: $sName ($($svc.DisplayName))")
+Stop-Service -Name $sName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+if ($baseSvcName -ne $sName) {
+Get-Service -Name "${baseSvcName}_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+}
+$afterStop = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
+if ($afterStop -eq 'Running' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
+[void][WinUltix.PrivilegeEnabler]::StopServiceLive($sName)
+Start-Sleep -Milliseconds 250
+$afterStop = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
+}
+$UltixSync.Logs.Enqueue("    [OK] ${sName} -> Status: $afterStop.")
+}
+default {
+$targetStart = switch ($OpMode) {
+"Auto"     { 2 }
+"Manual"   { 3 }
+"Disabled" { 4 }
+}
+$flagVal   = if ($targetStart -eq 4) { 0 } else { 3 }
+$modeLabel = if ($targetStart -eq 2) { "Automatic (2)" } elseif ($targetStart -eq 3) { "Manual (3)" } else { "Disabled (4)" }
+$UltixSync.Logs.Enqueue(" -> Setting StartType [$modeLabel]: $sName ($($svc.DisplayName))")
+Set-ProtectedServiceStart -ServiceName $sName -StartValue $targetStart
 if (Test-Path -LiteralPath $baseRegPath) {
-if ($baseSvcName -ne $svc.Name) {
+if ($baseSvcName -ne $sName) {
 Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart
 }
 $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
 if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
 Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
 }
+if ($targetStart -in @(3, 4)) {
+Remove-ItemProperty -LiteralPath $baseRegPath -Name "DelayedAutostart" -Force -ErrorAction SilentlyContinue
 }
-if ($Action -eq "Primary") {
-Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-Get-Service -Name "$($baseSvcName)_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-$UltixSync.Logs.Enqueue("    [OK] $($svc.Name) stopped and locked to Disabled (Start=4).")
+}
+if ($targetStart -eq 4) {
+Stop-Service -Name $sName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+Get-Service -Name "${baseSvcName}_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+if ((Get-Service -Name $sName -ErrorAction SilentlyContinue).Status -eq 'Running' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
+[void][WinUltix.PrivilegeEnabler]::StopServiceLive($sName)
+}
+$UltixSync.Logs.Enqueue("    [OK] $sName locked to Disabled (Start=4) and stopped.")
 } else {
-$UltixSync.Logs.Enqueue("    [OK] $($svc.Name) set to Manual (Start=3).")
+$UltixSync.Logs.Enqueue("    [OK] $sName StartType updated to $modeLabel in Registry & live SCM.")
+}
+}
 }
 } catch {
-$UltixSync.Logs.Enqueue("    [!] Failed to modify $($svc.Name): $($_.Exception.Message)")
+$UltixSync.Logs.Enqueue("    [!] Failed on ${sName}: $($_.Exception.Message)")
 }
 }
 } -OnComplete ({
 param($nullOut)
-Update-Progress 0
-Write-GUI " -> Service operations completed.`n"
+& $refreshLiveTable
 }.GetNewClosure())
+}
+$btnStart.Add_Click({ & $invokeServiceAction "Start" }.GetNewClosure())
+$btnStop.Add_Click({ & $invokeServiceAction "Stop" }.GetNewClosure())
+$btnSetAuto.Add_Click({ & $invokeServiceAction "Auto" }.GetNewClosure())
+$btnSetManual.Add_Click({ & $invokeServiceAction "Manual" }.GetNewClosure())
+$btnSetDisabled.Add_Click({ & $invokeServiceAction "Disabled" }.GetNewClosure())
+& $populateList ""
+$modal.Controls.AddRange(@(
+$lblDesc, $lblSearch, $txtSearch, $btnSelVis, $btnSelNone, $btnRefresh, $lblCount,
+$listView, $btnStart, $btnStop, $btnSetAuto, $btnSetManual, $btnSetDisabled, $btnClose
+))
+$modal.CancelButton = $btnClose
+try {
+[void]$modal.ShowDialog($global:form)
+} finally {
+$modal.Dispose()
+}
 }.GetNewClosure())
 }
 function Get-StartupState_Worker {
@@ -8470,17 +8987,16 @@ $UltixSync.Logs.Enqueue(" -> [4/5] Batch re-registered $($validDllPaths.Count) C
 $UltixSync.Logs.Enqueue(" [!] Error during Windows Update subsystem repair: $($_.Exception.Message)")
 } finally {
 $UltixSync.Progress = 95
-$svcDefaults = @{ "cryptSvc" = 2; "bits" = 3; "wuauserv" = 3 }
-foreach ($svc in @("cryptSvc", "bits", "wuauserv")) {
+$svcDefaults = @{ "cryptSvc" = 2; "bits" = 3; "wuauserv" = 3; "dosvc" = 2; "msiserver" = 3 }
+foreach ($svc in @("cryptSvc", "bits", "wuauserv", "dosvc", "msiserver")) {
 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
 $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-if ($curSt -eq 4) {
-Set-ProtectedServiceStart -ServiceName $svc -StartValue $svcDefaults[$svc]
-}
-Start-Service -Name $svc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+$targetSt = if ($curSt -eq 4) { $svcDefaults[$svc] } else { [int]$curSt }
+$startNow = ($svc -in @("cryptSvc", "bits", "wuauserv", "dosvc"))
+Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService:$startNow
 }
 $UltixSync.Progress = 100
-$UltixSync.Logs.Enqueue(" -> [5/5] [OK] Windows Update & Cryptographic services restored and online.")
+$UltixSync.Logs.Enqueue(" -> [5/5] [OK] Windows Update, Delivery Optimization & Cryptographic services restored and online.")
 }
 } -OnComplete {
 param($nullOut)
@@ -8660,15 +9176,13 @@ Update-Progress 10
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 try {
 $UltixSync.Progress = 20
-$UltixSync.Logs.Enqueue(" -> [1/4] Verifying core UWP licensing & Xbox Gaming Services (AppXSvc, ClipSVC, GamingServices)...")
-foreach ($svc in @("AppXSvc", "ClipSVC", "StateRepository", "LicenseManager", "GamingServices", "GamingServicesNet")) {
+$UltixSync.Logs.Enqueue(" -> [1/4] Verifying core UWP licensing, Delivery Optimization & Xbox Gaming Services...")
+foreach ($svc in @("AppXSvc", "ClipSVC", "StateRepository", "LicenseManager", "InstallService", "dosvc", "wuauserv", "GamingServices", "GamingServicesNet")) {
 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
 if (Test-Path -LiteralPath $sPath) {
 $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-if ($curSt -eq 4) {
-Set-ProtectedServiceStart -ServiceName $svc -StartValue 3
-}
-Start-Service -Name $svc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+$targetSt = if ($curSt -eq 4) { 3 } else { [int]$curSt }
+Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService
 }
 }
 $UltixSync.Progress = 45
