@@ -1648,7 +1648,8 @@ Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DW
 }
 if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
 [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
-} elseif ($StartService.IsPresent -and $StartValue -ne 4) {
+}
+if ($StartService.IsPresent -and $StartValue -ne 4) {
 Start-Service -Name $ServiceName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
 }
 }
@@ -2554,11 +2555,11 @@ $lblCount.Text = "Selected: $($chkList.CheckedIndices.Count) / $($AuditResults.C
 $chkList.Enabled = $false
 $lblCount.Text = "Selected: 0 / 0"
 }
-$updateCounter = {
+$updateCounter = ({
 param([int]$Delta = 0)
 $totalChecked = $chkList.CheckedIndices.Count + $Delta
 $lblCount.Text = "Selected: $totalChecked / $($chkList.Items.Count)"
-}
+}.GetNewClosure())
 $chkList.Add_ItemCheck({
 param($src, $e)
 $delta = if ($e.NewValue -eq [System.Windows.Forms.CheckState]::Checked) { 1 } else { -1 }
@@ -2758,10 +2759,10 @@ Item  = $Data[$i]
 }
 $checkedIds = [System.Collections.Generic.HashSet[int]]::new()
 $syncGuard  = @{ SuppressEvents = $false }
-$updateCounter = {
+$updateCounter = ({
 $lblCount.Text = "Selected: $($checkedIds.Count) / $($indexedData.Count) (Showing: $($listView.Items.Count))"
-}
-$applyRowShading = {
+}.GetNewClosure())
+$applyRowShading = ({
 for ($r = 0; $r -lt $listView.Items.Count; $r++) {
 $it = $listView.Items[$r]
 $rowObj = $indexedData[[int]$it.Tag].Item
@@ -2775,8 +2776,8 @@ $it.BackColor = $bgGhost
 $it.BackColor = if (($r % 2) -eq 0) { $bgEven } else { $bgOdd }
 }
 }
-}
-$populateList = {
+}.GetNewClosure())
+$populateList = ({
 param([string]$FilterText = "")
 $syncGuard.SuppressEvents = $true
 $listView.BeginUpdate()
@@ -2833,7 +2834,7 @@ if ($sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
 $listView.EndUpdate()
 $syncGuard.SuppressEvents = $false
 & $updateCounter
-}
+}.GetNewClosure())
 $listView.Add_ItemCheck({
 param($src, $e)
 if ($syncGuard.SuppressEvents) { return }
@@ -4752,7 +4753,7 @@ $allTabButtons.AddRange($row.Controls)
 $TabControl.Controls.Add($tabClean)
 }
 function Get-UltixProtectedAppxRegex {
-return "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
+return "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|Microsoft\.Winget\.Source|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
 }
 function Get-UltixInboxNicFodStatus {
 $usingInboxWifi = $false
@@ -7598,158 +7599,6 @@ $fgRunning = [System.Drawing.Color]::FromArgb(255, 155, 235, 175)
 $fgLocked  = [System.Drawing.Color]::FromArgb(255, 255, 155, 155)
 $fgStopped = [System.Drawing.Color]::FromArgb(255, 170, 188, 208)
 $fgMuted   = [System.Drawing.Color]::FromArgb(255, 125, 134, 145)
-$state = @{
-AllServices    = $initialSvcs
-ServiceMap     = @{}
-CheckedNames   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-SuppressEvents = $false
-}
-$rebuildMap = {
-$state.ServiceMap.Clear()
-foreach ($s in $state.AllServices) {
-$state.ServiceMap[$s.Name] = $s
-}
-}
-& $rebuildMap
-$updateCounter = {
-$lblCount.Text = "Selected: $($state.CheckedNames.Count) / $($state.AllServices.Count) (Shown: $($listView.Items.Count))"
-}
-$styleRow = {
-param([System.Windows.Forms.ListViewItem]$It, [int]$RowIdx)
-$obj = $state.ServiceMap[[string]$It.Tag]
-if ($null -eq $obj) { return }
-if ($obj.IsLocked) {
-$It.BackColor = $bgLocked
-$It.ForeColor = $fgLocked
-} else {
-$It.BackColor = if (($RowIdx % 2) -eq 0) { $bgEven } else { $bgOdd }
-if ($obj.StartType -match "^Disabled") {
-$It.ForeColor = $fgMuted
-} elseif ($obj.Status -eq "Running") {
-$It.ForeColor = $fgRunning
-} else {
-$It.ForeColor = $fgStopped
-}
-}
-}
-$applyRowShading = {
-for ($r = 0; $r -lt $listView.Items.Count; $r++) {
-& $styleRow $listView.Items[$r] $r
-}
-}
-$populateList = {
-param([string]$FilterText = "")
-$state.SuppressEvents = $true
-$listView.BeginUpdate()
-$listView.ListViewItemSorter = $null
-$listView.Items.Clear()
-$cleanFilter = $FilterText.Trim()
-$visIdx = 0
-foreach ($obj in $state.AllServices) {
-if ($cleanFilter.Length -gt 0) {
-$matched = (
-$obj.Name.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-$obj.DisplayName.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-$obj.Status.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-$obj.StartType.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-)
-if (-not $matched) { continue }
-}
-$lvItem = New-Object System.Windows.Forms.ListViewItem([string]$obj.Name)
-[void]$lvItem.SubItems.Add([string]$obj.Status)
-[void]$lvItem.SubItems.Add([string]$obj.StartType)
-[void]$lvItem.SubItems.Add([string]$obj.DisplayName)
-$lvItem.Tag = $obj.Name
-$lvItem.Checked = (-not $obj.IsLocked) -and $state.CheckedNames.Contains($obj.Name)
-& $styleRow $lvItem $visIdx
-[void]$listView.Items.Add($lvItem)
-$visIdx++
-}
-$listView.ListViewItemSorter = $sorter
-if ($sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
-$listView.Sort()
-& $applyRowShading
-}
-$listView.EndUpdate()
-$state.SuppressEvents = $false
-& $updateCounter
-}
-$listView.Add_ItemCheck({
-param($src, $e)
-if ($state.SuppressEvents) { return }
-$lvItem = $src.Items[$e.Index]
-if ($null -ne $lvItem -and $null -ne $lvItem.Tag) {
-$obj = $state.ServiceMap[[string]$lvItem.Tag]
-if ($null -ne $obj -and $obj.IsLocked) {
-$e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
-}
-}
-}.GetNewClosure())
-$listView.Add_ItemChecked({
-param($src, $e)
-if ($state.SuppressEvents) { return }
-$sName = [string]$e.Item.Tag
-$obj   = $state.ServiceMap[$sName]
-if ($null -ne $obj -and $obj.IsLocked) {
-if ($e.Item.Checked) {
-$state.SuppressEvents = $true
-$e.Item.Checked = $false
-$state.SuppressEvents = $false
-}
-[void]$state.CheckedNames.Remove($sName)
-return
-}
-if ($e.Item.Checked) {
-[void]$state.CheckedNames.Add($sName)
-} else {
-[void]$state.CheckedNames.Remove($sName)
-}
-& $updateCounter
-}.GetNewClosure())
-$listView.Add_ColumnClick({
-param($src, $e)
-$listView.BeginUpdate()
-if ($e.Column -eq $sorter.ColumnToSort) {
-if ($sorter.OrderOfSort -eq [System.Windows.Forms.SortOrder]::Ascending) {
-$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending
-} else {
-$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
-}
-} else {
-$sorter.ColumnToSort = $e.Column
-$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
-}
-$listView.Sort()
-& $applyRowShading
-$listView.EndUpdate()
-}.GetNewClosure())
-$txtSearch.Add_TextChanged({ & $populateList $txtSearch.Text }.GetNewClosure())
-$btnSelVis.Add_Click({
-$state.SuppressEvents = $true
-$listView.BeginUpdate()
-foreach ($lvItem in $listView.Items) {
-$sName = [string]$lvItem.Tag
-$obj   = $state.ServiceMap[$sName]
-if ($null -ne $obj -and $obj.IsLocked) {
-$lvItem.Checked = $false
-continue
-}
-$lvItem.Checked = $true
-[void]$state.CheckedNames.Add($sName)
-}
-$listView.EndUpdate()
-$state.SuppressEvents = $false
-& $updateCounter
-}.GetNewClosure())
-$btnSelNone.Add_Click({
-$state.SuppressEvents = $true
-$state.CheckedNames.Clear()
-$listView.BeginUpdate()
-foreach ($lvItem in $listView.Items) { $lvItem.Checked = $false }
-$listView.EndUpdate()
-$state.SuppressEvents = $false
-& $updateCounter
-}.GetNewClosure())
 $actionBtnFont = Get-UltixFont -Role "ModalAction"
 $btnStart = New-Object System.Windows.Forms.Button
 $btnStart.Text = "Start"
@@ -7807,33 +7656,123 @@ $btnClose.Font = $actionBtnFont
 $btnClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
 $btnClose.Anchor = 'Bottom, Right'
 $modalButtons = [System.Windows.Forms.Control[]]@($btnStart, $btnStop, $btnSetAuto, $btnSetManual, $btnSetDisabled, $btnSelVis, $btnSelNone, $btnRefresh)
-$refreshLiveTable = {
+$state = @{
+Modal          = $modal
+ListView       = $listView
+TxtSearch      = $txtSearch
+LblCount       = $lblCount
+Sorter         = $sorter
+ModalButtons   = $modalButtons
+BgEven         = $bgEven
+BgOdd          = $bgOdd
+BgLocked       = $bgLocked
+FgRunning      = $fgRunning
+FgLocked       = $fgLocked
+FgStopped      = $fgStopped
+FgMuted        = $fgMuted
+AllServices    = $initialSvcs
+ServiceMap     = @{}
+CheckedNames   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+SuppressEvents = $false
+}
+$state.RebuildMap = ({
+$state.ServiceMap.Clear()
+foreach ($s in $state.AllServices) {
+$state.ServiceMap[$s.Name] = $s
+}
+}.GetNewClosure())
+$state.UpdateCounter = ({
+$state.LblCount.Text = "Selected: $($state.CheckedNames.Count) / $($state.AllServices.Count) (Shown: $($state.ListView.Items.Count))"
+}.GetNewClosure())
+$state.StyleRow = ({
+param([System.Windows.Forms.ListViewItem]$It, [int]$RowIdx)
+$obj = $state.ServiceMap[[string]$It.Tag]
+if ($null -eq $obj) { return }
+if ($obj.IsLocked) {
+$It.BackColor = $state.BgLocked
+$It.ForeColor = $state.FgLocked
+} else {
+$It.BackColor = if (($RowIdx % 2) -eq 0) { $state.BgEven } else { $state.BgOdd }
+if ($obj.StartType -match "^Disabled") {
+$It.ForeColor = $state.FgMuted
+} elseif ($obj.Status -eq "Running") {
+$It.ForeColor = $state.FgRunning
+} else {
+$It.ForeColor = $state.FgStopped
+}
+}
+}.GetNewClosure())
+$state.ApplyRowShading = ({
+for ($r = 0; $r -lt $state.ListView.Items.Count; $r++) {
+& $state.StyleRow $state.ListView.Items[$r] $r
+}
+}.GetNewClosure())
+$state.PopulateList = ({
+param([string]$FilterText = "")
+$state.SuppressEvents = $true
+$lv = $state.ListView
+$lv.BeginUpdate()
+$lv.ListViewItemSorter = $null
+$lv.Items.Clear()
+$cleanFilter = $FilterText.Trim()
+$visIdx = 0
+foreach ($obj in $state.AllServices) {
+if ($cleanFilter.Length -gt 0) {
+$matched = (
+$obj.Name.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+$obj.DisplayName.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+$obj.Status.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+$obj.StartType.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+)
+if (-not $matched) { continue }
+}
+$lvItem = New-Object System.Windows.Forms.ListViewItem([string]$obj.Name)
+[void]$lvItem.SubItems.Add([string]$obj.Status)
+[void]$lvItem.SubItems.Add([string]$obj.StartType)
+[void]$lvItem.SubItems.Add([string]$obj.DisplayName)
+$lvItem.Tag = $obj.Name
+$lvItem.Checked = (-not $obj.IsLocked) -and $state.CheckedNames.Contains($obj.Name)
+& $state.StyleRow $lvItem $visIdx
+[void]$lv.Items.Add($lvItem)
+$visIdx++
+}
+$lv.ListViewItemSorter = $state.Sorter
+if ($state.Sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
+$lv.Sort()
+& $state.ApplyRowShading
+}
+$lv.EndUpdate()
+$state.SuppressEvents = $false
+& $state.UpdateCounter
+}.GetNewClosure())
+$state.RefreshLiveTable = ({
+$st = $state
 $workerSb = (Get-Command -Name Get-SystemServicesTable_Worker).ScriptBlock
-Invoke-AsyncTask -ControlsToDisable $modalButtons -ScriptBlock $workerSb -OnComplete ({
+Invoke-AsyncTask -ControlsToDisable $st.ModalButtons -ScriptBlock $workerSb -OnComplete ({
 param($freshOut)
 Update-Progress 0
-if ($modal.IsDisposed -or $listView.IsDisposed) { return }
-$state.AllServices = @($freshOut | Where-Object { $null -ne $_ })
-& $rebuildMap
-& $populateList $txtSearch.Text
+if ($st.Modal.IsDisposed -or $st.ListView.IsDisposed) { return }
+$st.AllServices = @($freshOut | Where-Object { $null -ne $_ })
+& $st.RebuildMap
+& $st.PopulateList $st.TxtSearch.Text
 }.GetNewClosure())
-}
-$btnRefresh.Add_Click({ & $refreshLiveTable }.GetNewClosure())
-$invokeServiceAction = {
+}.GetNewClosure())
+$state.InvokeServiceAction = ({
 param([ValidateSet("Start", "Stop", "Auto", "Manual", "Disabled")][string]$Mode)
-if ($state.CheckedNames.Count -eq 0) {
+$st = $state
+if ($st.CheckedNames.Count -eq 0) {
 [System.Windows.Forms.MessageBox]::Show("Check at least one service in the table first.", "WinUltix - System Services Manager") | Out-Null
 return
 }
 $selectedItems = [System.Collections.Generic.List[object]]::new()
-foreach ($sName in $state.CheckedNames) {
-if ($state.ServiceMap.ContainsKey($sName)) {
-$obj = $state.ServiceMap[$sName]
+foreach ($sName in $st.CheckedNames) {
+if ($st.ServiceMap.ContainsKey($sName)) {
+$obj = $st.ServiceMap[$sName]
 if (-not $obj.IsLocked) { $selectedItems.Add($obj) }
 }
 }
 if ($selectedItems.Count -eq 0) { return }
-Invoke-AsyncTask -ControlsToDisable $modalButtons -Arguments @(@($selectedItems), $Mode) -ScriptBlock {
+Invoke-AsyncTask -ControlsToDisable $st.ModalButtons -Arguments @(@($selectedItems), $Mode) -ScriptBlock {
 param([array]$Selected, [string]$OpMode)
 $total   = $Selected.Count
 $current = 0
@@ -7865,8 +7804,8 @@ $UltixSync.Logs.Enqueue(" -> Starting service: $sName ($($svc.DisplayName))")
 if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
 [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($sName, -1, $true)
 }
-}
 Start-Service -Name $sName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+}
 $curStatus = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
 $UltixSync.Logs.Enqueue("    [OK] ${sName} -> Status: $curStatus.")
 }
@@ -7924,15 +7863,93 @@ $UltixSync.Logs.Enqueue("    [!] Failed on ${sName}: $($_.Exception.Message)")
 }
 } -OnComplete ({
 param($nullOut)
-& $refreshLiveTable
+& $st.RefreshLiveTable
 }.GetNewClosure())
+}.GetNewClosure())
+& $state.RebuildMap
+$listView.Add_ItemCheck({
+param($src, $e)
+if ($state.SuppressEvents) { return }
+$lvItem = $src.Items[$e.Index]
+if ($null -ne $lvItem -and $null -ne $lvItem.Tag) {
+$obj = $state.ServiceMap[[string]$lvItem.Tag]
+if ($null -ne $obj -and $obj.IsLocked) {
+$e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
 }
-$btnStart.Add_Click({ & $invokeServiceAction "Start" }.GetNewClosure())
-$btnStop.Add_Click({ & $invokeServiceAction "Stop" }.GetNewClosure())
-$btnSetAuto.Add_Click({ & $invokeServiceAction "Auto" }.GetNewClosure())
-$btnSetManual.Add_Click({ & $invokeServiceAction "Manual" }.GetNewClosure())
-$btnSetDisabled.Add_Click({ & $invokeServiceAction "Disabled" }.GetNewClosure())
-& $populateList ""
+}
+}.GetNewClosure())
+$listView.Add_ItemChecked({
+param($src, $e)
+if ($state.SuppressEvents) { return }
+$sName = [string]$e.Item.Tag
+$obj   = $state.ServiceMap[$sName]
+if ($null -ne $obj -and $obj.IsLocked) {
+if ($e.Item.Checked) {
+$state.SuppressEvents = $true
+$e.Item.Checked = $false
+$state.SuppressEvents = $false
+}
+[void]$state.CheckedNames.Remove($sName)
+return
+}
+if ($e.Item.Checked) {
+[void]$state.CheckedNames.Add($sName)
+} else {
+[void]$state.CheckedNames.Remove($sName)
+}
+& $state.UpdateCounter
+}.GetNewClosure())
+$listView.Add_ColumnClick({
+param($src, $e)
+$state.ListView.BeginUpdate()
+if ($e.Column -eq $state.Sorter.ColumnToSort) {
+if ($state.Sorter.OrderOfSort -eq [System.Windows.Forms.SortOrder]::Ascending) {
+$state.Sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending
+} else {
+$state.Sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+}
+} else {
+$state.Sorter.ColumnToSort = $e.Column
+$state.Sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+}
+$state.ListView.Sort()
+& $state.ApplyRowShading
+$state.ListView.EndUpdate()
+}.GetNewClosure())
+$txtSearch.Add_TextChanged({ & $state.PopulateList $state.TxtSearch.Text }.GetNewClosure())
+$btnSelVis.Add_Click({
+$state.SuppressEvents = $true
+$state.ListView.BeginUpdate()
+foreach ($lvItem in $state.ListView.Items) {
+$sName = [string]$lvItem.Tag
+$obj   = $state.ServiceMap[$sName]
+if ($null -ne $obj -and $obj.IsLocked) {
+$lvItem.Checked = $false
+continue
+}
+$lvItem.Checked = $true
+[void]$state.CheckedNames.Add($sName)
+}
+$state.ListView.EndUpdate()
+$state.SuppressEvents = $false
+& $state.UpdateCounter
+}.GetNewClosure())
+$btnSelNone.Add_Click({
+$state.SuppressEvents = $true
+$state.CheckedNames.Clear()
+$state.ListView.BeginUpdate()
+foreach ($lvItem in $state.ListView.Items) { $lvItem.Checked = $false }
+$state.ListView.EndUpdate()
+$state.SuppressEvents = $false
+& $state.UpdateCounter
+}.GetNewClosure())
+$btnRefresh.Add_Click({ & $state.RefreshLiveTable }.GetNewClosure())
+$btnStart.Add_Click({ & $state.InvokeServiceAction "Start" }.GetNewClosure())
+$btnStop.Add_Click({ & $state.InvokeServiceAction "Stop" }.GetNewClosure())
+$btnSetAuto.Add_Click({ & $state.InvokeServiceAction "Auto" }.GetNewClosure())
+$btnSetManual.Add_Click({ & $state.InvokeServiceAction "Manual" }.GetNewClosure())
+$btnSetDisabled.Add_Click({ & $state.InvokeServiceAction "Disabled" }.GetNewClosure())
+& $state.PopulateList ""
 $modal.Controls.AddRange(@(
 $lblDesc, $lblSearch, $txtSearch, $btnSelVis, $btnSelNone, $btnRefresh, $lblCount,
 $listView, $btnStart, $btnStop, $btnSetAuto, $btnSetManual, $btnSetDisabled, $btnClose
@@ -8718,8 +8735,8 @@ $wkKey = "$wellKnownBase\$ip"
 if (-not (Test-Path -LiteralPath $wkKey)) { New-Item -Path $wkKey -Force | Out-Null }
 Set-ItemProperty -LiteralPath $wkKey -Name "Template" -Value $cfg.Template -Type String -Force -ErrorAction SilentlyContinue
 if ($hasDohCmd) {
-Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
-Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
+Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $true -AutoUpgrade $true -ErrorAction SilentlyContinue
+Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $true -AutoUpgrade $true -ErrorAction SilentlyContinue
 }
 $isV6 = ($ip -match ":")
 $targetDohKey = if ($isV6) { "$dohV6Root\$ip" } else { "$dohV4Root\$ip" }
@@ -8898,7 +8915,7 @@ $chkIPv6.Location = New-Object System.Drawing.Point(255, 284)
 $chkIPv6.Size = New-Object System.Drawing.Size(135, 22)
 $chkIPv6.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
 $chkIPv6.ForeColor = [System.Drawing.Color]::LightGray
-$chkIPv6.Checked = $true
+$chkIPv6.Checked = $false
 $comboDNS.Add_SelectedIndexChanged({
 $isStatic = ([string]$comboDNS.SelectedItem -ne "Default (DHCP)")
 $chkDoH.Enabled  = $isStatic
@@ -9537,37 +9554,65 @@ Write-GUI ""
 }
 function Repair-UwpGamingRuntime {
 param([System.Windows.Forms.Control[]]$ControlsToDisable)
-Write-GUI " -> Initiating UWP Shell, Store & Xbox Gaming Services First-Aid (Background Thread)..."
+Write-GUI " -> Initiating UWP, Store, WinGet & Xbox Gaming Services First-Aid (Background Thread)..."
 Update-Progress 10
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 try {
-$UltixSync.Progress = 20
-$UltixSync.Logs.Enqueue(" -> [1/4] Verifying core UWP licensing, Delivery Optimization & Xbox Gaming Services...")
-foreach ($svc in @("AppXSvc", "ClipSVC", "StateRepository", "LicenseManager", "InstallService", "dosvc", "wuauserv", "GamingServices", "GamingServicesNet")) {
+$UltixSync.Progress = 15
+$UltixSync.Logs.Enqueue(" -> [1/4] Unlocking & starting UWP, Delivery Optimization (DoSvc) & Xbox Gaming Services...")
+$svcMap = [ordered]@{
+"AppXSvc"             = 3
+"ClipSVC"             = 3
+"StateRepository"     = 3
+"LicenseManager"      = 3
+"InstallService"      = 3
+"TokenBroker"         = 3
+"wlidsvc"             = 3
+"NlaSvc"              = 2
+"netprofm"            = 3
+"Wcmsvc"              = 2
+"WinHttpAutoProxySvc" = 3
+"dosvc"               = 2
+"bits"                = 3
+"wuauserv"            = 3
+"GamingServices"      = 3
+"GamingServicesNet"   = 3
+}
+foreach ($svc in $svcMap.Keys) {
 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
 if (Test-Path -LiteralPath $sPath) {
 $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-$targetSt = if ($curSt -eq 4) { 3 } else { [int]$curSt }
+$targetSt = if ($curSt -eq 4 -or $svc -eq "dosvc") { $svcMap[$svc] } else { [int]$curSt }
 Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService
 }
 }
-$UltixSync.Progress = 45
+$deprovRoot = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
+if (Test-Path -LiteralPath $deprovRoot) {
+Get-ChildItem -LiteralPath $deprovRoot -ErrorAction SilentlyContinue | Where-Object {
+$_.PSChildName -match '(?i)(Winget|DesktopAppInstaller|WindowsStore|StorePurchaseApp|Xbox|GamingServices|VCLibs|UI\.Xaml|WindowsAppRuntime)'
+} | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+$UltixSync.Progress = 35
 $UltixSync.Logs.Enqueue(" -> [2/4] Flushing corrupted Microsoft Store LocalCache & running wsreset -i...")
-Stop-Process -Name "WinStore.App", "StoreExperienceHost" -Force -ErrorAction SilentlyContinue
+Stop-Process -Name "WinStore.App", "StoreExperienceHost", "WindowsPackageManagerServer", "winget" -Force -ErrorAction SilentlyContinue
 $storeCache = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_*\LocalCache" -Directory -ErrorAction SilentlyContinue
 foreach ($dir in $storeCache) {
 Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 $wsProc = Start-Process -FilePath "wsreset.exe" -ArgumentList "-i" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
 if ($null -ne $wsProc) {
-try { $wsProc.WaitForExit(10000) | Out-Null } finally { $wsProc.Dispose() }
+try { $wsProc.WaitForExit(6000) | Out-Null } finally { $wsProc.Dispose() }
 }
-$UltixSync.Progress = 75
-$UltixSync.Logs.Enqueue(" -> [3/4] Re-registering existing Shell, Store & Runtime AppxManifests (Preserving debloat state)...")
-$corePattern = "WindowsStore|StorePurchaseApp|DesktopAppInstaller|XboxIdentityProvider|XboxGameCallableUI|GamingServices|SecHealthUI|WindowsDefender|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|Microsoft\.VCLibs|Microsoft\.UI\.Xaml|Microsoft\.WindowsAppRuntime"
+$UltixSync.Progress = 50
+$UltixSync.Logs.Enqueue(" -> [3/4] Re-registering Store, WinGet (DesktopAppInstaller) & Xbox manifests...")
+$corePattern = "^(?i).*(WindowsStore|StorePurchaseApp|DesktopAppInstaller|Winget\.Source|XboxIdentityProvider|XboxGameCallableUI|GamingServices)$"
 $targetPkgs  = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $corePattern })
 $reRegCount = 0
+$pkgTotal   = [math]::Max(1, $targetPkgs.Count)
+$pkgIdx     = 0
 foreach ($pkg in $targetPkgs) {
+$pkgIdx++
+$UltixSync.Progress = 50 + [int](($pkgIdx / $pkgTotal) * 25)
 if (-not [string]::IsNullOrWhiteSpace($pkg.InstallLocation)) {
 $manifest = Join-Path $pkg.InstallLocation "AppxManifest.xml"
 if ([System.IO.File]::Exists($manifest)) {
@@ -9578,8 +9623,34 @@ $reRegCount++
 }
 }
 }
+$UltixSync.Logs.Enqueue("    [OK] Re-registered $reRegCount Store, WinGet & Xbox manifest(s).")
+$UltixSync.Progress = 80
+$UltixSync.Logs.Enqueue(" -> [4/4] Resetting WinHTTP proxy locks & repairing WinGet source index (source2.msix)...")
+$null = & netsh.exe winhttp reset proxy 2>&1
+Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+$tmpMsix = Join-Path $env:TEMP "WinUltix_WingetSource2.msix"
+try {
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+$wc = New-Object System.Net.WebClient
+try {
+$wc.DownloadFile("https://cdn.winget.microsoft.com/cache/source2.msix", $tmpMsix)
+} finally {
+$wc.Dispose()
+}
+$UltixSync.Progress = 92
+if ([System.IO.File]::Exists($tmpMsix) -and ([System.IO.FileInfo]::new($tmpMsix)).Length -gt 1048576) {
+Add-AppxPackage -Path $tmpMsix -ForceApplicationShutdown -ErrorAction Stop
+$UltixSync.Logs.Enqueue("    [OK] Installed fresh WinGet v2 index package (source2.msix).")
+}
+} catch {
+$UltixSync.Logs.Enqueue("    [!] WinGet source2.msix refresh notice: $($_.Exception.Message)")
+} finally {
+if (Test-Path -LiteralPath $tmpMsix) {
+Remove-Item -LiteralPath $tmpMsix -Force -ErrorAction SilentlyContinue
+}
+}
 $UltixSync.Progress = 100
-$UltixSync.Logs.Enqueue(" -> [4/4] [OK] Re-registered $reRegCount core UWP/Gaming manifests and flushed Store cache.")
+$UltixSync.Logs.Enqueue(" -> [OK] Store, WinGet & Xbox Gaming runtime repair completed.")
 } catch {
 $UltixSync.Logs.Enqueue(" [!] UWP & Gaming runtime repair failed: $($_.Exception.Message)")
 }
@@ -11170,7 +11241,7 @@ $listView.Columns.Add("Executable Path", 415) | Out-Null
 $bgEven = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
 $bgOdd  = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
 $localData = New-Object System.Collections.ArrayList
-$refreshData = {
+$refreshData = ({
 $listView.BeginUpdate()
 $listView.Items.Clear(); $localData.Clear()
 $auditData = Get-HardwareState_Affinity
@@ -11195,7 +11266,7 @@ $lvItem.ForeColor = [System.Drawing.Color]::FromArgb(255, 140, 148, 158)
 $rIdx++
 }
 $listView.EndUpdate()
-}
+}.GetNewClosure())
 &$refreshData
 $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 $txtCustom = New-Object System.Windows.Forms.TextBox; $txtCustom.Location = New-Object System.Drawing.Point(15, 555); $txtCustom.Size = New-Object System.Drawing.Size(250, 25); $txtCustom.BackColor = [System.Drawing.Color]::FromArgb(255, 38, 40, 45); $txtCustom.ForeColor = [System.Drawing.Color]::White; $txtCustom.BorderStyle = "FixedSingle"; $txtCustom.Font = New-Object System.Drawing.Font("Segoe UI", 10); $txtCustom.Anchor = 'Bottom, Left'
@@ -11225,7 +11296,7 @@ Remove-AppAffinity -SelectedItems $toRemove -Execute $true -KeepConfig $false
 &$refreshData
 }
 }.GetNewClosure())
-$getDelta = {
+$getDelta = ({
 $apply = @(); $remove = @()
 for ($i = 0; $i -lt $listView.Items.Count; $i++) {
 $item = $localData[$i]
@@ -11234,7 +11305,7 @@ $isChecked = $listView.Items[$i].Checked
 if ($isChecked -and -not $wasChecked) { $apply += $item } elseif (-not $isChecked -and $wasChecked) { $remove += $item }
 }
 return @{ Apply = $apply; Remove = $remove }
-}
+}.GetNewClosure())
 $btnSave = New-UltixButton -Parent $modal -Text "Save Roster" -X 15 -Y 594 -Width 150 -Height 38 -RGB @(60, 100, 150)
 $btnSave.Anchor = 'Bottom, Left'
 $btnSave.Add_Click({
@@ -11281,7 +11352,7 @@ $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(600, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
 $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 60); $chkList.Size = New-Object System.Drawing.Size(600, 280); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
 $localData = New-Object System.Collections.ArrayList
-$refreshData = {
+$refreshData = ({
 $chkList.Items.Clear(); $localData.Clear()
 $auditData = Get-HardwareState_CPPC
 foreach ($item in $auditData) {
@@ -11292,7 +11363,7 @@ if (-not $item.IsDetected) {
 [void]$chkList.Items.Add("[ HIDDEN ]   " + $item.UIDisplayName, $true)
 }
 }
-}
+}.GetNewClosure())
 &$refreshData
 $btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 355 -Width 150 -Height 38 -RGB @(60, 100, 150)
 $btnUnhide.Anchor = 'Bottom, Left'
@@ -11439,7 +11510,7 @@ $listView.ListViewItemSorter = $sorter
 [void]$listView.Columns.Add("Priority", 70)
 [void]$listView.Columns.Add("IRQ Mask", 95)
 [void]$listView.Columns.Add("DPC Assessment", 244)
-$styleMsiRow = {
+$styleMsiRow = ({
 param(
 [System.Windows.Forms.ListViewItem]$LvItem,
 [int]$RowIndex,
@@ -11466,8 +11537,8 @@ $targetFg = $fgMsiOff
 }
 if ($LvItem.BackColor -ne $targetBg) { $LvItem.BackColor = $targetBg }
 if ($LvItem.ForeColor -ne $targetFg) { $LvItem.ForeColor = $targetFg }
-}
-$reapplyAllRowShading = {
+}.GetNewClosure())
+$reapplyAllRowShading = ({
 for ($idx = 0; $idx -lt $listView.Items.Count; $idx++) {
 $it = $listView.Items[$idx]
 $dev = $it.Tag
@@ -11483,7 +11554,7 @@ $bgOdd
 if ($it.BackColor -ne $newBg) { $it.BackColor = $newBg }
 }
 }
-}
+}.GetNewClosure())
 $listView.Add_ItemCheck({
 param($src, $e)
 $lvItem = $src.Items[$e.Index]
@@ -11492,7 +11563,7 @@ $e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
 }
 })
 $sortSyncGuard = @{ SuppressCombo = $false }
-$applySortMode = {
+$applySortMode = ({
 $listView.BeginUpdate()
 switch ($comboSort.SelectedIndex) {
 0 {
@@ -11511,7 +11582,7 @@ $listView.ListViewItemSorter = $sorter
 }
 & $reapplyAllRowShading
 $listView.EndUpdate()
-}
+}.GetNewClosure())
 $comboSort.Add_SelectedIndexChanged({
 if ($sortSyncGuard.SuppressCombo) { return }
 if ($comboSort.SelectedIndex -ge 0) {
@@ -11607,7 +11678,7 @@ $kernelRoleCatalog = @{
 "mouclass"  = @{ Name = "[OS] Mouse Class Driver";             Role = "USB";     Advice = "Follows USB XHCI / HID Core" }
 "kbdclass"  = @{ Name = "[OS] Keyboard Class Driver";          Role = "USB";     Advice = "Follows USB XHCI / HID Core" }
 }
-$refreshData = {
+$refreshData = ({
 $previouslyChecked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($chkIt in $listView.CheckedItems) {
 if ($null -ne $chkIt.Tag -and $null -ne $chkIt.Tag.ActionData -and $chkIt.Tag.ActionData.DevicePath) {
@@ -11669,7 +11740,7 @@ $rIdx++
 $listView.ListViewItemSorter = $sorter
 $listView.EndUpdate()
 & $applySortMode
-}
+}.GetNewClosure())
 &$refreshData
 $dpcState = @{ PrevCounts = $null; IsRunning = $true; LastSnap = $null }
 Update-UltixDpcMonitorUI -TargetLabel $lblDpcMonitor -State $dpcState
@@ -11842,7 +11913,7 @@ $lv.EndUpdate()
 $ctx.ChkOffload.Checked = $true
 if ($ctx.ComboPrio.SelectedIndex -eq 0) { $ctx.ComboPrio.SelectedIndex = 1 }
 })
-$getOffloadMaskBytes = {
+$getOffloadMaskBytes = ({
 [int64[]]$masks = Get-UltixPhysicalCoreMasks
 [uint64]$maskVal = if ($masks.Count -ge 2) {
 [uint64]$masks[1]
@@ -11855,8 +11926,8 @@ while ($len -gt 1 -and $fullBytes[$len - 1] -eq 0) { $len-- }
 [byte[]]$trimmed = New-Object byte[] $len
 [Array]::Copy($fullBytes, 0, $trimmed, 0, $len)
 return ,$trimmed
-}
-$getSafeBackupKeyName = {
+}.GetNewClosure())
+$getSafeBackupKeyName = ({
 param([string]$FullMsiPath)
 $relPciPath = $FullMsiPath -replace '^(?i).*?\\Enum\\', '' -replace '(?i)\\Device Parameters\\.*$', ''
 $b64Safe = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($relPciPath)).Replace('/', '_')
@@ -11867,7 +11938,7 @@ $md5.Dispose()
 return "PCI_$hash"
 }
 return $b64Safe
-}
+}.GetNewClosure())
 $btnForceMSI = New-UltixButton -Parent $modal -Text "Apply MSI & Policy" -X 15 -Y 706 -Width 185 -Height 40 -RGB @(150, 60, 60)
 $btnForceMSI.Anchor = 'Bottom, Left'
 $btnForceMSI.Add_Click({
@@ -12076,7 +12147,7 @@ $btnClear.Anchor = 'Bottom, Left'
 $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 285 -Y 405 -Width 120 -Height 38 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Left'
 $btnClose.DialogResult = "Cancel"
-$refreshData = {
+$refreshData = ({
 $uiModal    = $modal
 $uiListView = $listView
 $bgEven     = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
@@ -12130,7 +12201,7 @@ $lvItem.ForeColor = [System.Drawing.Color]::FromArgb(255, 145, 230, 165)
 }
 $uiListView.EndUpdate()
 }.GetNewClosure())
-}
+}.GetNewClosure())
 &$refreshData
 $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 $btnClear.Add_Click({
@@ -12219,7 +12290,7 @@ $lblCurrentTimer.Anchor = 'Bottom, Left, Right'
 $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 200); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
 $localData = New-Object System.Collections.ArrayList
 $testLockState = @{ IsLocked = $false }
-$updateTimerLabel = {
+$updateTimerLabel = ({
 param([System.Windows.Forms.Label]$Lbl)
 if ($null -eq $Lbl -or $Lbl.IsDisposed) { return }
 $tStats = Get-CurrentTimerResolution
@@ -12232,8 +12303,8 @@ $Lbl.ForeColor = [System.Drawing.Color]::Yellow
 } else {
 $Lbl.ForeColor = [System.Drawing.Color]::OrangeRed
 }
-}
-$refreshData = {
+}.GetNewClosure())
+$refreshData = ({
 $chkList.Items.Clear(); $localData.Clear()
 $auditData = Get-HardwareState_Timer
 foreach ($item in $auditData) {
@@ -12242,7 +12313,7 @@ if ($item.IsOptimized) { [void]$chkList.Items.Add("[ OPTIMIZED ]   " + $item.UID
 else { [void]$chkList.Items.Add("[ UNOPTIMIZED ] " + $item.UIDisplayName, $true) }
 }
 &$updateTimerLabel $lblCurrentTimer
-}
+}.GetNewClosure())
 &$refreshData
 $timerPoll = New-Object System.Windows.Forms.Timer
 $timerPoll.Interval = 500
@@ -12341,7 +12412,7 @@ $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; 
 $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] System reboot is strictly required to apply PCI bus and NVMe driver changes."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(630, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(630, 160); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
 $localData = New-Object System.Collections.ArrayList
-$refreshData = {
+$refreshData = ({
 $modal.UseWaitCursor = $true
 [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
 try {
@@ -12358,7 +12429,7 @@ $chkList.EndUpdate()
 $modal.UseWaitCursor = $false
 [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
-}
+}.GetNewClosure())
 &$refreshData
 $btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 258 -Width 195 -Height 38 -RGB @(150, 60, 60)
 $btnEngage.Anchor = 'Bottom, Left'
@@ -12987,14 +13058,14 @@ $chkShowHubs.ForeColor = [System.Drawing.Color]::LightGray
 $chkShowHubs.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 $chkShowHubs.Anchor = 'Bottom, Left'
 $chkShowHubs.Checked = $false
-$appendColored = {
+$appendColored = ({
 param([string]$Text, [System.Drawing.Color]$Color)
 $rtbMap.SelectionStart  = $rtbMap.TextLength
 $rtbMap.SelectionLength = 0
 $rtbMap.SelectionColor  = $Color
 $rtbMap.AppendText($Text)
-}
-$renderTopology = {
+}.GetNewClosure())
+$renderTopology = ({
 $rtbMap.Clear()
 & $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
 & $appendColored "QUICK WIRING GUIDE & HOW TO READ THIS TOPOLOGY MAP:`r`n" ([System.Drawing.Color]::Gold)
@@ -13041,7 +13112,7 @@ default     { [System.Drawing.Color]::LightGray;  break }
 }
 $rtbMap.SelectionStart = 0
 $rtbMap.ScrollToCaret()
-}
+}.GetNewClosure())
 &$renderTopology
 $chkShowHubs.Add_CheckedChanged({ &$renderTopology }.GetNewClosure())
 $btnRefresh = New-UltixButton -Parent $modal -Text "Rescan USB Tree (Live)" -X 15 -Y 590 -Width 200 -Height 35 -RGB @(60, 100, 150)
@@ -13141,7 +13212,7 @@ $lblDetail.Location = New-Object System.Drawing.Point(15, 315)
 $lblDetail.Size = New-Object System.Drawing.Size(715, 45)
 $lblDetail.ForeColor = [System.Drawing.Color]::Silver
 $lblDetail.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Italic)
-$refreshInfo = {
+$refreshInfo = ({
 $info = Get-QuantumSchedulerInfo
 $lblTelemetry.Text = "ACTIVE KERNEL STATE : $($info.HexValue) ($($info.DecimalValue) dec) | 6-Bit Mask (AA|BB|CC): [$($info.BitMask)]`r`n" +
 "QUANTUM LENGTH      : $($info.LengthDesc)`r`n" +
@@ -13152,7 +13223,7 @@ $listBox.SelectedIndex = $i
 break
 }
 }
-}
+}.GetNewClosure())
 $listBox.Add_SelectedIndexChanged({
 if ($listBox.SelectedIndex -ge 0) {
 $lblDetail.Text = "Engineering Note: " + $profiles[$listBox.SelectedIndex].Desc

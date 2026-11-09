@@ -686,25 +686,51 @@ function Repair-TimeSynchronization {
 function Repair-UwpGamingRuntime {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
 
-    Write-GUI " -> Initiating UWP Shell, Store & Xbox Gaming Services First-Aid (Background Thread)..."
+    Write-GUI " -> Initiating UWP, Store, WinGet & Xbox Gaming Services First-Aid (Background Thread)..."
     Update-Progress 10
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         try {
-            $UltixSync.Progress = 20
-            $UltixSync.Logs.Enqueue(" -> [1/4] Verifying core UWP licensing, Delivery Optimization & Xbox Gaming Services...")
-            foreach ($svc in @("AppXSvc", "ClipSVC", "StateRepository", "LicenseManager", "InstallService", "dosvc", "wuauserv", "GamingServices", "GamingServicesNet")) {
+            $UltixSync.Progress = 15
+            $UltixSync.Logs.Enqueue(" -> [1/4] Unlocking & starting UWP, Delivery Optimization (DoSvc) & Xbox Gaming Services...")
+            $svcMap = [ordered]@{
+                "AppXSvc"             = 3
+                "ClipSVC"             = 3
+                "StateRepository"     = 3
+                "LicenseManager"      = 3
+                "InstallService"      = 3
+                "TokenBroker"         = 3
+                "wlidsvc"             = 3
+                "NlaSvc"              = 2
+                "netprofm"            = 3
+                "Wcmsvc"              = 2
+                "WinHttpAutoProxySvc" = 3
+                "dosvc"               = 2
+                "bits"                = 3
+                "wuauserv"            = 3
+                "GamingServices"      = 3
+                "GamingServicesNet"   = 3
+            }
+            foreach ($svc in $svcMap.Keys) {
                 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
                 if (Test-Path -LiteralPath $sPath) {
                     $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-                    $targetSt = if ($curSt -eq 4) { 3 } else { [int]$curSt }
+                    $targetSt = if ($curSt -eq 4 -or $svc -eq "dosvc") { $svcMap[$svc] } else { [int]$curSt }
                     Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService
                 }
             }
 
-            $UltixSync.Progress = 45
+            # Clear any accidental Deprovisioned registry locks blocking Store, WinGet, or Xbox packages
+            $deprovRoot = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
+            if (Test-Path -LiteralPath $deprovRoot) {
+                Get-ChildItem -LiteralPath $deprovRoot -ErrorAction SilentlyContinue | Where-Object {
+                    $_.PSChildName -match '(?i)(Winget|DesktopAppInstaller|WindowsStore|StorePurchaseApp|Xbox|GamingServices|VCLibs|UI\.Xaml|WindowsAppRuntime)'
+                } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            $UltixSync.Progress = 35
             $UltixSync.Logs.Enqueue(" -> [2/4] Flushing corrupted Microsoft Store LocalCache & running wsreset -i...")
-            Stop-Process -Name "WinStore.App", "StoreExperienceHost" -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name "WinStore.App", "StoreExperienceHost", "WindowsPackageManagerServer", "winget" -Force -ErrorAction SilentlyContinue
             $storeCache = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_*\LocalCache" -Directory -ErrorAction SilentlyContinue
             foreach ($dir in $storeCache) {
                 Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -712,16 +738,21 @@ function Repair-UwpGamingRuntime {
 
             $wsProc = Start-Process -FilePath "wsreset.exe" -ArgumentList "-i" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
             if ($null -ne $wsProc) {
-                try { $wsProc.WaitForExit(10000) | Out-Null } finally { $wsProc.Dispose() }
+                try { $wsProc.WaitForExit(6000) | Out-Null } finally { $wsProc.Dispose() }
             }
 
-            $UltixSync.Progress = 75
-            $UltixSync.Logs.Enqueue(" -> [3/4] Re-registering existing Shell, Store & Runtime AppxManifests (Preserving debloat state)...")
-            $corePattern = "WindowsStore|StorePurchaseApp|DesktopAppInstaller|XboxIdentityProvider|XboxGameCallableUI|GamingServices|SecHealthUI|WindowsDefender|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|Microsoft\.VCLibs|Microsoft\.UI\.Xaml|Microsoft\.WindowsAppRuntime"
+            $UltixSync.Progress = 50
+            $UltixSync.Logs.Enqueue(" -> [3/4] Re-registering Store, WinGet (DesktopAppInstaller) & Xbox manifests...")
+            # Strictly target Store, WinGet & Xbox packages (skipping running Shell hosts & 40+ redundant framework builds)
+            $corePattern = "^(?i).*(WindowsStore|StorePurchaseApp|DesktopAppInstaller|Winget\.Source|XboxIdentityProvider|XboxGameCallableUI|GamingServices)$"
             $targetPkgs  = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $corePattern })
 
             $reRegCount = 0
+            $pkgTotal   = [math]::Max(1, $targetPkgs.Count)
+            $pkgIdx     = 0
             foreach ($pkg in $targetPkgs) {
+                $pkgIdx++
+                $UltixSync.Progress = 50 + [int](($pkgIdx / $pkgTotal) * 25)
                 if (-not [string]::IsNullOrWhiteSpace($pkg.InstallLocation)) {
                     $manifest = Join-Path $pkg.InstallLocation "AppxManifest.xml"
                     if ([System.IO.File]::Exists($manifest)) {
@@ -732,9 +763,38 @@ function Repair-UwpGamingRuntime {
                     }
                 }
             }
+            $UltixSync.Logs.Enqueue("    [OK] Re-registered $reRegCount Store, WinGet & Xbox manifest(s).")
+
+            # Stage 4: Clear dead WinHTTP/WinINet proxy locks & repair WinGet repository index (source2.msix)
+            $UltixSync.Progress = 80
+            $UltixSync.Logs.Enqueue(" -> [4/4] Resetting WinHTTP proxy locks & repairing WinGet source index (source2.msix)...")
+            $null = & netsh.exe winhttp reset proxy 2>&1
+            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            $tmpMsix = Join-Path $env:TEMP "WinUltix_WingetSource2.msix"
+            try {
+                [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+                $wc = New-Object System.Net.WebClient
+                try {
+                    $wc.DownloadFile("https://cdn.winget.microsoft.com/cache/source2.msix", $tmpMsix)
+                } finally {
+                    $wc.Dispose()
+                }
+
+                $UltixSync.Progress = 92
+                if ([System.IO.File]::Exists($tmpMsix) -and ([System.IO.FileInfo]::new($tmpMsix)).Length -gt 1048576) {
+                    Add-AppxPackage -Path $tmpMsix -ForceApplicationShutdown -ErrorAction Stop
+                    $UltixSync.Logs.Enqueue("    [OK] Installed fresh WinGet v2 index package (source2.msix).")
+                }
+            } catch {
+                $UltixSync.Logs.Enqueue("    [!] WinGet source2.msix refresh notice: $($_.Exception.Message)")
+            } finally {
+                if (Test-Path -LiteralPath $tmpMsix) {
+                    Remove-Item -LiteralPath $tmpMsix -Force -ErrorAction SilentlyContinue
+                }
+            }
 
             $UltixSync.Progress = 100
-            $UltixSync.Logs.Enqueue(" -> [4/4] [OK] Re-registered $reRegCount core UWP/Gaming manifests and flushed Store cache.")
+            $UltixSync.Logs.Enqueue(" -> [OK] Store, WinGet & Xbox Gaming runtime repair completed.")
         } catch {
             $UltixSync.Logs.Enqueue(" [!] UWP & Gaming runtime repair failed: $($_.Exception.Message)")
         }

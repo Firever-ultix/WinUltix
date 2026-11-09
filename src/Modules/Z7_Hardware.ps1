@@ -1751,7 +1751,7 @@ function Show-AffinityModal {
     $bgOdd  = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
     $localData = New-Object System.Collections.ArrayList
 
-    $refreshData = {
+    $refreshData = ({
         $listView.BeginUpdate()
         $listView.Items.Clear(); $localData.Clear()
         $auditData = Get-HardwareState_Affinity
@@ -1778,7 +1778,7 @@ function Show-AffinityModal {
             $rIdx++
         }
         $listView.EndUpdate()
-    }
+    }.GetNewClosure())
     &$refreshData
     $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 
@@ -1811,7 +1811,7 @@ function Show-AffinityModal {
         }
     }.GetNewClosure())
 
-    $getDelta = {
+    $getDelta = ({
         $apply = @(); $remove = @()
         for ($i = 0; $i -lt $listView.Items.Count; $i++) {
             $item = $localData[$i]
@@ -1820,7 +1820,7 @@ function Show-AffinityModal {
             if ($isChecked -and -not $wasChecked) { $apply += $item } elseif (-not $isChecked -and $wasChecked) { $remove += $item }
         }
         return @{ Apply = $apply; Remove = $remove }
-    }
+    }.GetNewClosure())
 
     $btnSave = New-UltixButton -Parent $modal -Text "Save Roster" -X 15 -Y 594 -Width 150 -Height 38 -RGB @(60, 100, 150)
     $btnSave.Anchor = 'Bottom, Left'
@@ -1880,7 +1880,7 @@ function Show-CPPCModal {
     
     $localData = New-Object System.Collections.ArrayList
 
-    $refreshData = {
+    $refreshData = ({
         $chkList.Items.Clear(); $localData.Clear()
         $auditData = Get-HardwareState_CPPC
         foreach ($item in $auditData) {
@@ -1891,7 +1891,7 @@ function Show-CPPCModal {
                 [void]$chkList.Items.Add("[ HIDDEN ]   " + $item.UIDisplayName, $true)
             }
         }
-    }
+    }.GetNewClosure())
     &$refreshData 
 
     $btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 355 -Width 150 -Height 38 -RGB @(60, 100, 150)
@@ -2064,7 +2064,7 @@ function Show-MsiModal {
     [void]$listView.Columns.Add("IRQ Mask", 95)
     [void]$listView.Columns.Add("DPC Assessment", 244)
 
-    $styleMsiRow = {
+    $styleMsiRow = ({
         param(
             [System.Windows.Forms.ListViewItem]$LvItem,
             [int]$RowIndex,
@@ -2093,9 +2093,9 @@ function Show-MsiModal {
 
         if ($LvItem.BackColor -ne $targetBg) { $LvItem.BackColor = $targetBg }
         if ($LvItem.ForeColor -ne $targetFg) { $LvItem.ForeColor = $targetFg }
-    }
+    }.GetNewClosure())
 
-    $reapplyAllRowShading = {
+    $reapplyAllRowShading = ({
         for ($idx = 0; $idx -lt $listView.Items.Count; $idx++) {
             $it = $listView.Items[$idx]
             $dev = $it.Tag
@@ -2111,7 +2111,7 @@ function Show-MsiModal {
                 if ($it.BackColor -ne $newBg) { $it.BackColor = $newBg }
             }
         }
-    }
+    }.GetNewClosure())
 
     $listView.Add_ItemCheck({
         param($src, $e)
@@ -2123,7 +2123,7 @@ function Show-MsiModal {
 
     $sortSyncGuard = @{ SuppressCombo = $false }
 
-    $applySortMode = {
+    $applySortMode = ({
         $listView.BeginUpdate()
         switch ($comboSort.SelectedIndex) {
             0 {
@@ -2142,7 +2142,7 @@ function Show-MsiModal {
         }
         & $reapplyAllRowShading
         $listView.EndUpdate()
-    }
+    }.GetNewClosure())
 
     $comboSort.Add_SelectedIndexChanged({
         if ($sortSyncGuard.SuppressCombo) { return }
@@ -2248,7 +2248,7 @@ function Show-MsiModal {
         "kbdclass"  = @{ Name = "[OS] Keyboard Class Driver";          Role = "USB";     Advice = "Follows USB XHCI / HID Core" }
     }
 
-    $refreshData = {
+    $refreshData = ({
         $previouslyChecked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($chkIt in $listView.CheckedItems) {
             if ($null -ne $chkIt.Tag -and $null -ne $chkIt.Tag.ActionData -and $chkIt.Tag.ActionData.DevicePath) {
@@ -2316,7 +2316,7 @@ function Show-MsiModal {
         $listView.ListViewItemSorter = $sorter
         $listView.EndUpdate()
         & $applySortMode
-    }
+    }.GetNewClosure())
     &$refreshData
 
     $dpcState = @{ PrevCounts = $null; IsRunning = $true; LastSnap = $null }
@@ -2508,7 +2508,7 @@ function Show-MsiModal {
         if ($ctx.ComboPrio.SelectedIndex -eq 0) { $ctx.ComboPrio.SelectedIndex = 1 }
     })
 
-    $getOffloadMaskBytes = {
+    $getOffloadMaskBytes = ({
         [int64[]]$masks = Get-UltixPhysicalCoreMasks
         [uint64]$maskVal = if ($masks.Count -ge 2) {
             [uint64]$masks[1]
@@ -2521,9 +2521,9 @@ function Show-MsiModal {
         [byte[]]$trimmed = New-Object byte[] $len
         [Array]::Copy($fullBytes, 0, $trimmed, 0, $len)
         return ,$trimmed
-    }
+    }.GetNewClosure())
 
-    $getSafeBackupKeyName = {
+    $getSafeBackupKeyName = ({
         param([string]$FullMsiPath)
         $relPciPath = $FullMsiPath -replace '^(?i).*?\\Enum\\', '' -replace '(?i)\\Device Parameters\\.*$', ''
         $b64Safe = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($relPciPath)).Replace('/', '_')
@@ -2534,7 +2534,7 @@ function Show-MsiModal {
             return "PCI_$hash"
         }
         return $b64Safe
-    }
+    }.GetNewClosure())
 
     $btnForceMSI = New-UltixButton -Parent $modal -Text "Apply MSI & Policy" -X 15 -Y 706 -Width 185 -Height 40 -RGB @(150, 60, 60)
     $btnForceMSI.Anchor = 'Bottom, Left'
@@ -2772,7 +2772,7 @@ function Show-WHEAModal {
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
-    $refreshData = {
+    $refreshData = ({
         $uiModal    = $modal
         $uiListView = $listView
         $bgEven     = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
@@ -2833,7 +2833,7 @@ function Show-WHEAModal {
             }
             $uiListView.EndUpdate()
         }.GetNewClosure())
-    }
+    }.GetNewClosure())
     
     &$refreshData
     $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
@@ -2954,7 +2954,7 @@ function Show-TimerModal {
     $localData = New-Object System.Collections.ArrayList
     $testLockState = @{ IsLocked = $false }
 
-    $updateTimerLabel = {
+    $updateTimerLabel = ({
         param([System.Windows.Forms.Label]$Lbl)
         if ($null -eq $Lbl -or $Lbl.IsDisposed) { return }
         $tStats = Get-CurrentTimerResolution
@@ -2967,9 +2967,9 @@ function Show-TimerModal {
         } else {
             $Lbl.ForeColor = [System.Drawing.Color]::OrangeRed
         }
-    }
+    }.GetNewClosure())
 
-    $refreshData = {
+    $refreshData = ({
         $chkList.Items.Clear(); $localData.Clear()
         $auditData = Get-HardwareState_Timer
         foreach ($item in $auditData) {
@@ -2978,7 +2978,7 @@ function Show-TimerModal {
             else { [void]$chkList.Items.Add("[ UNOPTIMIZED ] " + $item.UIDisplayName, $true) }
         }
         &$updateTimerLabel $lblCurrentTimer
-    }
+    }.GetNewClosure())
     &$refreshData
 
     $timerPoll = New-Object System.Windows.Forms.Timer
@@ -3094,7 +3094,7 @@ function Show-NVMeModal {
     
     $localData = New-Object System.Collections.ArrayList
 
-    $refreshData = {
+    $refreshData = ({
         $modal.UseWaitCursor = $true
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
         try {
@@ -3111,7 +3111,7 @@ function Show-NVMeModal {
             $modal.UseWaitCursor = $false
             [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
         }
-    }
+    }.GetNewClosure())
     &$refreshData 
 
     $btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 258 -Width 195 -Height 38 -RGB @(150, 60, 60)
@@ -3802,15 +3802,15 @@ function Show-UsbTopologyModal {
     $chkShowHubs.Anchor = 'Bottom, Left'
     $chkShowHubs.Checked = $false
 
-    $appendColored = {
+    $appendColored = ({
         param([string]$Text, [System.Drawing.Color]$Color)
         $rtbMap.SelectionStart  = $rtbMap.TextLength
         $rtbMap.SelectionLength = 0
         $rtbMap.SelectionColor  = $Color
         $rtbMap.AppendText($Text)
-    }
+    }.GetNewClosure())
 
-    $renderTopology = {
+    $renderTopology = ({
         $rtbMap.Clear()
 
         # Render concise Engineering Mini-Guide at the top of the report
@@ -3862,7 +3862,7 @@ function Show-UsbTopologyModal {
         }
         $rtbMap.SelectionStart = 0
         $rtbMap.ScrollToCaret()
-    }
+    }.GetNewClosure())
 
     &$renderTopology
     $chkShowHubs.Add_CheckedChanged({ &$renderTopology }.GetNewClosure())
@@ -3982,7 +3982,7 @@ function Show-QuantumSchedulerModal {
     $lblDetail.ForeColor = [System.Drawing.Color]::Silver
     $lblDetail.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Italic)
 
-    $refreshInfo = {
+    $refreshInfo = ({
         $info = Get-QuantumSchedulerInfo
         $lblTelemetry.Text = "ACTIVE KERNEL STATE : $($info.HexValue) ($($info.DecimalValue) dec) | 6-Bit Mask (AA|BB|CC): [$($info.BitMask)]`r`n" +
                              "QUANTUM LENGTH      : $($info.LengthDesc)`r`n" +
@@ -3993,7 +3993,7 @@ function Show-QuantumSchedulerModal {
                 break
             }
         }
-    }
+    }.GetNewClosure())
 
     $listBox.Add_SelectedIndexChanged({
         if ($listBox.SelectedIndex -ge 0) {

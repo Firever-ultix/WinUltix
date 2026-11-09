@@ -323,8 +323,8 @@ function Set-CustomDNS {
                     Set-ItemProperty -LiteralPath $wkKey -Name "Template" -Value $cfg.Template -Type String -Force -ErrorAction SilentlyContinue
 
                     if ($hasDohCmd) {
-                        Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
-                        Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
+                        Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $true -AutoUpgrade $true -ErrorAction SilentlyContinue
+                        Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $true -AutoUpgrade $true -ErrorAction SilentlyContinue
                     }
 
                     $isV6 = ($ip -match ":")
@@ -535,7 +535,7 @@ function Initialize-Z5UI {
     $chkIPv6.Size = New-Object System.Drawing.Size(135, 22)
     $chkIPv6.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
     $chkIPv6.ForeColor = [System.Drawing.Color]::LightGray
-    $chkIPv6.Checked = $true
+    $chkIPv6.Checked = $false
 
     $comboDNS.Add_SelectedIndexChanged({
         $isStatic = ([string]$comboDNS.SelectedItem -ne "Default (DHCP)")

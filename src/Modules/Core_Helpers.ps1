@@ -1962,7 +1962,8 @@ function Set-ProtectedServiceStart {
     # Synchronize live in-memory SCM database (services.exe) via ChangeServiceConfigW & optionally start immediately
     if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
         [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
-    } elseif ($StartService.IsPresent -and $StartValue -ne 4) {
+    }
+    if ($StartService.IsPresent -and $StartValue -ne 4) {
         Start-Service -Name $ServiceName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     }
 }
@@ -3014,11 +3015,11 @@ function Show-ActionModal {
         $lblCount.Text = "Selected: 0 / 0"
     }
 
-    $updateCounter = {
+    $updateCounter = ({
         param([int]$Delta = 0)
         $totalChecked = $chkList.CheckedIndices.Count + $Delta
         $lblCount.Text = "Selected: $totalChecked / $($chkList.Items.Count)"
-    }
+    }.GetNewClosure())
 
     $chkList.Add_ItemCheck({
         param($src, $e)
@@ -3252,11 +3253,11 @@ function Show-UltixGridModal {
     $checkedIds = [System.Collections.Generic.HashSet[int]]::new()
     $syncGuard  = @{ SuppressEvents = $false }
 
-    $updateCounter = {
+    $updateCounter = ({
         $lblCount.Text = "Selected: $($checkedIds.Count) / $($indexedData.Count) (Showing: $($listView.Items.Count))"
-    }
+    }.GetNewClosure())
 
-    $applyRowShading = {
+    $applyRowShading = ({
         for ($r = 0; $r -lt $listView.Items.Count; $r++) {
             $it = $listView.Items[$r]
             $rowObj = $indexedData[[int]$it.Tag].Item
@@ -3271,9 +3272,9 @@ function Show-UltixGridModal {
                 $it.BackColor = if (($r % 2) -eq 0) { $bgEven } else { $bgOdd }
             }
         }
-    }
+    }.GetNewClosure())
 
-    $populateList = {
+    $populateList = ({
         param([string]$FilterText = "")
         $syncGuard.SuppressEvents = $true
         $listView.BeginUpdate()
@@ -3336,7 +3337,7 @@ function Show-UltixGridModal {
         $listView.EndUpdate()
         $syncGuard.SuppressEvents = $false
         & $updateCounter
-    }
+    }.GetNewClosure())
 
     $listView.Add_ItemCheck({
         param($src, $e)

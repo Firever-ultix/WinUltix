@@ -564,175 +564,7 @@ function Show-ServicesGrid {
         $fgStopped = [System.Drawing.Color]::FromArgb(255, 170, 188, 208)
         $fgMuted   = [System.Drawing.Color]::FromArgb(255, 125, 134, 145)
 
-        $state = @{
-            AllServices    = $initialSvcs
-            ServiceMap     = @{}
-            CheckedNames   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            SuppressEvents = $false
-        }
-
-        $rebuildMap = {
-            $state.ServiceMap.Clear()
-            foreach ($s in $state.AllServices) {
-                $state.ServiceMap[$s.Name] = $s
-            }
-        }
-        & $rebuildMap
-
-        $updateCounter = {
-            $lblCount.Text = "Selected: $($state.CheckedNames.Count) / $($state.AllServices.Count) (Shown: $($listView.Items.Count))"
-        }
-
-        $styleRow = {
-            param([System.Windows.Forms.ListViewItem]$It, [int]$RowIdx)
-            $obj = $state.ServiceMap[[string]$It.Tag]
-            if ($null -eq $obj) { return }
-            if ($obj.IsLocked) {
-                $It.BackColor = $bgLocked
-                $It.ForeColor = $fgLocked
-            } else {
-                $It.BackColor = if (($RowIdx % 2) -eq 0) { $bgEven } else { $bgOdd }
-                if ($obj.StartType -match "^Disabled") {
-                    $It.ForeColor = $fgMuted
-                } elseif ($obj.Status -eq "Running") {
-                    $It.ForeColor = $fgRunning
-                } else {
-                    $It.ForeColor = $fgStopped
-                }
-            }
-        }
-
-        $applyRowShading = {
-            for ($r = 0; $r -lt $listView.Items.Count; $r++) {
-                & $styleRow $listView.Items[$r] $r
-            }
-        }
-
-        $populateList = {
-            param([string]$FilterText = "")
-            $state.SuppressEvents = $true
-            $listView.BeginUpdate()
-            $listView.ListViewItemSorter = $null
-            $listView.Items.Clear()
-
-            $cleanFilter = $FilterText.Trim()
-            $visIdx = 0
-            foreach ($obj in $state.AllServices) {
-                if ($cleanFilter.Length -gt 0) {
-                    $matched = (
-                        $obj.Name.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                        $obj.DisplayName.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                        $obj.Status.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                        $obj.StartType.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-                    )
-                    if (-not $matched) { continue }
-                }
-
-                $lvItem = New-Object System.Windows.Forms.ListViewItem([string]$obj.Name)
-                [void]$lvItem.SubItems.Add([string]$obj.Status)
-                [void]$lvItem.SubItems.Add([string]$obj.StartType)
-                [void]$lvItem.SubItems.Add([string]$obj.DisplayName)
-                $lvItem.Tag = $obj.Name
-                $lvItem.Checked = (-not $obj.IsLocked) -and $state.CheckedNames.Contains($obj.Name)
-
-                & $styleRow $lvItem $visIdx
-                [void]$listView.Items.Add($lvItem)
-                $visIdx++
-            }
-
-            $listView.ListViewItemSorter = $sorter
-            if ($sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
-                $listView.Sort()
-                & $applyRowShading
-            }
-            $listView.EndUpdate()
-            $state.SuppressEvents = $false
-            & $updateCounter
-        }
-
-        $listView.Add_ItemCheck({
-            param($src, $e)
-            if ($state.SuppressEvents) { return }
-            $lvItem = $src.Items[$e.Index]
-            if ($null -ne $lvItem -and $null -ne $lvItem.Tag) {
-                $obj = $state.ServiceMap[[string]$lvItem.Tag]
-                if ($null -ne $obj -and $obj.IsLocked) {
-                    $e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
-                }
-            }
-        }.GetNewClosure())
-
-        $listView.Add_ItemChecked({
-            param($src, $e)
-            if ($state.SuppressEvents) { return }
-            $sName = [string]$e.Item.Tag
-            $obj   = $state.ServiceMap[$sName]
-            if ($null -ne $obj -and $obj.IsLocked) {
-                if ($e.Item.Checked) {
-                    $state.SuppressEvents = $true
-                    $e.Item.Checked = $false
-                    $state.SuppressEvents = $false
-                }
-                [void]$state.CheckedNames.Remove($sName)
-                return
-            }
-            if ($e.Item.Checked) {
-                [void]$state.CheckedNames.Add($sName)
-            } else {
-                [void]$state.CheckedNames.Remove($sName)
-            }
-            & $updateCounter
-        }.GetNewClosure())
-
-        $listView.Add_ColumnClick({
-            param($src, $e)
-            $listView.BeginUpdate()
-            if ($e.Column -eq $sorter.ColumnToSort) {
-                if ($sorter.OrderOfSort -eq [System.Windows.Forms.SortOrder]::Ascending) {
-                    $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending
-                } else {
-                    $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
-                }
-            } else {
-                $sorter.ColumnToSort = $e.Column
-                $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
-            }
-            $listView.Sort()
-            & $applyRowShading
-            $listView.EndUpdate()
-        }.GetNewClosure())
-
-        $txtSearch.Add_TextChanged({ & $populateList $txtSearch.Text }.GetNewClosure())
-
-        $btnSelVis.Add_Click({
-            $state.SuppressEvents = $true
-            $listView.BeginUpdate()
-            foreach ($lvItem in $listView.Items) {
-                $sName = [string]$lvItem.Tag
-                $obj   = $state.ServiceMap[$sName]
-                if ($null -ne $obj -and $obj.IsLocked) {
-                    $lvItem.Checked = $false
-                    continue
-                }
-                $lvItem.Checked = $true
-                [void]$state.CheckedNames.Add($sName)
-            }
-            $listView.EndUpdate()
-            $state.SuppressEvents = $false
-            & $updateCounter
-        }.GetNewClosure())
-
-        $btnSelNone.Add_Click({
-            $state.SuppressEvents = $true
-            $state.CheckedNames.Clear()
-            $listView.BeginUpdate()
-            foreach ($lvItem in $listView.Items) { $lvItem.Checked = $false }
-            $listView.EndUpdate()
-            $state.SuppressEvents = $false
-            & $updateCounter
-        }.GetNewClosure())
-
-        # 5 Dedicated Service Control Buttons + Close (Unified Segoe UI 9.5pt Bold)
+        # 5 Dedicated Service Control Buttons + Close
         $actionBtnFont = Get-UltixFont -Role "ModalAction"
 
         $btnStart = New-Object System.Windows.Forms.Button
@@ -798,38 +630,137 @@ function Show-ServicesGrid {
 
         $modalButtons = [System.Windows.Forms.Control[]]@($btnStart, $btnStop, $btnSetAuto, $btnSetManual, $btnSetDisabled, $btnSelVis, $btnSelNone, $btnRefresh)
 
-        $refreshLiveTable = {
-            $workerSb = (Get-Command -Name Get-SystemServicesTable_Worker).ScriptBlock
-            Invoke-AsyncTask -ControlsToDisable $modalButtons -ScriptBlock $workerSb -OnComplete ({
-                param($freshOut)
-                Update-Progress 0
-                if ($modal.IsDisposed -or $listView.IsDisposed) { return }
-                $state.AllServices = @($freshOut | Where-Object { $null -ne $_ })
-                & $rebuildMap
-                & $populateList $txtSearch.Text
-            }.GetNewClosure())
+        $state = @{
+            Modal          = $modal
+            ListView       = $listView
+            TxtSearch      = $txtSearch
+            LblCount       = $lblCount
+            Sorter         = $sorter
+            ModalButtons   = $modalButtons
+            BgEven         = $bgEven
+            BgOdd          = $bgOdd
+            BgLocked       = $bgLocked
+            FgRunning      = $fgRunning
+            FgLocked       = $fgLocked
+            FgStopped      = $fgStopped
+            FgMuted        = $fgMuted
+            AllServices    = $initialSvcs
+            ServiceMap     = @{}
+            CheckedNames   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            SuppressEvents = $false
         }
 
-        $btnRefresh.Add_Click({ & $refreshLiveTable }.GetNewClosure())
+        $state.RebuildMap = ({
+            $state.ServiceMap.Clear()
+            foreach ($s in $state.AllServices) {
+                $state.ServiceMap[$s.Name] = $s
+            }
+        }.GetNewClosure())
 
-        $invokeServiceAction = {
+        $state.UpdateCounter = ({
+            $state.LblCount.Text = "Selected: $($state.CheckedNames.Count) / $($state.AllServices.Count) (Shown: $($state.ListView.Items.Count))"
+        }.GetNewClosure())
+
+        $state.StyleRow = ({
+            param([System.Windows.Forms.ListViewItem]$It, [int]$RowIdx)
+            $obj = $state.ServiceMap[[string]$It.Tag]
+            if ($null -eq $obj) { return }
+            if ($obj.IsLocked) {
+                $It.BackColor = $state.BgLocked
+                $It.ForeColor = $state.FgLocked
+            } else {
+                $It.BackColor = if (($RowIdx % 2) -eq 0) { $state.BgEven } else { $state.BgOdd }
+                if ($obj.StartType -match "^Disabled") {
+                    $It.ForeColor = $state.FgMuted
+                } elseif ($obj.Status -eq "Running") {
+                    $It.ForeColor = $state.FgRunning
+                } else {
+                    $It.ForeColor = $state.FgStopped
+                }
+            }
+        }.GetNewClosure())
+
+        $state.ApplyRowShading = ({
+            for ($r = 0; $r -lt $state.ListView.Items.Count; $r++) {
+                & $state.StyleRow $state.ListView.Items[$r] $r
+            }
+        }.GetNewClosure())
+
+        $state.PopulateList = ({
+            param([string]$FilterText = "")
+            $state.SuppressEvents = $true
+            $lv = $state.ListView
+            $lv.BeginUpdate()
+            $lv.ListViewItemSorter = $null
+            $lv.Items.Clear()
+
+            $cleanFilter = $FilterText.Trim()
+            $visIdx = 0
+            foreach ($obj in $state.AllServices) {
+                if ($cleanFilter.Length -gt 0) {
+                    $matched = (
+                        $obj.Name.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $obj.DisplayName.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $obj.Status.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $obj.StartType.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                    )
+                    if (-not $matched) { continue }
+                }
+
+                $lvItem = New-Object System.Windows.Forms.ListViewItem([string]$obj.Name)
+                [void]$lvItem.SubItems.Add([string]$obj.Status)
+                [void]$lvItem.SubItems.Add([string]$obj.StartType)
+                [void]$lvItem.SubItems.Add([string]$obj.DisplayName)
+                $lvItem.Tag = $obj.Name
+                $lvItem.Checked = (-not $obj.IsLocked) -and $state.CheckedNames.Contains($obj.Name)
+
+                & $state.StyleRow $lvItem $visIdx
+                [void]$lv.Items.Add($lvItem)
+                $visIdx++
+            }
+
+            $lv.ListViewItemSorter = $state.Sorter
+            if ($state.Sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
+                $lv.Sort()
+                & $state.ApplyRowShading
+            }
+            $lv.EndUpdate()
+            $state.SuppressEvents = $false
+            & $state.UpdateCounter
+        }.GetNewClosure())
+
+        $state.RefreshLiveTable = ({
+            $st = $state
+            $workerSb = (Get-Command -Name Get-SystemServicesTable_Worker).ScriptBlock
+            Invoke-AsyncTask -ControlsToDisable $st.ModalButtons -ScriptBlock $workerSb -OnComplete ({
+                param($freshOut)
+                Update-Progress 0
+                if ($st.Modal.IsDisposed -or $st.ListView.IsDisposed) { return }
+                $st.AllServices = @($freshOut | Where-Object { $null -ne $_ })
+                & $st.RebuildMap
+                & $st.PopulateList $st.TxtSearch.Text
+            }.GetNewClosure())
+        }.GetNewClosure())
+
+        $state.InvokeServiceAction = ({
             param([ValidateSet("Start", "Stop", "Auto", "Manual", "Disabled")][string]$Mode)
+            $st = $state
 
-            if ($state.CheckedNames.Count -eq 0) {
+            if ($st.CheckedNames.Count -eq 0) {
                 [System.Windows.Forms.MessageBox]::Show("Check at least one service in the table first.", "WinUltix - System Services Manager") | Out-Null
                 return
             }
 
             $selectedItems = [System.Collections.Generic.List[object]]::new()
-            foreach ($sName in $state.CheckedNames) {
-                if ($state.ServiceMap.ContainsKey($sName)) {
-                    $obj = $state.ServiceMap[$sName]
+            foreach ($sName in $st.CheckedNames) {
+                if ($st.ServiceMap.ContainsKey($sName)) {
+                    $obj = $st.ServiceMap[$sName]
                     if (-not $obj.IsLocked) { $selectedItems.Add($obj) }
                 }
             }
             if ($selectedItems.Count -eq 0) { return }
 
-            Invoke-AsyncTask -ControlsToDisable $modalButtons -Arguments @(@($selectedItems), $Mode) -ScriptBlock {
+            Invoke-AsyncTask -ControlsToDisable $st.ModalButtons -Arguments @(@($selectedItems), $Mode) -ScriptBlock {
                 param([array]$Selected, [string]$OpMode)
                 $total   = $Selected.Count
                 $current = 0
@@ -847,7 +778,6 @@ function Show-ServicesGrid {
                     try {
                         switch ($OpMode) {
                             "Start" {
-                                # Auto-unlock if service or its Per-User master template is currently Disabled (Start = 4)
                                 $curStart  = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
                                 $baseStart = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
 
@@ -866,9 +796,9 @@ function Show-ServicesGrid {
                                     if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
                                         [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($sName, -1, $true)
                                     }
+                                    Start-Service -Name $sName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                                 }
 
-                                Start-Service -Name $sName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                                 $curStatus = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
                                 $UltixSync.Logs.Enqueue("    [OK] ${sName} -> Status: $curStatus.")
                             }
@@ -906,7 +836,6 @@ function Show-ServicesGrid {
                                     if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
                                         Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
                                     }
-                                    # Clear DelayedAutostart flag when switching explicitly to Manual or Disabled
                                     if ($targetStart -in @(3, 4)) {
                                         Remove-ItemProperty -LiteralPath $baseRegPath -Name "DelayedAutostart" -Force -ErrorAction SilentlyContinue
                                     }
@@ -930,17 +859,102 @@ function Show-ServicesGrid {
                 }
             } -OnComplete ({
                 param($nullOut)
-                & $refreshLiveTable
+                & $st.RefreshLiveTable
             }.GetNewClosure())
-        }
+        }.GetNewClosure())
 
-        $btnStart.Add_Click({ & $invokeServiceAction "Start" }.GetNewClosure())
-        $btnStop.Add_Click({ & $invokeServiceAction "Stop" }.GetNewClosure())
-        $btnSetAuto.Add_Click({ & $invokeServiceAction "Auto" }.GetNewClosure())
-        $btnSetManual.Add_Click({ & $invokeServiceAction "Manual" }.GetNewClosure())
-        $btnSetDisabled.Add_Click({ & $invokeServiceAction "Disabled" }.GetNewClosure())
+        & $state.RebuildMap
 
-        & $populateList ""
+        $listView.Add_ItemCheck({
+            param($src, $e)
+            if ($state.SuppressEvents) { return }
+            $lvItem = $src.Items[$e.Index]
+            if ($null -ne $lvItem -and $null -ne $lvItem.Tag) {
+                $obj = $state.ServiceMap[[string]$lvItem.Tag]
+                if ($null -ne $obj -and $obj.IsLocked) {
+                    $e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
+                }
+            }
+        }.GetNewClosure())
+
+        $listView.Add_ItemChecked({
+            param($src, $e)
+            if ($state.SuppressEvents) { return }
+            $sName = [string]$e.Item.Tag
+            $obj   = $state.ServiceMap[$sName]
+            if ($null -ne $obj -and $obj.IsLocked) {
+                if ($e.Item.Checked) {
+                    $state.SuppressEvents = $true
+                    $e.Item.Checked = $false
+                    $state.SuppressEvents = $false
+                }
+                [void]$state.CheckedNames.Remove($sName)
+                return
+            }
+            if ($e.Item.Checked) {
+                [void]$state.CheckedNames.Add($sName)
+            } else {
+                [void]$state.CheckedNames.Remove($sName)
+            }
+            & $state.UpdateCounter
+        }.GetNewClosure())
+
+        $listView.Add_ColumnClick({
+            param($src, $e)
+            $state.ListView.BeginUpdate()
+            if ($e.Column -eq $state.Sorter.ColumnToSort) {
+                if ($state.Sorter.OrderOfSort -eq [System.Windows.Forms.SortOrder]::Ascending) {
+                    $state.Sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending
+                } else {
+                    $state.Sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+                }
+            } else {
+                $state.Sorter.ColumnToSort = $e.Column
+                $state.Sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+            }
+            $state.ListView.Sort()
+            & $state.ApplyRowShading
+            $state.ListView.EndUpdate()
+        }.GetNewClosure())
+
+        $txtSearch.Add_TextChanged({ & $state.PopulateList $state.TxtSearch.Text }.GetNewClosure())
+
+        $btnSelVis.Add_Click({
+            $state.SuppressEvents = $true
+            $state.ListView.BeginUpdate()
+            foreach ($lvItem in $state.ListView.Items) {
+                $sName = [string]$lvItem.Tag
+                $obj   = $state.ServiceMap[$sName]
+                if ($null -ne $obj -and $obj.IsLocked) {
+                    $lvItem.Checked = $false
+                    continue
+                }
+                $lvItem.Checked = $true
+                [void]$state.CheckedNames.Add($sName)
+            }
+            $state.ListView.EndUpdate()
+            $state.SuppressEvents = $false
+            & $state.UpdateCounter
+        }.GetNewClosure())
+
+        $btnSelNone.Add_Click({
+            $state.SuppressEvents = $true
+            $state.CheckedNames.Clear()
+            $state.ListView.BeginUpdate()
+            foreach ($lvItem in $state.ListView.Items) { $lvItem.Checked = $false }
+            $state.ListView.EndUpdate()
+            $state.SuppressEvents = $false
+            & $state.UpdateCounter
+        }.GetNewClosure())
+
+        $btnRefresh.Add_Click({ & $state.RefreshLiveTable }.GetNewClosure())
+        $btnStart.Add_Click({ & $state.InvokeServiceAction "Start" }.GetNewClosure())
+        $btnStop.Add_Click({ & $state.InvokeServiceAction "Stop" }.GetNewClosure())
+        $btnSetAuto.Add_Click({ & $state.InvokeServiceAction "Auto" }.GetNewClosure())
+        $btnSetManual.Add_Click({ & $state.InvokeServiceAction "Manual" }.GetNewClosure())
+        $btnSetDisabled.Add_Click({ & $state.InvokeServiceAction "Disabled" }.GetNewClosure())
+
+        & $state.PopulateList ""
 
         $modal.Controls.AddRange(@(
             $lblDesc, $lblSearch, $txtSearch, $btnSelVis, $btnSelNone, $btnRefresh, $lblCount,
