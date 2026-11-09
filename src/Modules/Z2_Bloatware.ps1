@@ -1110,7 +1110,7 @@ function Invoke-RemoveCapabilityStubs {
 }
 
 # ------------------------------------------
-# Z2: MANUAL INTERACTIVE INSPECTOR GRIDS (MOVED FROM Z5)
+# Z2: MANUAL INTERACTIVE INSPECTOR GRIDS
 # ------------------------------------------
 function Show-AppxGrid {
     param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
@@ -1433,7 +1433,7 @@ function Initialize-Z2UI {
 
     # 1. OneDrive Amputation
     $rowOneDrive = New-UltixActionRow -Parent $tabApps -Y 20 -MainRGB @(55, 58, 64) `
-        -Text "Uninstall and Deprovision OneDrive" `
+        -Text "Uninstall & Deprovision OneDrive" `
         -Description "Completely uninstalls OneDrive, burns its keys across all loaded HKEY_USERS hives, and physically deletes folders across all user profiles." `
         -AuditDescription "AUDIT: Scans for active OneDrive installers, multi-profile HKEY_USERS startup keys, and residual folders." `
         -OnClick ({
@@ -1493,9 +1493,9 @@ function Initialize-Z2UI {
 
     # 6. Manual Package & Feature Inspectors (Sortable Grids)
     $lblInspect = New-Object System.Windows.Forms.Label
-    $lblInspect.Text = "Manual Package & Feature Inspectors (Sortable Grids)"
+    $lblInspect.Text = "Manual Package & Feature Inspectors"
     $lblInspect.Location = New-Object System.Drawing.Point(15, 272)
-    $lblInspect.Size = New-Object System.Drawing.Size(370, 18)
+    $lblInspect.Size = New-Object System.Drawing.Size(380, 20)
     $lblInspect.ForeColor = [System.Drawing.Color]::DarkGray
     $lblInspect.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 
@@ -1527,7 +1527,7 @@ function Initialize-Z2UI {
 
     $btnOptGrid = New-UltixButton -Parent $tabApps -X 205 -Y 392 -Width 180 -Height 40 -RGB @(45, 85, 125) `
         -Text "Optional Features (DISM)" `
-        -Description "MANUAL INSPECTOR: Scans enabled Windows Optional Features (SMB1, Hypervisor, Legacy Components) for selective disabling." `
+        -Description "MANUAL INSPECTOR: Inspect and symmetrically Enable or Disable Windows Optional Features (Hyper-V, WSL, Sandbox, SMB1). Core .NET 4.8 is locked." `
         -OnClick ({ Show-OptFeaturesGrid -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     foreach ($row in @($rowOneDrive, $rowBloat, $rowCaps, $rowGC, $rowStubs)) {

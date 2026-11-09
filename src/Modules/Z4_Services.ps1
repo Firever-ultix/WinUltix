@@ -173,9 +173,9 @@ function Get-ServicesState_Heavy {
 
         # Updates, Edge Updaters & Delivery Optimization
         @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Updates: Delivery Optimization P2P (DoSvc)"; Name = "DoSvc"; ExpectedStart = 3; DefaultStart = 2 }
-        @{ UIDisplayName = "Edge: Edge Update Service (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2 }
-        @{ UIDisplayName = "Edge: Edge Update Service M (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Updates: Delivery Optimization P2P - Used by WinGet/Store msstore downloads (DoSvc)"; Name = "DoSvc"; ExpectedStart = 3; DefaultStart = 2; OptIn = $true }
+        @{ UIDisplayName = "Edge: Edge Update Service - Required by WinGet for Edge/WebView2 updates (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2; OptIn = $true }
+        @{ UIDisplayName = "Edge: Edge Update Service M - Required by WinGet for Edge/WebView2 updates (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 
         # Memory, Search Indexer, File System & Backup Overhead
         @{ UIDisplayName = "Performance: SysMain / Superfetch - Disables RAM caching (SysMain)"; Name = "SysMain"; ExpectedStart = 4; DefaultStart = 2 }
@@ -382,11 +382,11 @@ function Invoke-ApplyServices {
 }
 
 # ------------------------------------------
-# Z4: INTERACTIVE SERVICES, TASKS & STARTUP MANAGERS (MOVED FROM Z5)
+# Z4: INTERACTIVE SERVICES, TASKS & STARTUP MANAGERS
 # ------------------------------------------
 function Get-SystemServicesTable_Worker {
-    # Critical kernel/SCM/RPC/Storage/Shell/Security services protected from modification
-    $criticalServices = "^(?i)(RpcSs|DcomLaunch|RpcEptMapper|LSM|SamSs|PlugPlay|EventLog|BFE|mpssvc|nsi|ProfSvc|gpsvc|CryptSvc|TrustedInstaller|WinDefend|WdNisSvc|MpDefenderCoreService|SecurityHealthService|wscsvc|Dhcp|Dnscache|Winmgmt|Schedule|UserManager|CoreMessagingRegistrar|SystemEventsBroker|Power|BrokerInfrastructure|Appinfo|StateRepository|TextInputManagementService|TimeBrokerSvc|ClipSVC|AppIDSvc|KeyIso|VaultSvc|Netlogon|LanmanWorkstation|LanmanServer|Wcmsvc|NlaSvc|AudioSrv|AudioEndpointBuilder|MMCSS|FontCache|StorSvc|vds|volmgr|partmgr|mountmgr|stornvme|storahci|Ntfs|FltMgr|Tcpip|AFD)$"
+    # Critical kernel/SCM/RPC/Storage/Shell/Security/AppX services protected from modification
+    $criticalServices = "^(?i)(RpcSs|DcomLaunch|RpcEptMapper|LSM|SamSs|PlugPlay|EventLog|BFE|mpssvc|nsi|ProfSvc|gpsvc|CryptSvc|TrustedInstaller|WinDefend|WdNisSvc|MpDefenderCoreService|SecurityHealthService|wscsvc|Dhcp|Dnscache|Winmgmt|Schedule|UserManager|CoreMessagingRegistrar|SystemEventsBroker|Power|BrokerInfrastructure|Appinfo|AppXSvc|StateRepository|TextInputManagementService|TimeBrokerSvc|ClipSVC|AppIDSvc|KeyIso|VaultSvc|Netlogon|LanmanWorkstation|LanmanServer|Wcmsvc|NlaSvc|AudioSrv|AudioEndpointBuilder|MMCSS|FontCache|StorSvc|vds|volmgr|partmgr|mountmgr|stornvme|storahci|Ntfs|FltMgr|Tcpip|AFD)$"
     
     $svcRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
     $rawServices = @(Get-Service -ErrorAction SilentlyContinue)
@@ -474,66 +474,72 @@ function Show-ServicesGrid {
 
         $lblDesc = New-Object System.Windows.Forms.Label
         $lblDesc.Text = "Full live control over Windows Services. 'Start' automatically unlocks Disabled (Start=4) services to Manual before starting. Critical OS services (Red) are locked."
-        $lblDesc.Location = New-Object System.Drawing.Point(15, 12)
-        $lblDesc.Size = New-Object System.Drawing.Size(935, 32)
-        $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9.8)
-        $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 215, 220, 228)
+        $lblDesc.UseMnemonic = $false
+        $lblDesc.Location = New-Object System.Drawing.Point(15, 10)
+        $lblDesc.Size = New-Object System.Drawing.Size(935, 38)
+        $lblDesc.Font = Get-UltixFont -Role "ModalDesc"
+        $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
         $lblDesc.Anchor = 'Top, Left, Right'
+
+        $toolbarFont = Get-UltixFont -Role "ToolbarButton"
 
         $lblSearch = New-Object System.Windows.Forms.Label
         $lblSearch.Text = "Filter:"
-        $lblSearch.Location = New-Object System.Drawing.Point(15, 52)
-        $lblSearch.Size = New-Object System.Drawing.Size(48, 22)
-        $lblSearch.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $lblSearch.Location = New-Object System.Drawing.Point(15, 55)
+        $lblSearch.Size = New-Object System.Drawing.Size(52, 22)
+        $lblSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10.0, [System.Drawing.FontStyle]::Bold)
         $lblSearch.ForeColor = [System.Drawing.Color]::LightSkyBlue
 
         $txtSearch = New-Object System.Windows.Forms.TextBox
-        $txtSearch.Location = New-Object System.Drawing.Point(65, 50)
-        $txtSearch.Size = New-Object System.Drawing.Size(270, 25)
+        $txtSearch.Location = New-Object System.Drawing.Point(68, 52)
+        $txtSearch.Size = New-Object System.Drawing.Size(255, 26)
         $txtSearch.BackColor = [System.Drawing.Color]::FromArgb(255, 38, 40, 45)
         $txtSearch.ForeColor = [System.Drawing.Color]::White
         $txtSearch.BorderStyle = "FixedSingle"
-        $txtSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $txtSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10.5)
 
         $btnSelVis = New-Object System.Windows.Forms.Button
         $btnSelVis.Text = "Select Visible"
-        $btnSelVis.Location = New-Object System.Drawing.Point(345, 49)
-        $btnSelVis.Size = New-Object System.Drawing.Size(110, 26)
+        $btnSelVis.Location = New-Object System.Drawing.Point(332, 50)
+        $btnSelVis.Size = New-Object System.Drawing.Size(120, 30)
         $btnSelVis.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+        $btnSelVis.ForeColor = [System.Drawing.Color]::White
         $btnSelVis.FlatStyle = "Flat"
-        $btnSelVis.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+        $btnSelVis.Font = $toolbarFont
 
         $btnSelNone = New-Object System.Windows.Forms.Button
         $btnSelNone.Text = "Deselect All"
-        $btnSelNone.Location = New-Object System.Drawing.Point(462, 49)
-        $btnSelNone.Size = New-Object System.Drawing.Size(110, 26)
+        $btnSelNone.Location = New-Object System.Drawing.Point(459, 50)
+        $btnSelNone.Size = New-Object System.Drawing.Size(120, 30)
         $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+        $btnSelNone.ForeColor = [System.Drawing.Color]::White
         $btnSelNone.FlatStyle = "Flat"
-        $btnSelNone.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+        $btnSelNone.Font = $toolbarFont
 
         $btnRefresh = New-Object System.Windows.Forms.Button
         $btnRefresh.Text = "Refresh Table"
-        $btnRefresh.Location = New-Object System.Drawing.Point(579, 49)
-        $btnRefresh.Size = New-Object System.Drawing.Size(110, 26)
+        $btnRefresh.Location = New-Object System.Drawing.Point(586, 50)
+        $btnRefresh.Size = New-Object System.Drawing.Size(120, 30)
         $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+        $btnRefresh.ForeColor = [System.Drawing.Color]::White
         $btnRefresh.FlatStyle = "Flat"
-        $btnRefresh.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+        $btnRefresh.Font = $toolbarFont
 
         $lblCount = New-Object System.Windows.Forms.Label
-        $lblCount.Location = New-Object System.Drawing.Point(695, 52)
-        $lblCount.Size = New-Object System.Drawing.Size(255, 20)
-        $lblCount.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+        $lblCount.Location = New-Object System.Drawing.Point(710, 55)
+        $lblCount.Size = New-Object System.Drawing.Size(240, 22)
+        $lblCount.Font = New-Object System.Drawing.Font("Consolas", 10.0, [System.Drawing.FontStyle]::Bold)
         $lblCount.ForeColor = [System.Drawing.Color]::LightGray
         $lblCount.TextAlign = "MiddleRight"
         $lblCount.Anchor = 'Top, Right'
 
         $listView = New-Object System.Windows.Forms.ListView
-        $listView.Location = New-Object System.Drawing.Point(15, 84)
-        $listView.Size = New-Object System.Drawing.Size(935, 504)
+        $listView.Location = New-Object System.Drawing.Point(15, 88)
+        $listView.Size = New-Object System.Drawing.Point(935, 500)
         $listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
         $listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
         $listView.BorderStyle = "FixedSingle"
-        $listView.Font = New-Object System.Drawing.Font("Segoe UI", 10.5)
+        $listView.Font = Get-UltixFont -Role "GridText"
         $listView.View = [System.Windows.Forms.View]::Details
         $listView.CheckBoxes = $true
         $listView.FullRowSelect = $true
@@ -726,7 +732,9 @@ function Show-ServicesGrid {
             & $updateCounter
         }.GetNewClosure())
 
-        # 5 Dedicated Service Control Buttons + Close (Aligned to 935px grid width: X=15..950)
+        # 5 Dedicated Service Control Buttons + Close (Unified Segoe UI 9.5pt Bold)
+        $actionBtnFont = Get-UltixFont -Role "ModalAction"
+
         $btnStart = New-Object System.Windows.Forms.Button
         $btnStart.Text = "Start"
         $btnStart.Location = New-Object System.Drawing.Point(15, 602)
@@ -734,7 +742,7 @@ function Show-ServicesGrid {
         $btnStart.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 95, 60)
         $btnStart.ForeColor = [System.Drawing.Color]::White
         $btnStart.FlatStyle = "Flat"
-        $btnStart.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnStart.Font = $actionBtnFont
         $btnStart.Anchor = 'Bottom, Left'
 
         $btnStop = New-Object System.Windows.Forms.Button
@@ -744,7 +752,7 @@ function Show-ServicesGrid {
         $btnStop.BackColor = [System.Drawing.Color]::FromArgb(255, 140, 85, 40)
         $btnStop.ForeColor = [System.Drawing.Color]::White
         $btnStop.FlatStyle = "Flat"
-        $btnStop.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnStop.Font = $actionBtnFont
         $btnStop.Anchor = 'Bottom, Left'
 
         $btnSetAuto = New-Object System.Windows.Forms.Button
@@ -754,7 +762,7 @@ function Show-ServicesGrid {
         $btnSetAuto.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSetAuto.ForeColor = [System.Drawing.Color]::White
         $btnSetAuto.FlatStyle = "Flat"
-        $btnSetAuto.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+        $btnSetAuto.Font = $actionBtnFont
         $btnSetAuto.Anchor = 'Bottom, Left'
 
         $btnSetManual = New-Object System.Windows.Forms.Button
@@ -764,7 +772,7 @@ function Show-ServicesGrid {
         $btnSetManual.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSetManual.ForeColor = [System.Drawing.Color]::White
         $btnSetManual.FlatStyle = "Flat"
-        $btnSetManual.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+        $btnSetManual.Font = $actionBtnFont
         $btnSetManual.Anchor = 'Bottom, Left'
 
         $btnSetDisabled = New-Object System.Windows.Forms.Button
@@ -774,7 +782,7 @@ function Show-ServicesGrid {
         $btnSetDisabled.BackColor = [System.Drawing.Color]::FromArgb(255, 135, 50, 50)
         $btnSetDisabled.ForeColor = [System.Drawing.Color]::White
         $btnSetDisabled.FlatStyle = "Flat"
-        $btnSetDisabled.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnSetDisabled.Font = $actionBtnFont
         $btnSetDisabled.Anchor = 'Bottom, Left'
 
         $btnClose = New-Object System.Windows.Forms.Button
@@ -784,6 +792,7 @@ function Show-ServicesGrid {
         $btnClose.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
         $btnClose.ForeColor = [System.Drawing.Color]::White
         $btnClose.FlatStyle = "Flat"
+        $btnClose.Font = $actionBtnFont
         $btnClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $btnClose.Anchor = 'Bottom, Right'
 

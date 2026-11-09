@@ -124,10 +124,6 @@ function Get-CPUTopologyProfile {
     return $script:UltixCpuTopology
 }
 
-function Test-CPUTopology {
-    return (Get-CPUTopologyProfile).IsSupported
-}
-
 function Get-KernelInterruptSnapshot {
     param([uint32[]]$PreviousCounts = $null)
 
@@ -706,7 +702,7 @@ function Get-HardwareState_IRQ {
                                 $devName = $shortCtrl
                             }
                         } elseif ($isUsb -and -not [string]::IsNullOrEmpty($bdfTag)) {
-                            $shortUsb = ($devName -replace '\s*[-–—]\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
+                            $shortUsb = ($devName -replace '\s*-\s*\d+[\.,]\d+\s*\(Microsoft\)', '' -replace '\s*\(Microsoft\)', '' -replace '(?i)eXtensible Host Controller', 'XHCI').Trim()
                             if ($shortUsb -notmatch '(?i)XHCI' -and $svcName -match '^(?i)USBXHCI$') {
                                 $shortUsb = "$shortUsb XHCI"
                             }
@@ -784,7 +780,7 @@ function Get-HardwareState_IRQ {
                                 $codecNames.Add($fallbackLabel)
                             }
 
-                            # Force compact 'HD Audio' prefix across all OS locales (replaces 52-char Polish 'Kontroler zgodny ze standardem High Definition Audio')
+                            # Force compact 'HD Audio' prefix across all OS locales
                             $shortAudio = if ($svcName -match '^(?i)HDAudBus$' -or $rawDevName -match '^(?i)@hdaudbus\.inf,' -or $devName -match '(?i)High Definition Audio') {
                                 "HD Audio"
                             } else {
@@ -1140,6 +1136,9 @@ function Get-HardwareState_Timer {
             $dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|True|1)")
             $platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|True|1)"))
         }
+    } else {
+        $dynTickOpt   = ($bcdVerbose -match "(?i)disabledynamictick\s+(Yes|True|1)")
+        $platClockOpt = (-not ($bcdVerbose -match "(?i)useplatformclock\s+(Yes|True|1)"))
     }
 
     $results.Add([PSCustomObject]@{
@@ -1437,8 +1436,8 @@ function Start-NetworkOptimizationAsync {
             }
 
             $data = $item.ActionData
-            $name = if ($data.ContainsKey("AdapterName")) { $data.AdapterName } elseif ($null -ne $data.Adapter) { $data.Adapter.Name } else { "" }
-            $guid = if ($data.ContainsKey("InterfaceGuid")) { $data.InterfaceGuid } elseif ($null -ne $data.Adapter) { $data.Adapter.InterfaceGuid } else { "Global" }
+            $name = if ($data.ContainsKey("AdapterName")) { [string]$data.AdapterName } else { "" }
+            $guid = if ($data.ContainsKey("InterfaceGuid")) { [string]$data.InterfaceGuid } else { "Global" }
             $bKey = "$backupRoot\$guid"
 
             if ($Operation -eq 'Apply') {
@@ -1727,7 +1726,7 @@ function Show-AffinityModal {
 
     $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(650, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
     
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh List" -X 715 -Y 15 -Width 100 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh List" -X 700 -Y 15 -Width 115 -Height 35 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Top, Right'
 
     $listView = New-Object System.Windows.Forms.ListView
@@ -1784,7 +1783,7 @@ function Show-AffinityModal {
     $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 
     $txtCustom = New-Object System.Windows.Forms.TextBox; $txtCustom.Location = New-Object System.Drawing.Point(15, 555); $txtCustom.Size = New-Object System.Drawing.Size(250, 25); $txtCustom.BackColor = [System.Drawing.Color]::FromArgb(255, 38, 40, 45); $txtCustom.ForeColor = [System.Drawing.Color]::White; $txtCustom.BorderStyle = "FixedSingle"; $txtCustom.Font = New-Object System.Drawing.Font("Segoe UI", 10); $txtCustom.Anchor = 'Bottom, Left'
-    $btnAddExe = New-UltixButton -Parent $modal -Text "+ Add Custom .exe" -X 275 -Y 554 -Width 140 -Height 27 -RGB @(60, 60, 60)
+    $btnAddExe = New-UltixButton -Parent $modal -Text "+ Add Custom .exe" -X 275 -Y 553 -Width 155 -Height 30 -RGB @(60, 60, 60)
     $btnAddExe.Anchor = 'Bottom, Left'
     $btnAddExe.Add_Click({
         $exe = $txtCustom.Text.Trim()
@@ -1797,7 +1796,7 @@ function Show-AffinityModal {
         } else { [System.Windows.Forms.MessageBox]::Show("Process must end with .exe", "Invalid Input") }
     }.GetNewClosure())
 
-    $btnDelExe = New-UltixButton -Parent $modal -Text "- Remove Selected" -X 425 -Y 554 -Width 140 -Height 27 -RGB @(100, 60, 60)
+    $btnDelExe = New-UltixButton -Parent $modal -Text "- Remove Selected" -X 438 -Y 553 -Width 165 -Height 30 -RGB @(100, 60, 60)
     $btnDelExe.Anchor = 'Bottom, Left'
     $btnDelExe.Add_Click({
         $toRemove = @()
@@ -1823,7 +1822,7 @@ function Show-AffinityModal {
         return @{ Apply = $apply; Remove = $remove }
     }
 
-    $btnSave = New-UltixButton -Parent $modal -Text "Save Roster" -X 15 -Y 595 -Width 150 -Height 35 -RGB @(60, 100, 150)
+    $btnSave = New-UltixButton -Parent $modal -Text "Save Roster" -X 15 -Y 594 -Width 150 -Height 38 -RGB @(60, 100, 150)
     $btnSave.Anchor = 'Bottom, Left'
     $btnSave.Add_Click({
         $delta = &$getDelta
@@ -1832,7 +1831,7 @@ function Show-AffinityModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE (Lock)" -X 175 -Y 595 -Width 150 -Height 35 -RGB @(150, 60, 60)
+    $btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE (Lock)" -X 173 -Y 594 -Width 165 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
         $delta = &$getDelta
@@ -1844,14 +1843,14 @@ function Show-AffinityModal {
         &$refreshData 
     }.GetNewClosure())
 
-    $btnRelease = New-UltixButton -Parent $modal -Text "RELEASE (Unlock)" -X 335 -Y 595 -Width 150 -Height 35 -RGB @(150, 100, 60)
+    $btnRelease = New-UltixButton -Parent $modal -Text "RELEASE (Unlock)" -X 346 -Y 594 -Width 170 -Height 38 -RGB @(150, 100, 60)
     $btnRelease.Anchor = 'Bottom, Left'
     $btnRelease.Add_Click({
         Remove-AppAffinity -SelectedItems $localData -Execute $true -KeepConfig $true
         &$refreshData 
     }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 495 -Y 595 -Width 120 -Height 35 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 524 -Y 594 -Width 120 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
@@ -1895,7 +1894,7 @@ function Show-CPPCModal {
     }
     &$refreshData 
 
-    $btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 355 -Width 120 -Height 35 -RGB @(60, 100, 150)
+    $btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 355 -Width 150 -Height 38 -RGB @(60, 100, 150)
     $btnUnhide.Anchor = 'Bottom, Left'
     $btnUnhide.Add_Click({
         $toUnhide = @()
@@ -1906,21 +1905,21 @@ function Show-CPPCModal {
         &$refreshData 
     }.GetNewClosure())
 
-    $btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE Max CPPC" -X 145 -Y 355 -Width 150 -Height 35 -RGB @(150, 60, 60)
+    $btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE Max CPPC" -X 173 -Y 355 -Width 175 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
         Set-UltixCPPCState -Mode 'Engage'
         &$refreshData
     }.GetNewClosure())
 
-    $btnRelease = New-UltixButton -Parent $modal -Text "RELEASE CPPC" -X 305 -Y 355 -Width 130 -Height 35 -RGB @(150, 100, 60)
+    $btnRelease = New-UltixButton -Parent $modal -Text "RELEASE CPPC" -X 356 -Y 355 -Width 150 -Height 38 -RGB @(150, 100, 60)
     $btnRelease.Anchor = 'Bottom, Left'
     $btnRelease.Add_Click({
         Set-UltixCPPCState -Mode 'Release'
         &$refreshData
     }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 445 -Y 355 -Width 120 -Height 35 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 514 -Y 355 -Width 100 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
@@ -1936,9 +1935,9 @@ function Show-MsiModal {
     $modal.MinimumSize = New-Object System.Drawing.Size(1180, 700)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 10); $lblDesc.Size = New-Object System.Drawing.Size(1235, 22); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 10); $lblDesc.Size = New-Object System.Drawing.Size(1235, 24); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10.5); $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232); $lblDesc.Anchor = 'Top, Left, Right'
     
-    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] System reboot is strictly required to apply new MSI vectors, Interrupt Priority, and Core Affinity."; $lblWarning.Location = New-Object System.Drawing.Point(15, 34); $lblWarning.Size = New-Object System.Drawing.Size(1235, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] System reboot is strictly required to apply new MSI vectors, Interrupt Priority, and Core Affinity."; $lblWarning.Location = New-Object System.Drawing.Point(15, 35); $lblWarning.Size = New-Object System.Drawing.Size(1235, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
     $lblDpcMonitor = New-Object System.Windows.Forms.Label
     $lblDpcMonitor.Location = New-Object System.Drawing.Point(15, 58)
@@ -1952,27 +1951,28 @@ function Show-MsiModal {
     $lblDpcMonitor.Anchor = 'Top, Left, Right'
 
     $lblDpcLegend = New-Object System.Windows.Forms.Label
-    $lblDpcLegend.Text = "Metrics: Avg Load = Session average (µs/s) | Max = Worst single-call latency spike (µs) | 1s = Last second total (µs/s) | Colors: Orange (Max >=350 µs) | Red (Max >=1000 µs)"
+    $lblDpcLegend.UseMnemonic = $false
+    $lblDpcLegend.Text = "METRICS: Avg Load = Session average (µs/s) | Max = Worst single-call spike (µs) | 1s = Last second load (µs/s) | Alerts: Orange (>=350 µs) | Red (>=1000 µs)"
     $lblDpcLegend.Location = New-Object System.Drawing.Point(15, 145)
-    $lblDpcLegend.Size = New-Object System.Drawing.Size(1235, 18)
-    $lblDpcLegend.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Italic)
-    $lblDpcLegend.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblDpcLegend.Size = New-Object System.Drawing.Size(1235, 19)
+    $lblDpcLegend.Font = New-Object System.Drawing.Font("Consolas", 9.0, [System.Drawing.FontStyle]::Bold)
+    $lblDpcLegend.ForeColor = [System.Drawing.Color]::FromArgb(255, 210, 220, 232)
     $lblDpcLegend.Anchor = 'Top, Left, Right'
 
     $lblPrio = New-Object System.Windows.Forms.Label
     $lblPrio.Text = "Priority:"
-    $lblPrio.Location = New-Object System.Drawing.Point(15, 170)
+    $lblPrio.Location = New-Object System.Drawing.Point(15, 169)
     $lblPrio.Size = New-Object System.Drawing.Size(55, 22)
-    $lblPrio.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $lblPrio.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
     $lblPrio.ForeColor = [System.Drawing.Color]::LightSkyBlue
 
     $comboPrio = New-Object System.Windows.Forms.ComboBox
-    $comboPrio.Location = New-Object System.Drawing.Point(72, 167)
+    $comboPrio.Location = New-Object System.Drawing.Point(72, 166)
     $comboPrio.Size = New-Object System.Drawing.Size(140, 25)
     $comboPrio.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
     $comboPrio.ForeColor = [System.Drawing.Color]::White
     $comboPrio.DropDownStyle = "DropDownList"
-    $comboPrio.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $comboPrio.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
     [void]$comboPrio.Items.AddRange(@("Keep Current", "High (3)", "Normal (2)", "Low (1)", "Undefined (Default)"))
     $comboPrio.SelectedIndex = 0
 
@@ -1980,7 +1980,7 @@ function Show-MsiModal {
     $chkOffloadCore0.Text = "Offload C0 -> C1"
     $chkOffloadCore0.Location = New-Object System.Drawing.Point(222, 168)
     $chkOffloadCore0.Size = New-Object System.Drawing.Size(135, 24)
-    $chkOffloadCore0.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $chkOffloadCore0.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
     $chkOffloadCore0.ForeColor = [System.Drawing.Color]::LightGray
     $chkOffloadCore0.Checked = $false
 
@@ -1988,24 +1988,24 @@ function Show-MsiModal {
     $chkShowKernel.Text = "Show OS Kernel .sys"
     $chkShowKernel.Location = New-Object System.Drawing.Point(362, 168)
     $chkShowKernel.Size = New-Object System.Drawing.Size(150, 24)
-    $chkShowKernel.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $chkShowKernel.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
     $chkShowKernel.ForeColor = [System.Drawing.Color]::Cyan
     $chkShowKernel.Checked = $true
 
     $lblSort = New-Object System.Windows.Forms.Label
     $lblSort.Text = "Sort By:"
-    $lblSort.Location = New-Object System.Drawing.Point(518, 170)
-    $lblSort.Size = New-Object System.Drawing.Size(52, 22)
-    $lblSort.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $lblSort.Location = New-Object System.Drawing.Point(518, 169)
+    $lblSort.Size = New-Object System.Drawing.Size(55, 22)
+    $lblSort.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
     $lblSort.ForeColor = [System.Drawing.Color]::LightSkyBlue
 
     $comboSort = New-Object System.Windows.Forms.ComboBox
-    $comboSort.Location = New-Object System.Drawing.Point(572, 167)
-    $comboSort.Size = New-Object System.Drawing.Size(225, 25)
+    $comboSort.Location = New-Object System.Drawing.Point(575, 166)
+    $comboSort.Size = New-Object System.Drawing.Size(230, 25)
     $comboSort.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 45)
     $comboSort.ForeColor = [System.Drawing.Color]::White
     $comboSort.DropDownStyle = "DropDownList"
-    $comboSort.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $comboSort.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
     [void]$comboSort.Items.AddRange(@(
         "Default (Offload Advice ★)",
         "Avg Driver Load (µs/s) [Reliable]",
@@ -2016,12 +2016,12 @@ function Show-MsiModal {
     ))
     $comboSort.SelectedIndex = 0
 
-    $btnResetStats = New-UltixButton -Parent $modal -Text "Reset Stats" -X 940 -Y 166 -Width 110 -Height 27 -RGB @(65, 70, 78)
-    $btnResetStats.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+    $btnResetStats = New-UltixButton -Parent $modal -Text "Reset Stats" -X 925 -Y 164 -Width 120 -Height 29 -RGB @(65, 70, 78)
+    $btnResetStats.Font = Get-UltixFont -Role "ToolbarButton"
     $btnResetStats.Anchor = 'Top, Right'
 
-    $btnSelRec = New-UltixButton -Parent $modal -Text "Select ★ GPU/NIC" -X 1060 -Y 166 -Width 190 -Height 27 -RGB @(50, 85, 120)
-    $btnSelRec.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+    $btnSelRec = New-UltixButton -Parent $modal -Text "Select ★ GPU/NIC" -X 1055 -Y 164 -Width 195 -Height 29 -RGB @(50, 85, 120)
+    $btnSelRec.Font = Get-UltixFont -Role "ToolbarButton"
     $btnSelRec.Anchor = 'Top, Right'
 
     $listView = New-Object System.Windows.Forms.ListView
@@ -2056,13 +2056,13 @@ function Show-MsiModal {
     $listView.ListViewItemSorter = $sorter
 
     [void]$listView.Columns.Add("MSI", 78)
-    [void]$listView.Columns.Add("PCI Device / OS Subsystem", 275)
+    [void]$listView.Columns.Add("PCI Device / OS Subsystem", 265)
     [void]$listView.Columns.Add("Driver", 140)
     [void]$listView.Columns.Add("Avg (µs/s)", 100)
-    [void]$listView.Columns.Add("Peak | 1s Load", 206)
+    [void]$listView.Columns.Add("Peak | 1s Load", 220)
     [void]$listView.Columns.Add("Priority", 70)
     [void]$listView.Columns.Add("IRQ Mask", 95)
-    [void]$listView.Columns.Add("DPC Assessment", 248)
+    [void]$listView.Columns.Add("DPC Assessment", 244)
 
     $styleMsiRow = {
         param(
@@ -2536,7 +2536,7 @@ function Show-MsiModal {
         return $b64Safe
     }
 
-    $btnForceMSI = New-UltixButton -Parent $modal -Text "Apply MSI & Policy" -X 15 -Y 708 -Width 180 -Height 38 -RGB @(150, 60, 60)
+    $btnForceMSI = New-UltixButton -Parent $modal -Text "Apply MSI & Policy" -X 15 -Y 706 -Width 185 -Height 40 -RGB @(150, 60, 60)
     $btnForceMSI.Anchor = 'Bottom, Left'
     $btnForceMSI.Add_Click({
         if ($listView.CheckedItems.Count -eq 0) {
@@ -2627,7 +2627,7 @@ function Show-MsiModal {
         if ($changed -gt 0) { [System.Windows.Forms.MessageBox]::Show("Successfully configured MSI & IRQ policy for $changed device(s).`nOriginal states backed up.`nPlease reboot your PC.", "Reboot Required") }
     }.GetNewClosure())
 
-    $btnRevertMSI = New-UltixButton -Parent $modal -Text "Restore Original State" -X 205 -Y 708 -Width 190 -Height 38 -RGB @(100, 100, 100)
+    $btnRevertMSI = New-UltixButton -Parent $modal -Text "Restore Original State" -X 208 -Y 706 -Width 205 -Height 40 -RGB @(100, 100, 100)
     $btnRevertMSI.Anchor = 'Bottom, Left'
     $btnRevertMSI.Add_Click({
         if ($listView.CheckedItems.Count -eq 0) {
@@ -2707,19 +2707,20 @@ function Show-MsiModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 405 -Y 708 -Width 120 -Height 38 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 421 -Y 706 -Width 95 -Height 40 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
     $lblIrqLegend = New-Object System.Windows.Forms.Label
-    $lblIrqLegend.Text = "IRQ MASK : Default = Core 0 | 0x.. (C#) = Hex Thread Mask (e.g. 0xC = LP#2,3 -> Core 1) | Spread = All Cores`r`nKERNEL   : -> Mask = Inherited from PCI device | -> Mask* = Mixed PCI masks | All / C0 = OS Timer"
-    $lblIrqLegend.Location = New-Object System.Drawing.Point(538, 708)
-    $lblIrqLegend.Size = New-Object System.Drawing.Size(712, 38)
+    $lblIrqLegend.UseMnemonic = $false
+    $lblIrqLegend.Text = "IRQ MASK : Default = Core 0 | 0x.. (C#) = Hex Mask (e.g. 0xC -> Core 1) | Spread = All Cores`r`nKERNEL   : -> Mask = Inherited from PCI device | -> Mask* = Mixed masks | All / C0 = OS Timer"
+    $lblIrqLegend.Location = New-Object System.Drawing.Point(524, 706)
+    $lblIrqLegend.Size = New-Object System.Drawing.Size(726, 40)
     $lblIrqLegend.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 20, 20)
-    $lblIrqLegend.ForeColor = [System.Drawing.Color]::FromArgb(255, 175, 185, 195)
-    $lblIrqLegend.Font = New-Object System.Drawing.Font("Consolas", 8.2)
+    $lblIrqLegend.ForeColor = [System.Drawing.Color]::FromArgb(255, 210, 220, 232)
+    $lblIrqLegend.Font = New-Object System.Drawing.Font("Consolas", 9.0, [System.Drawing.FontStyle]::Bold)
     $lblIrqLegend.BorderStyle = "FixedSingle"
-    $lblIrqLegend.Padding = New-Object System.Windows.Forms.Padding(6, 3, 4, 2)
+    $lblIrqLegend.Padding = New-Object System.Windows.Forms.Padding(8, 4, 4, 2)
     $lblIrqLegend.Anchor = 'Bottom, Left, Right'
 
     $modal.Controls.AddRange(@($lblDesc, $lblWarning, $lblDpcMonitor, $lblDpcLegend, $lblPrio, $comboPrio, $chkOffloadCore0, $chkShowKernel, $lblSort, $comboSort, $listView, $lblIrqLegend))
@@ -2743,7 +2744,7 @@ function Show-WHEAModal {
     
     $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(650, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Scan Now" -X 715 -Y 15 -Width 100 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Scan Now" -X 705 -Y 15 -Width 110 -Height 35 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Top, Right'
 
     $listView = New-Object System.Windows.Forms.ListView
@@ -2764,10 +2765,10 @@ function Show-WHEAModal {
     $listView.Columns.Add("APIC ID", 120) | Out-Null
     $listView.Columns.Add("Error Source / Details", 405) | Out-Null
 
-    $btnClear = New-UltixButton -Parent $modal -Text "Wipe Logs (Prepare for Test)" -X 15 -Y 405 -Width 220 -Height 35 -RGB @(150, 60, 60)
+    $btnClear = New-UltixButton -Parent $modal -Text "Wipe Logs (Prepare for Test)" -X 15 -Y 405 -Width 260 -Height 38 -RGB @(150, 60, 60)
     $btnClear.Anchor = 'Bottom, Left'
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 245 -Y 405 -Width 120 -Height 35 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 285 -Y 405 -Width 120 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
@@ -2859,12 +2860,12 @@ function Show-NetworkModal {
     
     $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(480, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
-    $btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 515 -Y 48 -Width 100 -Height 26 -RGB @(50, 53, 58)
-    $btnSelAllNet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 495 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
+    $btnSelAllNet.Font = Get-UltixFont -Role "ToolbarButton"
     $btnSelAllNet.Anchor = 'Top, Right'
 
-    $btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 625 -Y 48 -Width 100 -Height 26 -RGB @(50, 53, 58)
-    $btnSelNoneNet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 615 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
+    $btnSelNoneNet.Font = Get-UltixFont -Role "ToolbarButton"
     $btnSelNoneNet.Anchor = 'Top, Right'
 
     $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 375); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
@@ -2883,16 +2884,16 @@ function Show-NetworkModal {
     
     $localData = New-Object System.Collections.ArrayList
 
-    $btnEngage  = New-UltixButton -Parent $modal -Text "Optimize Checked" -X 15 -Y 470 -Width 175 -Height 35 -RGB @(150, 60, 60)
+    $btnEngage  = New-UltixButton -Parent $modal -Text "Optimize Checked" -X 15 -Y 468 -Width 180 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
 
-    $btnRevert  = New-UltixButton -Parent $modal -Text "Restore Checked Defaults" -X 200 -Y 470 -Width 195 -Height 35 -RGB @(100, 100, 100)
+    $btnRevert  = New-UltixButton -Parent $modal -Text "Restore Checked Defaults" -X 203 -Y 468 -Width 225 -Height 38 -RGB @(100, 100, 100)
     $btnRevert.Anchor = 'Bottom, Left'
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 405 -Y 470 -Width 140 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 436 -Y 468 -Width 145 -Height 38 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Bottom, Left'
 
-    $btnClose   = New-UltixButton -Parent $modal -Text "Close" -X 555 -Y 470 -Width 120 -Height 35 -RGB @(60, 60, 60)
+    $btnClose   = New-UltixButton -Parent $modal -Text "Close" -X 589 -Y 468 -Width 135 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
@@ -2933,22 +2934,22 @@ function Show-TimerModal {
     param ([string]$Title, [string]$Description)
     
     $modal = New-Object System.Windows.Forms.Form
-    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(700, 410); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(700, 410)
+    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 415); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.MinimumSize = New-Object System.Drawing.Size(760, 415)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(650, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
     
-    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] BCD modifications require a system reboot to lock the TSC hardware timer."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(650, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] BCD modifications require a system reboot to lock the TSC hardware timer."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(710, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
     $lblCurrentTimer = New-Object System.Windows.Forms.Label
     $lblCurrentTimer.Location = New-Object System.Drawing.Point(15, 345)
-    $lblCurrentTimer.Size = New-Object System.Drawing.Size(650, 20)
+    $lblCurrentTimer.Size = New-Object System.Drawing.Size(710, 20)
     $lblCurrentTimer.Font = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Bold)
     $lblCurrentTimer.ForeColor = [System.Drawing.Color]::Yellow
     $lblCurrentTimer.Anchor = 'Bottom, Left, Right'
 	
-    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(650, 200); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 200); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
     
     $localData = New-Object System.Collections.ArrayList
     $testLockState = @{ IsLocked = $false }
@@ -2997,7 +2998,7 @@ function Show-TimerModal {
     })
     $timerPoll.Start()
 
-    $btnEngage = New-UltixButton -Parent $modal -Text "Enforce 0.5ms & TSC" -X 15 -Y 300 -Width 155 -Height 35 -RGB @(150, 60, 60)
+    $btnEngage = New-UltixButton -Parent $modal -Text "Enforce 0.5ms & TSC" -X 15 -Y 296 -Width 185 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
         $applyQueue = @()
@@ -3011,7 +3012,7 @@ function Show-TimerModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnRevert = New-UltixButton -Parent $modal -Text "Restore Defaults" -X 178 -Y 300 -Width 135 -Height 35 -RGB @(100, 100, 100)
+    $btnRevert = New-UltixButton -Parent $modal -Text "Restore Defaults" -X 208 -Y 296 -Width 155 -Height 38 -RGB @(100, 100, 100)
     $btnRevert.Anchor = 'Bottom, Left'
     $btnRevert.Add_Click({
         $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
@@ -3036,7 +3037,7 @@ function Show-TimerModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnTestPulse = New-UltixButton -Parent $modal -Text "Test 0.5ms Lock" -X 321 -Y 300 -Width 140 -Height 35 -RGB @(45, 110, 65)
+    $btnTestPulse = New-UltixButton -Parent $modal -Text "Test 0.5ms Lock" -X 371 -Y 296 -Width 155 -Height 38 -RGB @(45, 110, 65)
     $btnTestPulse.Anchor = 'Bottom, Left'
     $btnTestPulse.Add_Click({
         if (-not $testLockState.IsLocked) {
@@ -3055,11 +3056,11 @@ function Show-TimerModal {
         &$updateTimerLabel $lblCurrentTimer
     }.GetNewClosure())
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh" -X 469 -Y 300 -Width 90 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh" -X 534 -Y 296 -Width 95 -Height 38 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Bottom, Left'
     $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 567 -Y 300 -Width 98 -Height 35 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 637 -Y 296 -Width 88 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
@@ -3081,15 +3082,15 @@ function Show-NVMeModal {
     param ([string]$Title, [string]$Description)
     
     $modal = New-Object System.Windows.Forms.Form
-    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(650, 360); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(650, 360)
+    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(680, 365); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.MinimumSize = New-Object System.Drawing.Size(680, 365)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(600, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(630, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
 
-    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] System reboot is strictly required to apply PCI bus and NVMe driver changes."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(600, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] System reboot is strictly required to apply PCI bus and NVMe driver changes."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(630, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
-    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(600, 160); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(630, 160); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
     
     $localData = New-Object System.Collections.ArrayList
 
@@ -3113,7 +3114,7 @@ function Show-NVMeModal {
     }
     &$refreshData 
 
-    $btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 260 -Width 180 -Height 35 -RGB @(150, 60, 60)
+    $btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 258 -Width 195 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
         $applyQueue = @()
@@ -3134,7 +3135,7 @@ function Show-NVMeModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnRevert = New-UltixButton -Parent $modal -Text "Restore OS Defaults" -X 205 -Y 260 -Width 160 -Height 35 -RGB @(100, 100, 100)
+    $btnRevert = New-UltixButton -Parent $modal -Text "Restore OS Defaults" -X 218 -Y 258 -Width 185 -Height 38 -RGB @(100, 100, 100)
     $btnRevert.Anchor = 'Bottom, Left'
     $btnRevert.Add_Click({
         $modal.UseWaitCursor = $true
@@ -3160,11 +3161,11 @@ function Show-NVMeModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 375 -Y 260 -Width 120 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 411 -Y 258 -Width 135 -Height 38 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Bottom, Left'
     $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 505 -Y 260 -Width 115 -Height 35 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 554 -Y 258 -Width 91 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
 
@@ -3283,6 +3284,7 @@ function Get-Pcfg (`$g) {
 `$frm.TopMost = `$true
 `$frm.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
 `$frm.ForeColor = [System.Drawing.Color]::White
+`$frm.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 `$icoFile = "`$env:LOCALAPPDATA\WinUltix\WinUltix.ico"
 if (Test-Path -LiteralPath `$icoFile) {
     try { `$frm.Icon = New-Object System.Drawing.Icon(`$icoFile, 32, 32) } catch { }
@@ -4002,7 +4004,7 @@ function Show-QuantumSchedulerModal {
     &$refreshInfo
     if ($listBox.SelectedIndex -lt 0) { $listBox.SelectedIndex = 0 }
 
-    $btnApply = New-UltixButton -Parent $modal -Text "Apply Selected Quantum (Live - Zero Reboot)" -X 15 -Y 425 -Width 330 -Height 38 -RGB @(150, 60, 60)
+    $btnApply = New-UltixButton -Parent $modal -Text "Apply Selected Quantum (Live)" -X 15 -Y 425 -Width 295 -Height 38 -RGB @(150, 60, 60)
     $btnApply.Add_Click({
         if ($listBox.SelectedIndex -lt 0) { return }
         $sel = $profiles[$listBox.SelectedIndex]
@@ -4011,7 +4013,7 @@ function Show-QuantumSchedulerModal {
         &$refreshInfo
     }.GetNewClosure())
 
-    $btnReset = New-UltixButton -Parent $modal -Text "Restore Factory (0x02)" -X 355 -Y 425 -Width 200 -Height 38 -RGB @(60, 100, 150)
+    $btnReset = New-UltixButton -Parent $modal -Text "Restore Factory (0x02)" -X 320 -Y 425 -Width 215 -Height 38 -RGB @(60, 100, 150)
     $btnReset.Add_Click({
         Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 2 -Type DWord -Force
         Write-GUI " -> [LIVE QUANTUM] Restored factory Win32PrioritySeparation = 0x02 (2 dec)."
@@ -4041,7 +4043,7 @@ function Initialize-Z7UI {
     $lblPreFlight = New-Object System.Windows.Forms.Label
     $lblPreFlight.Text = "Pre-Flight CPU Affinity & CPPC P-State Control"
     $lblPreFlight.Location = New-Object System.Drawing.Point(15, 14)
-    $lblPreFlight.Size = New-Object System.Drawing.Size(370, 18)
+    $lblPreFlight.Size = New-Object System.Drawing.Size(380, 20)
     $lblPreFlight.ForeColor = [System.Drawing.Color]::DarkGray
     $lblPreFlight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 
@@ -4072,14 +4074,14 @@ function Initialize-Z7UI {
     $lblColLeft = New-Object System.Windows.Forms.Label
     $lblColLeft.Text = "Scheduler, Timer & Bus"
     $lblColLeft.Location = New-Object System.Drawing.Point(15, 138)
-    $lblColLeft.Size = New-Object System.Drawing.Size(180, 18)
+    $lblColLeft.Size = New-Object System.Drawing.Size(185, 20)
     $lblColLeft.ForeColor = [System.Drawing.Color]::DarkGray
     $lblColLeft.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 
     $lblColRight = New-Object System.Windows.Forms.Label
     $lblColRight.Text = "IRQ, USB & OC Diagnostics"
     $lblColRight.Location = New-Object System.Drawing.Point(205, 138)
-    $lblColRight.Size = New-Object System.Drawing.Size(180, 18)
+    $lblColRight.Size = New-Object System.Drawing.Size(195, 20)
     $lblColRight.ForeColor = [System.Drawing.Color]::DarkGray
     $lblColRight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 
@@ -4124,9 +4126,9 @@ function Initialize-Z7UI {
 
     # --- SECTION 3: LIVE KERNEL INTERRUPT / DPC TELEMETRY PANEL (Y = 365) ---
     $lblDpcHeader = New-Object System.Windows.Forms.Label
-    $lblDpcHeader.Text = "Live Kernel Interrupt / DPC Distribution Monitor (ntdll.dll)"
+    $lblDpcHeader.Text = "Live Kernel Interrupt & DPC Monitor (ntdll.dll)"
     $lblDpcHeader.Location = New-Object System.Drawing.Point(15, 365)
-    $lblDpcHeader.Size = New-Object System.Drawing.Size(370, 20)
+    $lblDpcHeader.Size = New-Object System.Drawing.Size(380, 20)
     $lblDpcHeader.ForeColor = [System.Drawing.Color]::DarkGray
     $lblDpcHeader.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 

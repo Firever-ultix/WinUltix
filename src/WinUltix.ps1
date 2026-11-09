@@ -98,13 +98,14 @@ $global:infoBox.Anchor = 'Top, Bottom, Left, Right'
 Write-UltixSystemBanner -StatusMessage "Ready for deployment. Modular architecture loaded successfully."
 
 $global:tabControl = New-Object WinUltix.DarkTabControl
+$global:tabControl.Font = Get-UltixFont -Role "TabHeader"
 $global:tabControl.Location = New-Object System.Drawing.Point(10, 20)
 $global:tabControl.Size = New-Object System.Drawing.Size(410, 700)
 $global:tabControl.Anchor = 'Top, Bottom, Left'
 
 $global:progBar = New-Object WinUltix.DarkProgressBar
 $global:progBar.Location = New-Object System.Drawing.Point(440, 725)
-$global:progBar.Size = New-Object System.Drawing.Size(510, 25)
+$global:progBar.Size = New-Object System.Drawing.Size(406, 25)
 $global:progBar.Minimum = 0
 $global:progBar.Maximum = 100
 $global:progBar.Anchor = 'Bottom, Left, Right'
@@ -123,14 +124,45 @@ Initialize-Z7UI -TabControl $global:tabControl
 # ------------------------------------------
 # 4. GLOBAL FOOTER BUTTONS
 # ------------------------------------------
+$footerFont = Get-UltixFont -Role "FooterButton"
+
+$global:btnFontDec = New-Object System.Windows.Forms.Button
+$global:btnFontDec.Text = "A-"
+$global:btnFontDec.Location = New-Object System.Drawing.Point(856, 725)
+$global:btnFontDec.Size = New-Object System.Drawing.Size(42, 25)
+$global:btnFontDec.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
+$global:btnFontDec.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$global:btnFontDec.FlatStyle = "Flat"
+$global:btnFontDec.Anchor = 'Bottom, Right'
+$global:btnFontDec.Font = $footerFont
+$global:btnFontDec.Enabled = ($global:UltixTypography.ScaleOffset -gt -1.0)
+$global:btnFontDec.Add_MouseEnter({ Show-Description "Decreases UI & modal button font size by 0.5 pt (Lower safety limit: -1.0 pt)." })
+$global:btnFontDec.Add_MouseLeave({ Restore-Log })
+$global:btnFontDec.Add_Click({ Set-UltixFontScale -Delta -0.5 })
+
+$global:btnFontInc = New-Object System.Windows.Forms.Button
+$global:btnFontInc.Text = "A+"
+$global:btnFontInc.Location = New-Object System.Drawing.Point(904, 725)
+$global:btnFontInc.Size = New-Object System.Drawing.Size(42, 25)
+$global:btnFontInc.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
+$global:btnFontInc.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$global:btnFontInc.FlatStyle = "Flat"
+$global:btnFontInc.Anchor = 'Bottom, Right'
+$global:btnFontInc.Font = $footerFont
+$global:btnFontInc.Enabled = ($global:UltixTypography.ScaleOffset -lt 1.5)
+$global:btnFontInc.Add_MouseEnter({ Show-Description "Increases UI & modal button font size by 0.5 pt (Upper safety limit: +1.5 pt)." })
+$global:btnFontInc.Add_MouseLeave({ Restore-Log })
+$global:btnFontInc.Add_Click({ Set-UltixFontScale -Delta 0.5 })
+
 $btnExportLog = New-Object System.Windows.Forms.Button
 $btnExportLog.Text = "Export Log to Desktop"
-$btnExportLog.Location = New-Object System.Drawing.Point(970, 725)
-$btnExportLog.Size = New-Object System.Drawing.Size(150, 25)
+$btnExportLog.Location = New-Object System.Drawing.Point(956, 725)
+$btnExportLog.Size = New-Object System.Drawing.Size(164, 25)
 $btnExportLog.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
 $btnExportLog.ForeColor = [System.Drawing.Color]::White
 $btnExportLog.FlatStyle = "Flat"
 $btnExportLog.Anchor = 'Bottom, Right'
+$btnExportLog.Font = $footerFont
 $btnExportLog.Add_Click({ 
     if ($global:infoBox.Text.Length -gt 0) { 
         $desktop = [Environment]::GetFolderPath("Desktop")
@@ -150,6 +182,8 @@ $btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnClearLog.ForeColor = [System.Drawing.Color]::LightGray
 $btnClearLog.FlatStyle = "Flat"
 $btnClearLog.Anchor = 'Bottom, Right'
+$btnClearLog.AccessibleName = "FooterButton"
+$btnClearLog.Font = $footerFont
 $btnClearLog.Add_Click({ 
     $global:infoBox.Clear()
     Write-UltixSystemBanner -StatusMessage "Ready for deployment."
@@ -163,7 +197,8 @@ $btnCredits.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnCredits.ForeColor = [System.Drawing.Color]::LightGray
 $btnCredits.FlatStyle = "Flat"
 $btnCredits.Anchor = 'Bottom, Left'
-
+$btnCredits.AccessibleName = "FooterButton"
+$btnCredits.Font = $footerFont
 $btnCredits.Add_Click({ 
     $aboutForm = New-Object System.Windows.Forms.Form
     $aboutForm.Text = "About WinUltix"
@@ -233,6 +268,7 @@ $btnCredits.Add_Click({
     $btnAboutOK.Text = "Close"
     $btnAboutOK.Location = New-Object System.Drawing.Point(160, 185)
     $btnAboutOK.Size = New-Object System.Drawing.Size(90, 28)
+    $btnAboutOK.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
     $btnAboutOK.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnAboutOK.ForeColor = [System.Drawing.Color]::White
     $btnAboutOK.FlatStyle = "Flat"
@@ -255,9 +291,11 @@ $btnExportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
 $btnExportProfile.ForeColor = [System.Drawing.Color]::White
 $btnExportProfile.FlatStyle = "Flat"
 $btnExportProfile.Anchor = 'Bottom, Left'
-$btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, SRP locks, Services state, and Affinity Lasso roster into a portable JSON snapshot." })
+$btnExportProfile.AccessibleName = "FooterButton"
+$btnExportProfile.Font = $footerFont
+$btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, Quantum Scheduler, Power & Display settings, USB Guard, SRP locks, Services, and Hardware locks into a portable JSON snapshot." })
 $btnExportProfile.Add_MouseLeave({ Restore-Log })
-$btnExportProfile.Add_Click({ Export-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile) })
+$btnExportProfile.Add_Click({ Export-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
 
 $btnImportProfile = New-Object System.Windows.Forms.Button
 $btnImportProfile.Text = "[ Import Profile ]"
@@ -267,12 +305,14 @@ $btnImportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 135, 50, 50)
 $btnImportProfile.ForeColor = [System.Drawing.Color]::White
 $btnImportProfile.FlatStyle = "Flat"
 $btnImportProfile.Anchor = 'Bottom, Left'
+$btnImportProfile.AccessibleName = "FooterButton"
+$btnImportProfile.Font = $footerFont
 $btnImportProfile.Add_MouseEnter({ Show-Description "Imports and enforces a previously saved WinUltix JSON configuration snapshot on this machine." })
 $btnImportProfile.Add_MouseLeave({ Restore-Log })
-$btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile) })
+$btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
 
 $global:form.Controls.AddRange(@(
-    $btnClearLog, $btnExportLog, $global:progBar, 
+    $global:btnFontDec, $global:btnFontInc, $btnClearLog, $btnExportLog, $global:progBar, 
     $btnCredits, $btnExportProfile, $btnImportProfile, 
     $global:descBox, $global:tabControl, $global:infoBox
 ))
@@ -284,6 +324,12 @@ foreach ($tab in $global:tabControl.TabPages) {
     foreach ($ctrl in $tab.Controls) { 
         if ($ctrl -is [System.Windows.Forms.Button]) {
             $ctrl.Add_MouseLeave({ Restore-Log }) 
+        } elseif ($ctrl -is [System.Windows.Forms.Label]) {
+            $ctrl.UseMnemonic = $false
+            if ($ctrl.ForeColor -eq [System.Drawing.Color]::DarkGray -and $ctrl.Font.Bold) {
+                $ctrl.AccessibleName = "SectionHeader"
+                $ctrl.Font = Get-UltixFont -Role "SectionHeader"
+            }
         }
     } 
 }

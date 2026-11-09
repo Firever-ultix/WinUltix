@@ -1846,29 +1846,15 @@ function Get-UltixUserProfiles {
         }
     }
 
-    # Emergency CIM fallback only if registry enumeration returned zero profiles
-    if ($results.Count -eq 0) {
-        $cimProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -Filter "Special = False" -ErrorAction SilentlyContinue)
-        foreach ($prof in $cimProfiles) {
-            if ([string]::IsNullOrWhiteSpace($prof.LocalPath)) { continue }
-            $localPath = $prof.LocalPath.TrimEnd('\')
-            $userName  = [System.IO.Path]::GetFileName($localPath)
-            if ($userName -match '^(?i)(Public|Default.*|All Users)$') { continue }
-
-            $sid      = [string]$prof.SID
-            $hiveRoot = if (-not [string]::IsNullOrWhiteSpace($sid)) { "Registry::HKEY_USERS\$sid" } else { "" }
-            $isLoaded = (-not [string]::IsNullOrWhiteSpace($hiveRoot)) -and (Test-Path -LiteralPath $hiveRoot)
-
-            if ([string]::IsNullOrWhiteSpace($sid) -or $seenSids.Add($sid)) {
-                $results.Add([PSCustomObject]@{
-                    SID          = $sid
-                    UserName     = $userName
-                    LocalPath    = $localPath
-                    HiveRoot     = $hiveRoot
-                    IsHiveLoaded = $isLoaded
-                })
-            }
-        }
+    # Zero-WMI fallback if registry ProfileList enumeration returned zero profiles
+    if ($results.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $results.Add([PSCustomObject]@{
+            SID          = "CurrentUser"
+            UserName     = $env:USERNAME
+            LocalPath    = $env:USERPROFILE.TrimEnd('\')
+            HiveRoot     = "HKCU:"
+            IsHiveLoaded = (Test-Path -LiteralPath "HKCU:\Software")
+        })
     }
 
     return @($results)
@@ -2500,6 +2486,120 @@ $global:UltixColors = @{
     TabBg     = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 }
 
+# Centralized Typography & Live Font Scaling Configuration
+# Change UiFamily (e.g. "Segoe UI Semibold", "Segoe UI", "Tahoma", "Verdana") or ScaleOffset (+0.5 / -0.5) in one place!
+$global:UltixTypography = @{
+    UiFamily        = "Segoe UI Semibold"
+    TextFamily      = "Segoe UI"
+    MonoFamily      = "Consolas"
+    ScaleOffset     = 0.0
+    TabHeaderSize   = 9.0     # Fixed for 57px tab headers so they never clip
+    FooterBtnSize   = 9.75    # Frozen at +0.5 sweet-spot for global footer buttons
+    MainBtnSize     = 9.75    # Full-width tab buttons (320px / 370px)
+    CompactBtnSize  = 9.25    # Half-width 2-column buttons (180px / 240px)
+    ToolbarBtnSize  = 9.5     # Modal top toolbar buttons (Select All, Select Visible, Refresh)
+    ModalActionSize = 9.75    # Modal bottom execution buttons (Start, Stop, Execute, Cancel)
+    SectionHdrSize  = 9.5     # Section headers above button groups
+    ModalDescSize   = 10.5    # Top description text in modals
+    GridTextSize    = 10.25   # ListView & CheckedListBox rows
+}
+
+$global:UltixFontCache = @{}
+
+# Load saved font scale offset from registry if present (clamped to [-1.0 .. +1.5])
+try {
+    $savedScale = (Get-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "FontScaleOffset" -ErrorAction SilentlyContinue).FontScaleOffset
+    if ($null -ne $savedScale) {
+        $parsedScale = [double]::Parse([string]$savedScale, [System.Globalization.CultureInfo]::InvariantCulture)
+        $global:UltixTypography.ScaleOffset = [math]::Max(-1.0, [math]::Min(1.5, [math]::Round($parsedScale * 2.0) / 2.0))
+    }
+} catch { }
+
+function Get-UltixFont {
+    param(
+        [ValidateSet("TabHeader", "MainButton", "CompactButton", "IconButton", "FooterButton", "ToolbarButton", "ModalAction", "SectionHeader", "ModalDesc", "GridText", "GridMono")]
+        [string]$Role = "MainButton"
+    )
+    $t = $global:UltixTypography
+    $offset     = [double]$t.ScaleOffset
+    $halfOffset = [math]::Round(($offset * 0.5) * 4.0) / 4.0
+    $cacheKey   = "$Role|$($t.UiFamily)|$($t.TextFamily)|$($t.MonoFamily)|$offset"
+
+    if ($global:UltixFontCache.ContainsKey($cacheKey)) {
+        return $global:UltixFontCache[$cacheKey]
+    }
+
+    $family = $t.UiFamily
+    $size   = 9.5
+    $style  = [System.Drawing.FontStyle]::Regular
+
+    switch ($Role) {
+        "TabHeader"     { $family = $t.UiFamily;   $size = $t.TabHeaderSize;                                     $style = [System.Drawing.FontStyle]::Regular }
+        "FooterButton"  { $family = $t.UiFamily;   $size = $t.FooterBtnSize;                                     $style = [System.Drawing.FontStyle]::Regular }
+        "MainButton"    { $family = $t.UiFamily;   $size = $t.MainBtnSize + $offset;                             $style = [System.Drawing.FontStyle]::Regular }
+        "CompactButton" { $family = $t.UiFamily;   $size = [math]::Min(9.75, $t.CompactBtnSize + $halfOffset);   $style = [System.Drawing.FontStyle]::Regular }
+        "IconButton"    { $family = $t.TextFamily; $size = 10.0 + $halfOffset;                                   $style = [System.Drawing.FontStyle]::Bold    }
+        "ToolbarButton" { $family = $t.UiFamily;   $size = [math]::Min(10.0, $t.ToolbarBtnSize + $halfOffset);   $style = [System.Drawing.FontStyle]::Regular }
+        "ModalAction"   { $family = $t.TextFamily; $size = [math]::Min(10.25, $t.ModalActionSize + $halfOffset); $style = [System.Drawing.FontStyle]::Bold    }
+        "SectionHeader" { $family = $t.TextFamily; $size = [math]::Min(10.0, $t.SectionHdrSize + $halfOffset);   $style = [System.Drawing.FontStyle]::Bold    }
+        "ModalDesc"     { $family = $t.TextFamily; $size = [math]::Min(11.0, $t.ModalDescSize + $halfOffset);    $style = [System.Drawing.FontStyle]::Regular }
+        "GridText"      { $family = $t.TextFamily; $size = $t.GridTextSize + $offset;                            $style = [System.Drawing.FontStyle]::Regular }
+        "GridMono"      { $family = $t.MonoFamily; $size = $t.GridTextSize + $offset;                            $style = [System.Drawing.FontStyle]::Regular }
+    }
+
+    if ($family -eq "Segoe UI Semibold" -and $style -eq [System.Drawing.FontStyle]::Regular) {
+        try {
+            $fontObj = New-Object System.Drawing.Font("Segoe UI Semibold", [float]$size, [System.Drawing.FontStyle]::Regular)
+        } catch {
+            $fontObj = New-Object System.Drawing.Font("Segoe UI", [float]$size, [System.Drawing.FontStyle]::Bold)
+        }
+    } else {
+        $fontObj = New-Object System.Drawing.Font($family, [float]$size, $style)
+    }
+
+    $global:UltixFontCache[$cacheKey] = $fontObj
+    return $fontObj
+}
+
+function Set-UltixFontScale {
+    param([double]$Delta = 0.0)
+
+    $cur = [double]$global:UltixTypography.ScaleOffset
+    $newOffset = [math]::Max(-1.0, [math]::Min(1.5, [math]::Round(($cur + $Delta) * 2.0) / 2.0))
+    $global:UltixTypography.ScaleOffset = $newOffset
+
+    try {
+        if (-not (Test-Path -LiteralPath "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
+        Set-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "FontScaleOffset" -Value ($newOffset.ToString([System.Globalization.CultureInfo]::InvariantCulture)) -Type String -Force -ErrorAction SilentlyContinue
+    } catch { }
+
+    if ($null -ne $global:form -and -not $global:form.IsDisposed) {
+        $global:form.SuspendLayout()
+        try {
+            if ($null -ne $global:tabControl -and -not $global:tabControl.IsDisposed) {
+                foreach ($tab in $global:tabControl.TabPages) {
+                    foreach ($c in $tab.Controls) {
+                        if (-not [string]::IsNullOrWhiteSpace($c.AccessibleName)) {
+                            $c.Font = Get-UltixFont -Role $c.AccessibleName
+                        }
+                    }
+                }
+            }
+            if ($null -ne $global:btnFontDec -and -not $global:btnFontDec.IsDisposed) {
+                $global:btnFontDec.Enabled = ($newOffset -gt -1.0)
+            }
+            if ($null -ne $global:btnFontInc -and -not $global:btnFontInc.IsDisposed) {
+                $global:btnFontInc.Enabled = ($newOffset -lt 1.5)
+            }
+        } finally {
+            $global:form.ResumeLayout($true)
+        }
+    }
+
+    $sign = if ($newOffset -gt 0) { "+$newOffset" } else { "$newOffset" }
+    Show-Description "UI Font Scale: $sign pt (Bounds: -1.0 pt Min to +1.5 pt Max | Main Buttons: $($global:UltixTypography.MainBtnSize + $newOffset) pt)."
+}
+
 function New-UltixButton {
     param(
         [Parameter(Mandatory=$true)][string]$Text,
@@ -2509,6 +2609,7 @@ function New-UltixButton {
         [int]$Height = 40,
         [int[]]$RGB = @(55, 58, 64),
         [System.Drawing.Color]$ForeColor = [System.Drawing.Color]::White,
+        [System.Drawing.Font]$Font = $null,
         [string]$Description = "",
         [scriptblock]$OnClick = $null,
         [System.Windows.Forms.Control]$Parent = $null
@@ -2521,6 +2622,27 @@ function New-UltixButton {
     $btn.ForeColor = $ForeColor
     $btn.FlatStyle = "Flat"
     $btn.UseMnemonic = $false
+
+    if ($null -ne $Font) {
+        $btn.Font = $Font
+    } elseif ($Parent -is [System.Windows.Forms.Form]) {
+        if ($Height -le 30) {
+            $btn.AccessibleName = "ToolbarButton"
+            $btn.Font = Get-UltixFont -Role "ToolbarButton"
+        } else {
+            $btn.AccessibleName = "ModalAction"
+            $btn.Font = Get-UltixFont -Role "ModalAction"
+        }
+    } elseif ($Width -le 45) {
+        $btn.AccessibleName = "IconButton"
+        $btn.Font = Get-UltixFont -Role "IconButton"
+    } elseif ($Width -le 245) {
+        $btn.AccessibleName = "CompactButton"
+        $btn.Font = Get-UltixFont -Role "CompactButton"
+    } else {
+        $btn.AccessibleName = "MainButton"
+        $btn.Font = Get-UltixFont -Role "MainButton"
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($Description)) {
         $btn.AccessibleDescription = $Description
@@ -2799,56 +2921,59 @@ function Show-ActionModal {
     $modal = New-Object System.Windows.Forms.Form
     $modal.Text = $Title
     $modal.Size = New-Object System.Drawing.Size(780, 680)
-    $modal.MinimumSize = New-Object System.Drawing.Size(780, 680)
+    $modal.MinimumSize = New-Object System.Drawing.Size(680, 520)
     $modal.StartPosition = "CenterParent"
     $modal.FormBorderStyle = "Sizable"
-    $modal.MaximizeBox = $true
-    $modal.MinimizeBox = $false
     $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
     $modal.ForeColor = [System.Drawing.Color]::White
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
     $lblDesc = New-Object System.Windows.Forms.Label
     $lblDesc.Text = $Description
-    $lblDesc.Location = New-Object System.Drawing.Point(15, 12)
+    $lblDesc.UseMnemonic = $false
+    $lblDesc.Location = New-Object System.Drawing.Point(15, 10)
     $lblDesc.Size = New-Object System.Drawing.Size(730, 38)
-    $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 215, 220, 228)
+    $lblDesc.Font = Get-UltixFont -Role "ModalDesc"
+    $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
     $lblDesc.Anchor = 'Top, Left, Right'
 
     $hasValidItems = ($null -ne $AuditResults -and $AuditResults.Count -gt 0)
+    $toolbarFont   = Get-UltixFont -Role "ToolbarButton"
 
     $btnSelAll = New-Object System.Windows.Forms.Button
     $btnSelAll.Text = "Select All"
-    $btnSelAll.Location = New-Object System.Drawing.Point(15, 54)
-    $btnSelAll.Size = New-Object System.Drawing.Size(105, 26)
+    $btnSelAll.Location = New-Object System.Drawing.Point(15, 51)
+    $btnSelAll.Size = New-Object System.Drawing.Size(118, 30)
     $btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelAll.ForeColor = [System.Drawing.Color]::White
     $btnSelAll.FlatStyle = "Flat"
-    $btnSelAll.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelAll.Font = $toolbarFont
     $btnSelAll.Enabled = $hasValidItems
 
     $btnSelNone = New-Object System.Windows.Forms.Button
     $btnSelNone.Text = "Deselect All"
-    $btnSelNone.Location = New-Object System.Drawing.Point(128, 54)
-    $btnSelNone.Size = New-Object System.Drawing.Size(105, 26)
+    $btnSelNone.Location = New-Object System.Drawing.Point(140, 51)
+    $btnSelNone.Size = New-Object System.Drawing.Size(118, 30)
     $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelNone.ForeColor = [System.Drawing.Color]::White
     $btnSelNone.FlatStyle = "Flat"
-    $btnSelNone.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelNone.Font = $toolbarFont
     $btnSelNone.Enabled = $hasValidItems
 
     $btnSelDet = New-Object System.Windows.Forms.Button
     $btnSelDet.Text = "Select Detected"
-    $btnSelDet.Location = New-Object System.Drawing.Point(241, 54)
-    $btnSelDet.Size = New-Object System.Drawing.Size(120, 26)
+    $btnSelDet.Location = New-Object System.Drawing.Point(265, 51)
+    $btnSelDet.Size = New-Object System.Drawing.Size(140, 30)
     $btnSelDet.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+    $btnSelDet.ForeColor = [System.Drawing.Color]::White
     $btnSelDet.FlatStyle = "Flat"
-    $btnSelDet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelDet.Font = $toolbarFont
     $btnSelDet.Enabled = $hasValidItems
 
     $lblCount = New-Object System.Windows.Forms.Label
-    $lblCount.Location = New-Object System.Drawing.Point(545, 57)
-    $lblCount.Size = New-Object System.Drawing.Size(200, 20)
-    $lblCount.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblCount.Location = New-Object System.Drawing.Point(545, 56)
+    $lblCount.Size = New-Object System.Drawing.Size(200, 22)
+    $lblCount.Font = New-Object System.Drawing.Font("Consolas", 10.0, [System.Drawing.FontStyle]::Bold)
     $lblCount.ForeColor = [System.Drawing.Color]::LightGray
     $lblCount.TextAlign = "MiddleRight"
     $lblCount.Anchor = 'Top, Right'
@@ -2859,10 +2984,10 @@ function Show-ActionModal {
     $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38)
     $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
     $chkList.BorderStyle = "FixedSingle"
-    $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5)
+    $chkList.Font = Get-UltixFont -Role "GridMono"
     $chkList.CheckOnClick = $false
     $chkList.HorizontalScrollbar = $true
-    $chkList.Anchor = 'Top, Bottom, Left, Right' 
+    $chkList.Anchor = 'Top, Bottom, Left, Right'
 
     if ($hasValidItems) {
         $chkList.BeginUpdate()
@@ -2929,10 +3054,14 @@ function Show-ActionModal {
         & $updateCounter 0
     }.GetNewClosure())
 
+    $actionBtnFont = Get-UltixFont -Role "ModalAction"
+
     $btnApply = New-Object System.Windows.Forms.Button
     $btnApply.Text = "Execute Selected"
     $btnApply.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
+    $btnApply.ForeColor = [System.Drawing.Color]::White
     $btnApply.FlatStyle = "Flat"
+    $btnApply.Font = $actionBtnFont
     $btnApply.DialogResult = "OK"
     $btnApply.Enabled = $hasValidItems
     $btnApply.Anchor = 'Bottom, Left'
@@ -2940,7 +3069,9 @@ function Show-ActionModal {
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
     $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+    $btnCancel.ForeColor = [System.Drawing.Color]::White
     $btnCancel.FlatStyle = "Flat"
+    $btnCancel.Font = $actionBtnFont
     $btnCancel.DialogResult = "Cancel"
     $btnCancel.Anchor = 'Bottom, Right'
 
@@ -2948,27 +3079,29 @@ function Show-ActionModal {
 
     if ($EnableRevert) {
         $btnApply.Location = New-Object System.Drawing.Point(15, 585)
-        $btnApply.Size = New-Object System.Drawing.Size(235, 35)
+        $btnApply.Size = New-Object System.Drawing.Size(235, 36)
 
         $btnRevert = New-Object System.Windows.Forms.Button
         $btnRevert.Text = "Revert Selected"
         $btnRevert.Location = New-Object System.Drawing.Point(262, 585)
-        $btnRevert.Size = New-Object System.Drawing.Size(235, 35)
+        $btnRevert.Size = New-Object System.Drawing.Size(235, 36)
         $btnRevert.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+        $btnRevert.ForeColor = [System.Drawing.Color]::White
         $btnRevert.FlatStyle = "Flat"
+        $btnRevert.Font = $actionBtnFont
         $btnRevert.DialogResult = "Yes"
         $btnRevert.Enabled = $hasValidItems
         $btnRevert.Anchor = 'Bottom, Left'
         
         $btnCancel.Location = New-Object System.Drawing.Point(510, 585)
-        $btnCancel.Size = New-Object System.Drawing.Size(235, 35)
+        $btnCancel.Size = New-Object System.Drawing.Size(235, 36)
 
         $modal.Controls.AddRange($baseControls + @($btnApply, $btnRevert, $btnCancel))
     } else {
         $btnApply.Location = New-Object System.Drawing.Point(15, 585)
-        $btnApply.Size = New-Object System.Drawing.Size(355, 35)
+        $btnApply.Size = New-Object System.Drawing.Size(355, 36)
         $btnCancel.Location = New-Object System.Drawing.Point(390, 585)
-        $btnCancel.Size = New-Object System.Drawing.Size(355, 35)
+        $btnCancel.Size = New-Object System.Drawing.Size(355, 36)
         $modal.Controls.AddRange($baseControls + @($btnApply, $btnCancel))
     }
 
@@ -3018,58 +3151,63 @@ function Show-UltixGridModal {
 
     $lblDesc = New-Object System.Windows.Forms.Label
     $lblDesc.Text = $Description
-    $lblDesc.Location = New-Object System.Drawing.Point(15, 12)
-    $lblDesc.Size = New-Object System.Drawing.Size(930, 32)
-    $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 215, 220, 228)
+    $lblDesc.UseMnemonic = $false
+    $lblDesc.Location = New-Object System.Drawing.Point(15, 10)
+    $lblDesc.Size = New-Object System.Drawing.Size(935, 38)
+    $lblDesc.Font = Get-UltixFont -Role "ModalDesc"
+    $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
     $lblDesc.Anchor = 'Top, Left, Right'
+
+    $toolbarFont = Get-UltixFont -Role "ToolbarButton"
 
     $lblSearch = New-Object System.Windows.Forms.Label
     $lblSearch.Text = "Filter:"
-    $lblSearch.Location = New-Object System.Drawing.Point(15, 52)
-    $lblSearch.Size = New-Object System.Drawing.Size(48, 22)
-    $lblSearch.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblSearch.Location = New-Object System.Drawing.Point(15, 55)
+    $lblSearch.Size = New-Object System.Drawing.Size(52, 22)
+    $lblSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10.0, [System.Drawing.FontStyle]::Bold)
     $lblSearch.ForeColor = [System.Drawing.Color]::LightSkyBlue
 
     $txtSearch = New-Object System.Windows.Forms.TextBox
-    $txtSearch.Location = New-Object System.Drawing.Point(65, 50)
-    $txtSearch.Size = New-Object System.Drawing.Size(270, 25)
+    $txtSearch.Location = New-Object System.Drawing.Point(68, 52)
+    $txtSearch.Size = New-Object System.Drawing.Size(265, 26)
     $txtSearch.BackColor = [System.Drawing.Color]::FromArgb(255, 38, 40, 45)
     $txtSearch.ForeColor = [System.Drawing.Color]::White
     $txtSearch.BorderStyle = "FixedSingle"
-    $txtSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $txtSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10.5)
 
     $btnSelVis = New-Object System.Windows.Forms.Button
     $btnSelVis.Text = "Select Visible"
-    $btnSelVis.Location = New-Object System.Drawing.Point(345, 49)
-    $btnSelVis.Size = New-Object System.Drawing.Size(115, 26)
+    $btnSelVis.Location = New-Object System.Drawing.Point(343, 50)
+    $btnSelVis.Size = New-Object System.Drawing.Size(124, 30)
     $btnSelVis.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelVis.ForeColor = [System.Drawing.Color]::White
     $btnSelVis.FlatStyle = "Flat"
-    $btnSelVis.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelVis.Font = $toolbarFont
 
     $btnSelNone = New-Object System.Windows.Forms.Button
     $btnSelNone.Text = "Deselect All"
-    $btnSelNone.Location = New-Object System.Drawing.Point(468, 49)
-    $btnSelNone.Size = New-Object System.Drawing.Size(115, 26)
+    $btnSelNone.Location = New-Object System.Drawing.Point(475, 50)
+    $btnSelNone.Size = New-Object System.Drawing.Size(124, 30)
     $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelNone.ForeColor = [System.Drawing.Color]::White
     $btnSelNone.FlatStyle = "Flat"
-    $btnSelNone.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+    $btnSelNone.Font = $toolbarFont
 
     $lblCount = New-Object System.Windows.Forms.Label
-    $lblCount.Location = New-Object System.Drawing.Point(600, 52)
-    $lblCount.Size = New-Object System.Drawing.Size(345, 20)
-    $lblCount.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblCount.Location = New-Object System.Drawing.Point(605, 55)
+    $lblCount.Size = New-Object System.Drawing.Size(340, 22)
+    $lblCount.Font = New-Object System.Drawing.Font("Consolas", 10.0, [System.Drawing.FontStyle]::Bold)
     $lblCount.ForeColor = [System.Drawing.Color]::LightGray
     $lblCount.TextAlign = "MiddleRight"
     $lblCount.Anchor = 'Top, Right'
 
     $listView = New-Object System.Windows.Forms.ListView
-    $listView.Location = New-Object System.Drawing.Point(15, 84)
-    $listView.Size = New-Object System.Drawing.Size(935, 504)
+    $listView.Location = New-Object System.Drawing.Point(15, 88)
+    $listView.Size = New-Object System.Drawing.Size(935, 500)
     $listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
     $listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
     $listView.BorderStyle = "FixedSingle"
-    $listView.Font = New-Object System.Drawing.Font("Segoe UI", 10.5, [System.Drawing.FontStyle]::Regular)
+    $listView.Font = Get-UltixFont -Role "GridText"
     $listView.View = [System.Windows.Forms.View]::Details
     $listView.CheckBoxes = $true
     $listView.FullRowSelect = $true
@@ -3288,11 +3426,14 @@ function Show-UltixGridModal {
 
     & $populateList ""
 
+    $actionBtnFont = Get-UltixFont -Role "ModalAction"
+
     $btnPrimary = New-Object System.Windows.Forms.Button
     $btnPrimary.Text = $PrimaryButtonText
     $btnPrimary.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
     $btnPrimary.ForeColor = [System.Drawing.Color]::White
     $btnPrimary.FlatStyle = "Flat"
+    $btnPrimary.Font = $actionBtnFont
     $btnPrimary.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $btnPrimary.Enabled = ($indexedData.Count -gt 0)
     $btnPrimary.Anchor = 'Bottom, Left'
@@ -3302,6 +3443,7 @@ function Show-UltixGridModal {
     $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnCancel.ForeColor = [System.Drawing.Color]::White
     $btnCancel.FlatStyle = "Flat"
+    $btnCancel.Font = $actionBtnFont
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $btnCancel.Anchor = 'Bottom, Right'
 
@@ -3318,6 +3460,7 @@ function Show-UltixGridModal {
         $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSecondary.ForeColor = [System.Drawing.Color]::White
         $btnSecondary.FlatStyle = "Flat"
+        $btnSecondary.Font = $actionBtnFont
         $btnSecondary.DialogResult = [System.Windows.Forms.DialogResult]::Yes
         $btnSecondary.Enabled = ($SecondaryAlwaysEnabled.IsPresent -or $indexedData.Count -gt 0)
         $btnSecondary.Anchor = 'Bottom, Left'

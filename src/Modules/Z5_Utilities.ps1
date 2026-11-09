@@ -525,6 +525,7 @@ function Initialize-Z5UI {
     $chkDoH.Text = "Enforce Native DNS-over-HTTPS (DoH)"
     $chkDoH.Location = New-Object System.Drawing.Point(15, 284)
     $chkDoH.Size = New-Object System.Drawing.Size(235, 22)
+    $chkDoH.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
     $chkDoH.ForeColor = [System.Drawing.Color]::LightGray
     $chkDoH.Checked = $true
 
@@ -532,6 +533,7 @@ function Initialize-Z5UI {
     $chkIPv6.Text = "Configure IPv6 DNS"
     $chkIPv6.Location = New-Object System.Drawing.Point(255, 284)
     $chkIPv6.Size = New-Object System.Drawing.Size(135, 22)
+    $chkIPv6.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
     $chkIPv6.ForeColor = [System.Drawing.Color]::LightGray
     $chkIPv6.Checked = $true
 
@@ -552,9 +554,8 @@ function Initialize-Z5UI {
     $global:lblCurrentDNS.Text = "Current DNS: Reading from active route..."
     $global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 310)
     $global:lblCurrentDNS.Size = New-Object System.Drawing.Size(370, 22)
+    $global:lblCurrentDNS.Font = New-Object System.Drawing.Font("Consolas", 9.2, [System.Drawing.FontStyle]::Bold)
     $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
-    $global:lblCurrentDNS.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $global:lblCurrentDNS.Add_Click({ Update-DNSLabel })
 
     # 6. Classic Windows Control Applets (8 Tools)
     $lblClassic = New-Object System.Windows.Forms.Label
@@ -570,7 +571,7 @@ function Initialize-Z5UI {
         -OnClick { Start-ClassicNet }
 
     $btnSndCpl = New-UltixButton -Parent $tabSec -X 205 -Y 370 -Width 180 -Height 40 -RGB @(55, 58, 64) `
-        -Text "Sound Subsystem (mmsys)" `
+        -Text "Sound Devices (mmsys)" `
         -Description "Direct launch of playback/recording devices and sample rate properties (mmsys.cpl)." `
         -OnClick { Start-ClassicSound }
 

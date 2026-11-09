@@ -224,16 +224,6 @@ function Invoke-SystemHealthAudit {
         $sysDrive  = $env:SystemDrive.TrimEnd('\')
         $dirtyCode = [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
         $isDirty   = ($dirtyCode -eq 1)
-        if ($dirtyCode -ge 0) {
-            $isDirty = ($dirtyCode -eq 1)
-        } else {
-            $fsOut = (& fsutil.exe dirty query $sysDrive 2>&1 | Out-String).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($fsOut)) {
-                if ($fsOut -notmatch '(?i)\b(NOT|NIE|NICHT|PAS|NON|NO|NIET|N[AÃ]O|EI|INTE|IKKE|NE|NINCS)\b') {
-                    $isDirty = $true
-                }
-            }
-        }
 
         $UltixSync.Progress = 90
         $cbsReboot = Test-Path -LiteralPath "$cbsKey\RebootPending"
@@ -844,10 +834,10 @@ function Initialize-Z6UI {
         -Description "Time First-Aid: Re-registers W32Time service, configures resilient Cloudflare/NTP.org peers, and forces immediate clock resynchronization." `
         -OnClick ({ Repair-TimeSynchronization -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
-    # 9. UWP Shell, Store & Xbox Gaming Services First-Aid
+    # 9. UWP Shell, Store, WinGet & Xbox Gaming Services First-Aid
     $btnFixUwp = New-UltixButton -Parent $tabWinSXS -X 15 -Y 420 -RGB @(45, 85, 125) `
         -Text "Repair UWP, Store & Gaming Services" `
-        -Description "UWP & Gaming First-Aid: Unlocks ClipSVC/AppXSvc/GamingServices, runs silent wsreset -i, and re-registers existing Shell, Store & Xbox manifests without restoring bloatware." `
+        -Description "UWP, WinGet & Gaming First-Aid: Unlocks ClipSVC/AppXSvc/InstallService/DoSvc, runs silent wsreset -i, and re-registers Shell, Store, WinGet & Xbox manifests." `
         -OnClick ({ Repair-UwpGamingRuntime -ControlsToDisable $allTabButtons.ToArray() }.GetNewClosure())
 
     foreach ($row in @($rowCheckSystem, $rowWinSxS, $rowWMI)) {

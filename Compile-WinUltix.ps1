@@ -166,16 +166,33 @@ using System.Windows.Forms;
 namespace WinUltixLauncher {
     internal sealed class DarkSplashForm : Form {
         private readonly string _exePath;
+        private Bitmap _logoBmp;
+
         public DarkSplashForm(string exePath) {
             _exePath = exePath;
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.Size = new Size(410, 125);
+            this.Size = new Size(420, 125);
             this.BackColor = Color.FromArgb(24, 24, 26);
             this.ForeColor = Color.White;
             this.TopMost = true;
             this.ShowInTaskbar = false;
             this.DoubleBuffered = true;
+
+            try {
+                _logoBmp = WinUltix.NativeMethods.ExtractHighResExeIcon(_exePath, 256);
+                if (_logoBmp == null) {
+                    _logoBmp = WinUltix.NativeMethods.ExtractHighResExeIcon(_exePath, 64);
+                }
+            } catch { }
+        }
+
+        protected override void Dispose(bool disposing) {
+            if (disposing && _logoBmp != null) {
+                _logoBmp.Dispose();
+                _logoBmp = null;
+            }
+            base.Dispose(disposing);
         }
 
         protected override void OnPaint(PaintEventArgs e) {
@@ -189,12 +206,20 @@ namespace WinUltixLauncher {
                 g.DrawRectangle(borderPen, 0, 0, this.Width - 1, this.Height - 1);
             }
 
-            try {
-                using (Icon ico = Icon.ExtractAssociatedIcon(_exePath)) {
-                    if (ico != null) g.DrawIcon(ico, new Rectangle(24, 28, 48, 48));
-                }
-            } catch { }
+            if (_logoBmp != null) {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.SmoothingMode     = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                g.PixelOffsetMode   = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.DrawImage(_logoBmp, new Rectangle(20, 28, 52, 52));
+            } else {
+                try {
+                    using (Icon ico = Icon.ExtractAssociatedIcon(_exePath)) {
+                        if (ico != null) g.DrawIcon(ico, new Rectangle(20, 28, 52, 52));
+                    }
+                } catch { }
+            }
 
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             using (Font fTitle = new Font("Segoe UI", 14.0f, FontStyle.Bold))
             using (Font fSub = new Font("Consolas", 9.0f, FontStyle.Regular))
             using (SolidBrush bCyan = new SolidBrush(Color.Cyan))

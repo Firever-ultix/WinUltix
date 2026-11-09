@@ -247,7 +247,7 @@ function Get-RegState_SRP {
         @{ UIDisplayName = "SRP+IFEO Lock: Compatibility Telemetry (CompatTelRunner.exe)"; TargetPath = "$env:windir\System32\CompatTelRunner.exe"; ExeName = "CompatTelRunner.exe"; IsCustom = $false }
         @{ UIDisplayName = "SRP+IFEO Lock: Hardware Telemetry (DeviceCensus.exe)"; TargetPath = "$env:windir\System32\DeviceCensus.exe"; ExeName = "DeviceCensus.exe"; IsCustom = $false }
         @{ UIDisplayName = "SRP+IFEO Lock: GameBar Telemetry (GameBarPresenceWriter.exe)"; TargetPath = "$env:windir\System32\GameBarPresenceWriter.exe"; ExeName = "GameBarPresenceWriter.exe"; IsCustom = $false }
-        @{ UIDisplayName = "SRP+IFEO Lock: Edge Background Updater (MicrosoftEdgeUpdate.exe)"; TargetPath = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"; ExeName = "MicrosoftEdgeUpdate.exe"; IsCustom = $false }
+        @{ UIDisplayName = "SRP+IFEO Lock: Edge Background Updater - Blocks WinGet Edge/WebView2 updates (MicrosoftEdgeUpdate.exe)"; TargetPath = "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"; ExeName = "MicrosoftEdgeUpdate.exe"; IsCustom = $false; OptIn = $true }
     )
     
     $customKey = "HKLM:\SOFTWARE\WinUltix\SRP"
@@ -302,6 +302,7 @@ function Get-RegState_SRP {
         $results.Add([PSCustomObject]@{
             UIDisplayName = $target.UIDisplayName
             IsDetected    = $isDetected
+            OptIn         = [bool]$target.OptIn
             ActionData    = $target
         })
     }
@@ -806,8 +807,10 @@ function Clear-StartMenu {
 
             Remove-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Remove-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "ShowRecentList", "ShowFrequentList" -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Remove-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_IrisRecommendations", "Start_AccountNotifications" -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "HideRecommendedSection" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoRecentDocsHistory" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
 
@@ -1252,7 +1255,7 @@ function Initialize-Z3UI {
 
     # 1. Taskbar & Start Menu
     $rowTaskbar = New-UltixActionRow -Parent $tabReg -Y 20 -MainRGB @(55, 58, 64) `
-        -Text "Taskbar and Start Menu Tweaks" `
+        -Text "Taskbar & Start Menu Tweaks" `
         -Description "Aligns the taskbar to the left, kills Bing search assistants, disables notifications bloat, and hides Widgets (with UCPD.sys bypass)." `
         -AuditDescription "AUDIT: Verifies taskbar alignment policy, Start Menu layouts, Widgets state, and Bing locks." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Taskbar" "Taskbar" "WinUltix - Taskbar Tweaks" "Taskbar & Start Menu" -RefreshShell }.GetNewClosure()) `
@@ -1270,7 +1273,7 @@ function Initialize-Z3UI {
 
     # 3. File Explorer & Context Menu
     $rowExplorer = New-UltixActionRow -Parent $tabReg -Y 120 -MainRGB @(55, 58, 64) `
-        -Text "File Explorer and Context Menu" `
+        -Text "File Explorer & Context Menu" `
         -Description "Restores the classic Windows 10 right-click context menu, shows file extensions, unpins OneDrive, and runs folder windows in a separate process." `
         -AuditDescription "AUDIT: Verifies classic context menu CLSID registration and File Explorer performance flags." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Explorer" "Explorer" "WinUltix - Explorer Tweaks" "File Explorer" -RefreshShell }.GetNewClosure()) `
@@ -1286,7 +1289,7 @@ function Initialize-Z3UI {
 
     # 5. Optimize Power & Display (7-Point)
     $rowPower = New-UltixActionRow -Parent $tabReg -Y 220 -MainRGB @(55, 58, 64) `
-        -Text "Optimize Power and Display (7-Point)" `
+        -Text "Optimize Power & Display (7-Point)" `
         -Description "7-Point Power & Display tuner: Disables Hibernation (hiberfil.sys), Sleep/SATA spin-down, USB Selective Suspend (protects DACs/8K mice), PCIe ASPM, and OLED CABC dimming." `
         -AuditDescription "AUDIT: Verifies active Power Plan timeouts, USB Selective Suspend, PCIe ASPM, CABC, and Hibernation state." `
         -OnClick ({
@@ -1306,7 +1309,7 @@ function Initialize-Z3UI {
 
     # 7. Hardware and Gaming (Extreme)
     $rowGaming = New-UltixActionRow -Parent $tabReg -Y 320 -MainRGB @(135, 50, 50) `
-        -Text "Hardware and Gaming Registry (Extreme)" `
+        -Text "Hardware & Gaming Registry (Extreme)" `
         -Description "Enforces MMCSS gaming thread priorities, disables GameDVR, disables Multiplane Overlay (MPO - fixes VRR/OLED flicker), enables Flip Model, and tunes VBS/HVCI." `
         -AuditDescription "AUDIT: Verifies MMCSS limits, MPO state, GameDVR, HAGS, and VBS/HVCI flags." `
         -OnClick ({ & $invokeRegCategory "Get-RegState_Gaming" "Gaming" "WinUltix - Extreme Gaming Profile" "Hardware & Gaming" }.GetNewClosure()) `

@@ -683,7 +683,7 @@ function Show-DriverStoreSweeper {
 
         $cols = @(
             @{ Header = "OEM INF";      Property = "OemInf";      Width = 95  }
-            @{ Header = "Status";       Property = "Status";      Width = 140 }
+            @{ Header = "Status";       Property = "Status";      Width = 145 }
             @{ Header = "Size";         Property = "SizeDisplay"; Width = 95  }
             @{ Header = "Original INF"; Property = "OriginalInf"; Width = 145 }
             @{ Header = "Provider";     Property = "Provider";    Width = 150 }
@@ -1005,7 +1005,7 @@ function Show-InstallerSweeper {
 
         $cols = @(
             @{ Header = "Package";      Property = "FileName";    Width = 110 }
-            @{ Header = "Status";       Property = "Status";      Width = 140 }
+            @{ Header = "Status";       Property = "Status";      Width = 145 }
             @{ Header = "Size";         Property = "SizeDisplay"; Width = 95  }
             @{ Header = "Product Name"; Property = "ProductName"; Width = 335 }
             @{ Header = "Publisher";    Property = "Publisher";   Width = 175 }
@@ -1479,7 +1479,7 @@ function Show-RegistryOrphanSweeper {
 }
 
 # ------------------------------------------
-# Z1: GHOST SERVICES & DRIVERS SWEEPER (MOVED FROM Z4)
+# Z1: GHOST SERVICES & DRIVERS SWEEPER
 # ------------------------------------------
 function Get-GhostServicesState {
     $ghosts = [System.Collections.Generic.List[PSCustomObject]]::new()

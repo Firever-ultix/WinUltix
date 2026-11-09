@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo.png" alt="WinUltix Logo" width="128" height="128" />
   <h1>WinUltix 3.14</h1>
-  <p><b>The Ultimate ~600KB Zero-WMI Windows 11 & 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
+  <p><b>The Ultimate ~650KB Zero-WMI Windows 11 & 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
 </div>
 
 > 🔗 **Part of the Ultix Ecosystem:**
@@ -10,7 +10,7 @@
 
 Most Windows utilities force a bad compromise: they are either bloated 150 MB background apps that eat your RAM, or reckless "black-box" scripts that blindly delete system files, break Windows Update, and ruin your Xbox/Steam logins.
 
-I built **WinUltix** to be the exact opposite: **a fast, 100% transparent, zero-dependency, Zero-WMI engineering toolkit (~600 KB)** for Windows 11 (25H2 / 26H2) and Windows 10. It replaces **10 separate standalone programs** (*DriverStore Explorer, PatchCleaner, MSI Utility, Process Lasso, LatencyMon, USB Tree Viewer, TimerResolution, Autoruns, TCP Optimizer, and Debloaters*) inside one native dark interface. Every tweak is explained on hover, runs asynchronously in background Runspaces without freezing the GUI, and includes a **Symmetric Revert (Undo)** engine so you can restore factory defaults anytime.
+I built **WinUltix** to be the exact opposite: **a fast, 100% transparent, zero-dependency, Zero-WMI engineering toolkit (~650 KB)** for Windows 11 (25H2 / 26H2) and Windows 10. It replaces **10 separate standalone programs** (*DriverStore Explorer, PatchCleaner, MSI Utility, Process Lasso, LatencyMon, USB Tree Viewer, TimerResolution, Autoruns, TCP Optimizer, and Debloaters*) inside one native dark interface. Every tweak is explained on hover, runs asynchronously in background Runspaces without freezing the GUI, and includes a **Symmetric Revert (Undo)** engine so you can restore factory defaults anytime.
 
 ![WinUltix Main Interface](assets/1.png)
 
@@ -23,7 +23,7 @@ irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix
 ```
 
 *(Prefer a standalone `.exe`? Grab the compiled executable from the **[Releases](https://github.com/Firever-ultix/WinUltix/releases)** page).*
-SHA-256: 46B2642FF4597A21709092EF387633DD9AF7200DA560B66416F613D06B19DFD4
+SHA-256: E3152F11D78392024B81240E9947D597326D0DE5F699A90B680010B5BC7C23DF
 
 ---
 
@@ -98,7 +98,7 @@ Go far beyond basic temp cleaners by reclaiming every GB wasted from hidden Wind
 #### ⚙️ 4. `Services` — Background Profiles & Interactive Managers (6 Tools)
 * **Office (Light) & Gaming (Heavy) Service Profiles:** Symmetrically disable **12 (Office)** or up to **60 (Gaming)** background services—including `SysMain`, `WSearch`, `Spooler`, `GameInputSvc`, disk-thrashing `DPS`/SRUM logging, and Per-User UWP sync templates (`CDPUserSvc`, `OneSyncSvc`, `UserDataSvc`)—with 1-click revert.
 * **Telemetry Scheduled Tasks Lockdown (8 Branches):** Disable Microsoft `CompatTelRunner` (*Application Experience*), CEIP, Autochk Proxy, DiskDiagnostic, Feedback, PerformanceTrace, WER, and XblGameSave task branches.
-* **System Services Manager (Interactive Grid):** What `services.msc` should have been—a zero-lag dark sortable table with instant search, `Automatic (Delayed)` detection, Per-User `_LUID` template syncing, and red safety locks (`[CRITICAL - LOCKED]`) on core boot/RPC/Defender services.
+* **System Services Manager (Interactive Grid):** What `services.msc` should have been—a zero-lag dark sortable table with instant search, **5 live SCM control buttons (`Start`, `Stop`, `Set Automatic`, `Set Manual`, `Set Disabled`)**, automatic unlocking of `Disabled (Start=4)` services on start, `Automatic (Delayed)` detection, Per-User `_LUID` template syncing, and red safety locks (`[CRITICAL - LOCKED]`) on core boot/RPC/Defender/AppX services.
 * **Scheduled Tasks Inspector & Deep Startup Manager:** Expose 3rd-party updaters and broken **`[GHOST / Missing Exe]`** tasks (with `WorkingDirectory`, unplugged-drive, and `TaskCache` DACL write-permission filtering so `TrustedInstaller`-locked OS tasks are never flagged), and audit every `Run`, `RunOnce`, GPO, and Startup folder entry across all loaded user profiles while decoding Task Manager's binary `StartupApproved` states.
 
 #### 🛡️ 5. `Security` — Privacy, USB/MTP Guard, Kernel Locks & Encrypted DNS (13 Tools)
@@ -114,7 +114,7 @@ Go far beyond basic temp cleaners by reclaiming every GB wasted from hidden Wind
 
 #### 🚑 6. `Integrity` — 1-Click System First-Aid & OS Repair (9 Tools)
 When Windows breaks, fix the exact subsystem without reinstalling the OS:
-* **Scan & Repair System (`ChkDisk + DISM + SFC`) + Fast `<3s` Health Audit:** Automated maintenance console that repairs filesystem errors, restores corrupted component store payloads, and verifies system files, paired with an instant `DISM /CheckHealth` and zero-WMI `fsutil` NTFS dirty-bit auditor.
+* **Scan & Repair System (`ChkDisk + DISM + SFC`) + Fast `<3s` Health Audit:** Automated maintenance console that repairs filesystem errors, restores corrupted component store payloads, and verifies system files, paired with an instant `DISM /CheckHealth` and native `FSCTL_IS_VOLUME_DIRTY` NTFS dirty-bit auditor.
 * **WinSxS Component Store Compression (`DISM /ResetBase`):** Safely compresses superseded Windows Update backup layers to reclaim 5–15 GB of SSD space (with real-time progress streaming and pending-reboot protection).
 * **Verify & Salvage WMI Repository:** Repairs broken system monitoring and hardware queries via `winmgmt /salvagerepository` and `wmiadap /f`.
 * **Reset Windows Update & Cryptographic Subsystem:** Fixes stuck updates by stopping `wuauserv`/`bits`/`cryptSvc`, purging corrupted `qmgr*.dat` queues, flushing `catroot2` & `DataStore`, and batch re-registering 21 core COM DLLs in a single pass.
@@ -137,8 +137,8 @@ When Windows breaks, fix the exact subsystem without reinstalling the OS:
 
 ![WinUltix 7](assets/7.png)
 
-* **💾 Asynchronous Portable JSON Profiles:**
-Configuring a new PC or helping a friend? Click **`[ Export Profile ]`** in the footer to save your active registry tweaks, exact `Win32PrioritySeparation` quantum value, Power & Display settings, USB Perimeter locks, SRP rules, service states, and Affinity Lasso roster into a portable `.json` file, and enforce them on any machine via **`[ Import Profile ]`**.
+* **💾 Asynchronous Portable JSON Profiles & Live UI Font Scaling (`[ A- ]` / `[ A+ ]`):**
+Configuring a new PC or helping a friend? Click **`[ Export Profile ]`** in the footer to save your active registry tweaks, exact `Win32PrioritySeparation` quantum value, Power & Display settings, USB Perimeter locks, SRP rules, service states, and Affinity Lasso roster into a portable `.json` file, and enforce them on any machine via **`[ Import Profile ]`**. Use the **`[ A- ]`** and **`[ A+ ]`** footer buttons anytime to scale UI and modal typography live on the fly.
 
 ---
 
