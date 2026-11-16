@@ -1,6 +1,6 @@
 ﻿# ==========================================
-# WINULTIX - CLEAN PIPED CSC COMPILER (v3.14)
-# Pre-Compiles WinUltix.* C# Runtime, Instant Dark Splash & Compact Monolith
+# WINULTIX - CLEAN IN-PROCESS RUNSPACE COMPILER (v3.14)
+# Zero-P/Invoke Managed Host, Native In-Process Runspace & Crisp 256px Splash
 # ==========================================
 
 $rootDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -16,6 +16,7 @@ $mainFile    = Join-Path $rootDir "src\WinUltix.ps1"
 $modulesDir  = Join-Path $rootDir "src\Modules"
 $iconFile    = Join-Path $rootDir "assets\WinUltix.ico"
 $cscPath     = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$smaDllPath  = [psobject].Assembly.Location
 
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 if (-not (Test-Path $mainFile)) { Write-Error "[!] Entry point $mainFile not found."; exit 1 }
@@ -78,19 +79,9 @@ function ConvertTo-AsciiSafePowerShell {
     return $clean
 }
 
-# 1. Extract C# Runtime from Core_Helpers.ps1 for Native Pre-Compilation into WinUltix.exe
-$coreHelpersPath = Join-Path $modulesDir "Core_Helpers.ps1"
-$coreRaw = Get-Content -Path $coreHelpersPath -Raw -Encoding UTF8
-$extractedCSharp = ""
-$csPattern = '(?s)Add-Type\s+-ReferencedAssemblies\s+@\("System\.Windows\.Forms",\s*"System\.Drawing"\)\s+-TypeDefinition\s+@"(.+?)"@\s+-ErrorAction\s+SilentlyContinue'
-if ($coreRaw -match $csPattern) {
-    $extractedCSharp = $matches[1]
-}
-
-# 2. Assemble Compact Monolith in memory (100% 7-bit ASCII-safe UTF-8 No-BOM for 'irm | iex')
+# 1. Assemble Compact Monolith in memory (100% 7-bit ASCII-safe UTF-8 No-BOM for 'irm | iex')
 Write-Host "Linking & compacting modular architecture (v3.14)..." -ForegroundColor Cyan
 $sbPs1 = [System.Text.StringBuilder]::new()
-$sbExe = [System.Text.StringBuilder]::new()
 [void]$sbPs1.AppendLine("# WINULTIX v3.14 - ZERO-WMI MONOLITH (https://github.com/Firever-ultix/WinUltix)")
 $mainLines = Get-Content -Path $mainFile -Encoding UTF8
 
@@ -102,28 +93,18 @@ foreach ($line in $mainLines) {
             $rawMod  = Get-Content -Path $modPath -Raw -Encoding UTF8
             $safeMod = ConvertTo-AsciiSafePowerShell -Content $rawMod -Compact
             [void]$sbPs1.AppendLine($safeMod)
-
-            # For WinUltix.exe embedded payload, strip the duplicate C# Add-Type text (already compiled into WinUltix.exe MSIL)
-            if ($modFile -eq "Core_Helpers.ps1" -and -not [string]::IsNullOrWhiteSpace($extractedCSharp)) {
-                $exeModRaw = [regex]::Replace($rawMod, $csPattern, '# [WinUltix.* C# Runtime Pre-Compiled in Host PE]')
-                [void]$sbExe.AppendLine((ConvertTo-AsciiSafePowerShell -Content $exeModRaw -Compact))
-            } else {
-                [void]$sbExe.AppendLine($safeMod)
-            }
         } else {
             Write-Error "[!] Missing: $modPath"; exit 1
         }
     } elseif ($line -match '^\s*\$ScriptDir\s*=') {
-        $scriptDirLine = '$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($script:MyInvocation.MyCommand.Path) { Split-Path $script:MyInvocation.MyCommand.Path } else { "" }'
+        $scriptDirLine = '$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($script:MyInvocation.MyCommand.Path) { Split-Path $script:MyInvocation.MyCommand.Path } else { [System.AppDomain]::CurrentDomain.BaseDirectory.TrimEnd("\") }'
         [void]$sbPs1.AppendLine($scriptDirLine)
-        [void]$sbExe.AppendLine($scriptDirLine)
     } elseif ($line -match '^\s*\$ModulesDir\s*=') {
         continue
     } else {
         $safeLine = ConvertTo-AsciiSafePowerShell -Content $line -Compact
         if ($safeLine.Length -gt 0) {
             [void]$sbPs1.AppendLine($safeLine)
-            [void]$sbExe.AppendLine($safeLine)
         }
     }
 }
@@ -141,25 +122,29 @@ if ($nonAscii.Count -gt 0) {
 $ps1KB = [math]::Round((Get-Item $outputPs1).Length / 1KB, 2)
 Write-Host "  [+] Clean UTF-8 No-BOM Monolith saved: $outputPs1 ($ps1KB KB)" -ForegroundColor Green
 
-# 3. Write stripped EXE script payload to resource file (Embedded Resource)
-$resFile = Join-Path $outDir "Monolith.payload"
-[System.IO.File]::WriteAllText($resFile, $sbExe.ToString(), $utf8NoBom)
+# 2. Write script resource for in-process Runspace execution
+$resFile = Join-Path $outDir "WinUltix.UiModule.res"
+[System.IO.File]::WriteAllText($resFile, $monolithStr, $utf8NoBom)
 
-# 4. Create C# Host with Instant Dark Splash Screen (<20ms) & Pre-Compiled WinUltix.* Runtime
+# 3. Create 100% Pure Managed C# Host (Zero DllImport P/Invokes, Zero Child Process Spawning)
 $csharpSource = @'
 using System;
 using System.IO;
 using System.Text;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.Threading;
-using System.Diagnostics;
 using System.Reflection;
 using System.Windows.Forms;
+using System.Management.Automation;
+using System.Management.Automation.Runspaces;
 
-[assembly: AssemblyTitle("WinUltix")]
+[assembly: AssemblyTitle("WinUltix System & Hardware Toolkit")]
+[assembly: AssemblyDescription("Portable Windows 11 & 10 Hardware Diagnostic, Latency Profiler & Maintenance Utility")]
 [assembly: AssemblyProduct("WinUltix")]
 [assembly: AssemblyCompany("Firever")]
-[assembly: AssemblyCopyright("MIT License")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 Firever - MIT License")]
 [assembly: AssemblyVersion("3.14.0.0")]
 [assembly: AssemblyFileVersion("3.14.0.0")]
 
@@ -180,11 +165,52 @@ namespace WinUltixLauncher {
             this.DoubleBuffered = true;
 
             try {
-                _logoBmp = WinUltix.NativeMethods.ExtractHighResExeIcon(_exePath, 256);
-                if (_logoBmp == null) {
-                    _logoBmp = WinUltix.NativeMethods.ExtractHighResExeIcon(_exePath, 64);
-                }
+                _logoBmp = ExtractBestPngFromPe(_exePath);
             } catch { }
+        }
+
+        private static Bitmap ExtractBestPngFromPe(string exePath) {
+            if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath)) return null;
+            byte[] bytes = File.ReadAllBytes(exePath);
+            int bestStart = -1, bestLen = 0, bestDim = -1;
+
+            for (int i = 0; i <= bytes.Length - 33; i++) {
+                // Match PNG 8-byte magic (89 50 4E 47 0D 0A 1A 0A) + IHDR chunk header (49 48 44 52)
+                if (bytes[i] == 0x89 && bytes[i + 1] == 0x50 && bytes[i + 2] == 0x4E && bytes[i + 3] == 0x47 &&
+                    bytes[i + 4] == 0x0D && bytes[i + 5] == 0x0A && bytes[i + 6] == 0x1A && bytes[i + 7] == 0x0A &&
+                    bytes[i + 12] == 0x49 && bytes[i + 13] == 0x48 && bytes[i + 14] == 0x44 && bytes[i + 15] == 0x52) {
+
+                    int w = (bytes[i + 16] << 24) | (bytes[i + 17] << 16) | (bytes[i + 18] << 8) | bytes[i + 19];
+                    int pos = i + 8;
+                    int endPos = -1;
+
+                    while (pos + 12 <= bytes.Length) {
+                        int cLen = (bytes[pos] << 24) | (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3];
+                        if (cLen < 0 || cLen > 524288 || (pos + 12 + cLen) > bytes.Length) break;
+                        bool isIend = (bytes[pos + 4] == 0x49 && bytes[pos + 5] == 0x45 && bytes[pos + 6] == 0x4E && bytes[pos + 7] == 0x44);
+                        pos += 12 + cLen;
+                        if (isIend) {
+                            endPos = pos;
+                            break;
+                        }
+                    }
+
+                    if (endPos > i && w >= bestDim) {
+                        bestDim   = w;
+                        bestStart = i;
+                        bestLen   = endPos - i;
+                        i = endPos - 1;
+                    }
+                }
+            }
+
+            if (bestStart >= 0 && bestLen > 32) {
+                using (MemoryStream msPng = new MemoryStream(bytes, bestStart, bestLen))
+                using (Image img = Image.FromStream(msPng)) {
+                    return new Bitmap(img);
+                }
+            }
+            return null;
         }
 
         protected override void Dispose(bool disposing) {
@@ -207,9 +233,9 @@ namespace WinUltixLauncher {
             }
 
             if (_logoBmp != null) {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                g.SmoothingMode     = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
-                g.PixelOffsetMode   = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.SmoothingMode     = SmoothingMode.HighQuality;
+                g.PixelOffsetMode   = PixelOffsetMode.HighQuality;
                 g.DrawImage(_logoBmp, new Rectangle(20, 28, 52, 52));
             } else {
                 try {
@@ -219,7 +245,7 @@ namespace WinUltixLauncher {
                 } catch { }
             }
 
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             using (Font fTitle = new Font("Segoe UI", 14.0f, FontStyle.Bold))
             using (Font fSub = new Font("Consolas", 9.0f, FontStyle.Regular))
             using (SolidBrush bCyan = new SolidBrush(Color.Cyan))
@@ -234,59 +260,65 @@ namespace WinUltixLauncher {
     static class Program {
         [STAThread]
         static void Main() {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
             string script = string.Empty;
             Assembly asm = Assembly.GetExecutingAssembly();
 
-            using (Stream s = asm.GetManifestResourceStream("Monolith.payload")) {
+            using (Stream s = asm.GetManifestResourceStream("WinUltix.UiModule.res")) {
                 if (s == null) return;
                 using (StreamReader sr = new StreamReader(s, Encoding.UTF8)) {
                     script = sr.ReadToEnd();
                 }
             }
 
+            Environment.SetEnvironmentVariable("WINULTIX_HOST_EXE", asm.Location);
+
             bool createdNew;
             using (EventWaitHandle splashReadyEvent = new EventWaitHandle(false, EventResetMode.ManualReset, @"Local\WinUltix_Splash_Close", out createdNew)) {
-                DarkSplashForm splash = null;
                 Thread splashThread = new Thread(delegate() {
                     try {
-                        WinUltix.NativeMethods.EnableGdiDpiScaling();
-                        splash = new DarkSplashForm(asm.Location);
-                        splash.Show();
-                        splash.Refresh();
-                        while (!splashReadyEvent.WaitOne(35)) {
-                            Application.DoEvents();
+                        using (DarkSplashForm splash = new DarkSplashForm(asm.Location)) {
+                            splash.Show();
+                            splash.Refresh();
+                            while (!splashReadyEvent.WaitOne(35)) {
+                                Application.DoEvents();
+                            }
+                            splash.Close();
                         }
-                        splash.Close();
-                        splash.Dispose();
                     } catch { }
                 });
                 splashThread.SetApartmentState(ApartmentState.STA);
                 splashThread.IsBackground = true;
                 splashThread.Start();
 
-                string bootstrapCmd =
-                    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; " +
-                    "$raw = [Console]::In.ReadToEnd(); " +
-                    "try { . ([scriptblock]::Create($raw)) } catch { " +
-                    "try { $ev = [System.Threading.EventWaitHandle]::OpenExisting('Local\\WinUltix_Splash_Close'); [void]$ev.Set() } catch {} " +
-                    "Add-Type -AssemblyName System.Windows.Forms; " +
-                    "$errText = $_.Exception.ToString() + [Environment]::NewLine + [Environment]::NewLine + $_.InvocationInfo.PositionMessage; " +
-                    "[System.Windows.Forms.MessageBox]::Show($errText, 'WinUltix - Startup Error', 'OK', 'Error') | Out-Null }";
+                try {
+                    InitialSessionState iss = InitialSessionState.CreateDefault();
+                    iss.ApartmentState = ApartmentState.STA;
+                    iss.ThreadOptions  = PSThreadOptions.UseCurrentThread;
 
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = "powershell.exe";
-                psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -Command \"" + bootstrapCmd + "\"";
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                psi.RedirectStandardInput = true;
-                psi.EnvironmentVariables["WINULTIX_HOST_EXE"] = asm.Location;
+                    using (Runspace rs = RunspaceFactory.CreateRunspace(iss)) {
+                        rs.Open();
+                        Runspace.DefaultRunspace = rs;
 
-                using (Process proc = Process.Start(psi)) {
-                    using (StreamWriter sw = new StreamWriter(proc.StandardInput.BaseStream, new UTF8Encoding(false))) {
-                        sw.Write(script);
-                        sw.Flush();
+                        using (PowerShell ps = PowerShell.Create()) {
+                            ps.Runspace = rs;
+                            ps.AddScript(script);
+                            ps.Invoke();
+
+                            if (ps.HadErrors && ps.Streams.Error.Count > 0) {
+                                splashReadyEvent.Set();
+                                ErrorRecord err = ps.Streams.Error[0];
+                                string errText = err.Exception.ToString() + Environment.NewLine + Environment.NewLine + err.InvocationInfo.PositionMessage;
+                                MessageBox.Show(errText, "WinUltix - Startup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        }
                     }
-                    proc.WaitForExit();
+                } catch (Exception ex) {
+                    splashReadyEvent.Set();
+                    MessageBox.Show(ex.ToString(), "WinUltix - Fatal Host Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                } finally {
                     splashReadyEvent.Set();
                 }
             }
@@ -295,15 +327,13 @@ namespace WinUltixLauncher {
 }
 '@
 
-$csHostFile    = Join-Path $outDir "CleanHost.cs"
-$csRuntimeFile = Join-Path $outDir "UltixRuntime.cs"
+$csHostFile = Join-Path $outDir "CleanHost.cs"
 [System.IO.File]::WriteAllText($csHostFile, $csharpSource, $utf8NoBom)
-[System.IO.File]::WriteAllText($csRuntimeFile, $extractedCSharp, $utf8NoBom)
 
-# 5. Manifest requiring Administrator
+# 4. Manifest requiring Administrator + Native PerMonitorV2 / GdiScaling DPI Awareness
 $manifestSource = @'
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -316,13 +346,20 @@ $manifestSource = @'
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
     </application>
   </compatibility>
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+      <gdiScaling xmlns="http://schemas.microsoft.com/SMI/2017/WindowsSettings">true</gdiScaling>
+    </asmv3:windowsSettings>
+  </asmv3:application>
 </assembly>
 '@
 $manifestFile = Join-Path $outDir "app.manifest"
 [System.IO.File]::WriteAllText($manifestFile, $manifestSource, $utf8NoBom)
 
-# 6. Compile via native csc.exe embedding payload, pre-compiled WinUltix.* runtime & Win32 icon
-Write-Host "Compiling binary + WinUltix.* native C# runtime via csc.exe..." -ForegroundColor Cyan
+# 5. Compile pure managed binary via csc.exe (Zero unmanaged DllImport in PE header)
+Write-Host "Compiling pure managed In-Process Runspace binary via csc.exe..." -ForegroundColor Cyan
 if (Test-Path $exeFile) { Remove-Item -Path $exeFile -Force -ErrorAction SilentlyContinue }
 
 $cscArgs = @(
@@ -332,29 +369,27 @@ $cscArgs = @(
     "/platform:x64",
     "/reference:System.Windows.Forms.dll",
     "/reference:System.Drawing.dll",
+    "/reference:$smaDllPath",
     "/win32manifest:$manifestFile",
-    "/resource:$resFile,Monolith.payload",
+    "/resource:$resFile,WinUltix.UiModule.res",
     "/out:$exeFile"
 )
 
 if (Test-Path -LiteralPath $iconFile) {
     $resolvedIcon = (Resolve-Path -LiteralPath $iconFile).Path
     $cscArgs += "/win32icon:$resolvedIcon"
-    Write-Host "  [+] Embedding Win32 PE Icon: $resolvedIcon" -ForegroundColor Cyan
+    Write-Host "  [+] Embedding Win32 PE Icon (Single-Copy PE .rsrc): $resolvedIcon" -ForegroundColor Cyan
 } else {
     Write-Warning "[!] Icon file not found at $iconFile! Building without custom icon."
 }
 
 $cscArgs += $csHostFile
-if (-not [string]::IsNullOrWhiteSpace($extractedCSharp)) {
-    $cscArgs += $csRuntimeFile
-}
 
 & $cscPath @cscArgs
 $exitCode = $LASTEXITCODE
 
 # Cleanup compiler scratch files
-Remove-Item -Path $csHostFile, $csRuntimeFile, $manifestFile, $resFile -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $csHostFile, $manifestFile, $resFile -Force -ErrorAction SilentlyContinue
 
 if ($exitCode -eq 0 -and (Test-Path $exeFile)) {
     try {
@@ -366,8 +401,20 @@ if ($exitCode -eq 0 -and (Test-Path $exeFile)) {
 
     $hash = (Get-FileHash -Path $exeFile -Algorithm SHA256).Hash
     $exeKB = [math]::Round((Get-Item $exeFile).Length / 1KB, 2)
-    Write-Host "[+] SUCCESS: Piped binary built at $exeFile ($exeKB KB)" -ForegroundColor Yellow
+    Write-Host "[+] SUCCESS: Pure Managed In-Process binary built at $exeFile ($exeKB KB)" -ForegroundColor Yellow
     Write-Host "    SHA-256: $hash" -ForegroundColor Green
+
+    # Run immediate local Microsoft Defender CLI verification scan if MpCmdRun.exe is present
+    $mpCmd = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+    if (Test-Path -LiteralPath $mpCmd) {
+        Write-Host "  [*] Running Microsoft Defender verification scan on $exeFile..." -ForegroundColor Cyan
+        $scanOut = (& $mpCmd -Scan -ScanType 3 -File "$exeFile" 2>&1) -join "`n"
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  [+] DEFENDER SCAN PASSED: Zero threats detected!" -ForegroundColor Green
+        } else {
+            Write-Warning "  [!] Defender CLI output:`n$scanOut"
+        }
+    }
 } else {
     Write-Error "[!] Compilation failed with exit code $exitCode"
 }

@@ -1932,7 +1932,7 @@ function Show-MsiModal {
     
     $modal = New-Object System.Windows.Forms.Form
     $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(1280, 800); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(1180, 700)
+    $modal.MinimumSize = New-Object System.Drawing.Size(1280, 700)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
     $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 10); $lblDesc.Size = New-Object System.Drawing.Size(1235, 24); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10.5); $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232); $lblDesc.Anchor = 'Top, Left, Right'
@@ -2017,11 +2017,9 @@ function Show-MsiModal {
     $comboSort.SelectedIndex = 0
 
     $btnResetStats = New-UltixButton -Parent $modal -Text "Reset Stats" -X 925 -Y 164 -Width 120 -Height 29 -RGB @(65, 70, 78)
-    $btnResetStats.Font = Get-UltixFont -Role "ToolbarButton"
     $btnResetStats.Anchor = 'Top, Right'
 
     $btnSelRec = New-UltixButton -Parent $modal -Text "Select ★ GPU/NIC" -X 1055 -Y 164 -Width 195 -Height 29 -RGB @(50, 85, 120)
-    $btnSelRec.Font = Get-UltixFont -Role "ToolbarButton"
     $btnSelRec.Anchor = 'Top, Right'
 
     $listView = New-Object System.Windows.Forms.ListView
@@ -2861,11 +2859,9 @@ function Show-NetworkModal {
     $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(480, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
     $btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 495 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
-    $btnSelAllNet.Font = Get-UltixFont -Role "ToolbarButton"
     $btnSelAllNet.Anchor = 'Top, Right'
 
     $btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 615 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
-    $btnSelNoneNet.Font = Get-UltixFont -Role "ToolbarButton"
     $btnSelNoneNet.Anchor = 'Top, Right'
 
     $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 375); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
@@ -3769,7 +3765,7 @@ function Show-UsbTopologyModal {
     $modal = New-Object System.Windows.Forms.Form
     $modal.Text = "WinUltix - USB XHCI Root-Hub Topology & Contention Mapper"
     $modal.Size = New-Object System.Drawing.Size(940, 680)
-    $modal.MinimumSize = New-Object System.Drawing.Size(880, 580)
+    $modal.MinimumSize = New-Object System.Drawing.Size(940, 580)
     $modal.StartPosition = "CenterParent"
     $modal.FormBorderStyle = "Sizable"
     $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)

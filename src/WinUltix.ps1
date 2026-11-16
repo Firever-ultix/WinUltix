@@ -69,7 +69,7 @@ foreach ($fn in (Get-ChildItem -Path Function:\)) {
 $global:form = New-Object System.Windows.Forms.Form
 $global:form.Text = "WinUltix - Ultimate System Toolkit $AppVersion"
 $global:form.Size = New-Object System.Drawing.Size(1280, 800)
-$global:form.MinimumSize = New-Object System.Drawing.Size(1260, 750)
+$global:form.MinimumSize = New-Object System.Drawing.Size(1280, 750)
 $global:form.StartPosition = "CenterScreen"
 $global:form.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30)
 $global:form.FormBorderStyle = "Sizable"
@@ -104,8 +104,8 @@ $global:tabControl.Size = New-Object System.Drawing.Size(410, 700)
 $global:tabControl.Anchor = 'Top, Bottom, Left'
 
 $global:progBar = New-Object WinUltix.DarkProgressBar
-$global:progBar.Location = New-Object System.Drawing.Point(440, 725)
-$global:progBar.Size = New-Object System.Drawing.Size(406, 25)
+$global:progBar.Location = New-Object System.Drawing.Point(440, 724)
+$global:progBar.Size = New-Object System.Drawing.Size(406, 28)
 $global:progBar.Minimum = 0
 $global:progBar.Maximum = 100
 $global:progBar.Anchor = 'Bottom, Left, Right'
@@ -128,8 +128,9 @@ $footerFont = Get-UltixFont -Role "FooterButton"
 
 $global:btnFontDec = New-Object System.Windows.Forms.Button
 $global:btnFontDec.Text = "A-"
-$global:btnFontDec.Location = New-Object System.Drawing.Point(856, 725)
-$global:btnFontDec.Size = New-Object System.Drawing.Size(42, 25)
+$global:btnFontDec.UseMnemonic = $false
+$global:btnFontDec.Location = New-Object System.Drawing.Point(856, 724)
+$global:btnFontDec.Size = New-Object System.Drawing.Size(42, 28)
 $global:btnFontDec.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $global:btnFontDec.ForeColor = [System.Drawing.Color]::LightSkyBlue
 $global:btnFontDec.FlatStyle = "Flat"
@@ -142,8 +143,9 @@ $global:btnFontDec.Add_Click({ Set-UltixFontScale -Delta -0.5 })
 
 $global:btnFontInc = New-Object System.Windows.Forms.Button
 $global:btnFontInc.Text = "A+"
-$global:btnFontInc.Location = New-Object System.Drawing.Point(904, 725)
-$global:btnFontInc.Size = New-Object System.Drawing.Size(42, 25)
+$global:btnFontInc.UseMnemonic = $false
+$global:btnFontInc.Location = New-Object System.Drawing.Point(904, 724)
+$global:btnFontInc.Size = New-Object System.Drawing.Size(42, 28)
 $global:btnFontInc.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $global:btnFontInc.ForeColor = [System.Drawing.Color]::LightSkyBlue
 $global:btnFontInc.FlatStyle = "Flat"
@@ -156,13 +158,15 @@ $global:btnFontInc.Add_Click({ Set-UltixFontScale -Delta 0.5 })
 
 $btnExportLog = New-Object System.Windows.Forms.Button
 $btnExportLog.Text = "Export Log to Desktop"
-$btnExportLog.Location = New-Object System.Drawing.Point(956, 725)
-$btnExportLog.Size = New-Object System.Drawing.Size(164, 25)
+$btnExportLog.UseMnemonic = $false
+$btnExportLog.Location = New-Object System.Drawing.Point(956, 724)
+$btnExportLog.Size = New-Object System.Drawing.Size(164, 28)
 $btnExportLog.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
 $btnExportLog.ForeColor = [System.Drawing.Color]::White
 $btnExportLog.FlatStyle = "Flat"
 $btnExportLog.Anchor = 'Bottom, Right'
-$btnExportLog.Font = $footerFont
+$btnExportLog.AccessibleName = "FooterButton"
+$btnExportLog.Font = Get-UltixFittedFont -Control $btnExportLog -Role "FooterButton"
 $btnExportLog.Add_Click({ 
     if ($global:infoBox.Text.Length -gt 0) { 
         $desktop = [Environment]::GetFolderPath("Desktop")
@@ -176,14 +180,15 @@ $btnExportLog.Add_Click({
 
 $btnClearLog = New-Object System.Windows.Forms.Button
 $btnClearLog.Text = "[ Clear Log ]"
-$btnClearLog.Location = New-Object System.Drawing.Point(1130, 725)
-$btnClearLog.Size = New-Object System.Drawing.Size(110, 25)
+$btnClearLog.UseMnemonic = $false
+$btnClearLog.Location = New-Object System.Drawing.Point(1130, 724)
+$btnClearLog.Size = New-Object System.Drawing.Size(110, 28)
 $btnClearLog.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnClearLog.ForeColor = [System.Drawing.Color]::LightGray
 $btnClearLog.FlatStyle = "Flat"
 $btnClearLog.Anchor = 'Bottom, Right'
 $btnClearLog.AccessibleName = "FooterButton"
-$btnClearLog.Font = $footerFont
+$btnClearLog.Font = Get-UltixFittedFont -Control $btnClearLog -Role "FooterButton"
 $btnClearLog.Add_Click({ 
     $global:infoBox.Clear()
     Write-UltixSystemBanner -StatusMessage "Ready for deployment."
@@ -191,14 +196,15 @@ $btnClearLog.Add_Click({
 
 $btnCredits = New-Object System.Windows.Forms.Button
 $btnCredits.Text = "[ About / GitHub ]"
-$btnCredits.Location = New-Object System.Drawing.Point(10, 725)
-$btnCredits.Size = New-Object System.Drawing.Size(130, 25)
+$btnCredits.UseMnemonic = $false
+$btnCredits.Location = New-Object System.Drawing.Point(10, 724)
+$btnCredits.Size = New-Object System.Drawing.Size(130, 28)
 $btnCredits.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
 $btnCredits.ForeColor = [System.Drawing.Color]::LightGray
 $btnCredits.FlatStyle = "Flat"
 $btnCredits.Anchor = 'Bottom, Left'
 $btnCredits.AccessibleName = "FooterButton"
-$btnCredits.Font = $footerFont
+$btnCredits.Font = Get-UltixFittedFont -Control $btnCredits -Role "FooterButton"
 $btnCredits.Add_Click({ 
     $aboutForm = New-Object System.Windows.Forms.Form
     $aboutForm.Text = "About WinUltix"
@@ -285,28 +291,30 @@ $btnCredits.Add_Click({
 
 $btnExportProfile = New-Object System.Windows.Forms.Button
 $btnExportProfile.Text = "[ Export Profile ]"
-$btnExportProfile.Location = New-Object System.Drawing.Point(150, 725)
-$btnExportProfile.Size = New-Object System.Drawing.Size(130, 25)
+$btnExportProfile.UseMnemonic = $false
+$btnExportProfile.Location = New-Object System.Drawing.Point(150, 724)
+$btnExportProfile.Size = New-Object System.Drawing.Size(130, 28)
 $btnExportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
 $btnExportProfile.ForeColor = [System.Drawing.Color]::White
 $btnExportProfile.FlatStyle = "Flat"
 $btnExportProfile.Anchor = 'Bottom, Left'
 $btnExportProfile.AccessibleName = "FooterButton"
-$btnExportProfile.Font = $footerFont
+$btnExportProfile.Font = Get-UltixFittedFont -Control $btnExportProfile -Role "FooterButton"
 $btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, Quantum Scheduler, Power & Display settings, USB Guard, SRP locks, Services, and Hardware locks into a portable JSON snapshot." })
 $btnExportProfile.Add_MouseLeave({ Restore-Log })
 $btnExportProfile.Add_Click({ Export-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
 
 $btnImportProfile = New-Object System.Windows.Forms.Button
 $btnImportProfile.Text = "[ Import Profile ]"
-$btnImportProfile.Location = New-Object System.Drawing.Point(290, 725)
-$btnImportProfile.Size = New-Object System.Drawing.Size(130, 25)
+$btnImportProfile.UseMnemonic = $false
+$btnImportProfile.Location = New-Object System.Drawing.Point(290, 724)
+$btnImportProfile.Size = New-Object System.Drawing.Size(130, 28)
 $btnImportProfile.BackColor = [System.Drawing.Color]::FromArgb(255, 135, 50, 50)
 $btnImportProfile.ForeColor = [System.Drawing.Color]::White
 $btnImportProfile.FlatStyle = "Flat"
 $btnImportProfile.Anchor = 'Bottom, Left'
 $btnImportProfile.AccessibleName = "FooterButton"
-$btnImportProfile.Font = $footerFont
+$btnImportProfile.Font = Get-UltixFittedFont -Control $btnImportProfile -Role "FooterButton"
 $btnImportProfile.Add_MouseEnter({ Show-Description "Imports and enforces a previously saved WinUltix JSON configuration snapshot on this machine." })
 $btnImportProfile.Add_MouseLeave({ Restore-Log })
 $btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })

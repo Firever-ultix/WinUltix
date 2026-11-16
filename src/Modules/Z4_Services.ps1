@@ -465,7 +465,7 @@ function Show-ServicesGrid {
         $modal = New-Object System.Windows.Forms.Form
         $modal.Text = "WinUltix - System Services Manager"
         $modal.Size = New-Object System.Drawing.Size(980, 700)
-        $modal.MinimumSize = New-Object System.Drawing.Size(960, 580)
+        $modal.MinimumSize = New-Object System.Drawing.Size(980, 580)
         $modal.StartPosition = "CenterParent"
         $modal.FormBorderStyle = "Sizable"
         $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
@@ -480,8 +480,6 @@ function Show-ServicesGrid {
         $lblDesc.Font = Get-UltixFont -Role "ModalDesc"
         $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
         $lblDesc.Anchor = 'Top, Left, Right'
-
-        $toolbarFont = Get-UltixFont -Role "ToolbarButton"
 
         $lblSearch = New-Object System.Windows.Forms.Label
         $lblSearch.Text = "Filter:"
@@ -500,30 +498,33 @@ function Show-ServicesGrid {
 
         $btnSelVis = New-Object System.Windows.Forms.Button
         $btnSelVis.Text = "Select Visible"
+        $btnSelVis.UseMnemonic = $false
         $btnSelVis.Location = New-Object System.Drawing.Point(332, 50)
         $btnSelVis.Size = New-Object System.Drawing.Size(120, 30)
         $btnSelVis.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
         $btnSelVis.ForeColor = [System.Drawing.Color]::White
         $btnSelVis.FlatStyle = "Flat"
-        $btnSelVis.Font = $toolbarFont
+        $btnSelVis.Font = Get-UltixFittedFont -Control $btnSelVis -Role "ToolbarButton"
 
         $btnSelNone = New-Object System.Windows.Forms.Button
         $btnSelNone.Text = "Deselect All"
+        $btnSelNone.UseMnemonic = $false
         $btnSelNone.Location = New-Object System.Drawing.Point(459, 50)
         $btnSelNone.Size = New-Object System.Drawing.Size(120, 30)
         $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
         $btnSelNone.ForeColor = [System.Drawing.Color]::White
         $btnSelNone.FlatStyle = "Flat"
-        $btnSelNone.Font = $toolbarFont
+        $btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
 
         $btnRefresh = New-Object System.Windows.Forms.Button
         $btnRefresh.Text = "Refresh Table"
+        $btnRefresh.UseMnemonic = $false
         $btnRefresh.Location = New-Object System.Drawing.Point(586, 50)
         $btnRefresh.Size = New-Object System.Drawing.Size(120, 30)
         $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnRefresh.ForeColor = [System.Drawing.Color]::White
         $btnRefresh.FlatStyle = "Flat"
-        $btnRefresh.Font = $toolbarFont
+        $btnRefresh.Font = Get-UltixFittedFont -Control $btnRefresh -Role "ToolbarButton"
 
         $lblCount = New-Object System.Windows.Forms.Label
         $lblCount.Location = New-Object System.Drawing.Point(710, 55)
@@ -565,66 +566,70 @@ function Show-ServicesGrid {
         $fgMuted   = [System.Drawing.Color]::FromArgb(255, 125, 134, 145)
 
         # 5 Dedicated Service Control Buttons + Close
-        $actionBtnFont = Get-UltixFont -Role "ModalAction"
-
         $btnStart = New-Object System.Windows.Forms.Button
         $btnStart.Text = "Start"
+        $btnStart.UseMnemonic = $false
         $btnStart.Location = New-Object System.Drawing.Point(15, 602)
         $btnStart.Size = New-Object System.Drawing.Size(140, 38)
         $btnStart.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 95, 60)
         $btnStart.ForeColor = [System.Drawing.Color]::White
         $btnStart.FlatStyle = "Flat"
-        $btnStart.Font = $actionBtnFont
+        $btnStart.Font = Get-UltixFittedFont -Control $btnStart -Role "ModalAction"
         $btnStart.Anchor = 'Bottom, Left'
 
         $btnStop = New-Object System.Windows.Forms.Button
         $btnStop.Text = "Stop"
+        $btnStop.UseMnemonic = $false
         $btnStop.Location = New-Object System.Drawing.Point(163, 602)
         $btnStop.Size = New-Object System.Drawing.Size(140, 38)
         $btnStop.BackColor = [System.Drawing.Color]::FromArgb(255, 140, 85, 40)
         $btnStop.ForeColor = [System.Drawing.Color]::White
         $btnStop.FlatStyle = "Flat"
-        $btnStop.Font = $actionBtnFont
+        $btnStop.Font = Get-UltixFittedFont -Control $btnStop -Role "ModalAction"
         $btnStop.Anchor = 'Bottom, Left'
 
         $btnSetAuto = New-Object System.Windows.Forms.Button
         $btnSetAuto.Text = "Set Automatic"
+        $btnSetAuto.UseMnemonic = $false
         $btnSetAuto.Location = New-Object System.Drawing.Point(311, 602)
         $btnSetAuto.Size = New-Object System.Drawing.Size(155, 38)
         $btnSetAuto.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSetAuto.ForeColor = [System.Drawing.Color]::White
         $btnSetAuto.FlatStyle = "Flat"
-        $btnSetAuto.Font = $actionBtnFont
+        $btnSetAuto.Font = Get-UltixFittedFont -Control $btnSetAuto -Role "ModalAction"
         $btnSetAuto.Anchor = 'Bottom, Left'
 
         $btnSetManual = New-Object System.Windows.Forms.Button
         $btnSetManual.Text = "Set Manual"
+        $btnSetManual.UseMnemonic = $false
         $btnSetManual.Location = New-Object System.Drawing.Point(474, 602)
         $btnSetManual.Size = New-Object System.Drawing.Size(155, 38)
         $btnSetManual.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSetManual.ForeColor = [System.Drawing.Color]::White
         $btnSetManual.FlatStyle = "Flat"
-        $btnSetManual.Font = $actionBtnFont
+        $btnSetManual.Font = Get-UltixFittedFont -Control $btnSetManual -Role "ModalAction"
         $btnSetManual.Anchor = 'Bottom, Left'
 
         $btnSetDisabled = New-Object System.Windows.Forms.Button
         $btnSetDisabled.Text = "Set Disabled"
+        $btnSetDisabled.UseMnemonic = $false
         $btnSetDisabled.Location = New-Object System.Drawing.Point(637, 602)
         $btnSetDisabled.Size = New-Object System.Drawing.Size(155, 38)
         $btnSetDisabled.BackColor = [System.Drawing.Color]::FromArgb(255, 135, 50, 50)
         $btnSetDisabled.ForeColor = [System.Drawing.Color]::White
         $btnSetDisabled.FlatStyle = "Flat"
-        $btnSetDisabled.Font = $actionBtnFont
+        $btnSetDisabled.Font = Get-UltixFittedFont -Control $btnSetDisabled -Role "ModalAction"
         $btnSetDisabled.Anchor = 'Bottom, Left'
 
         $btnClose = New-Object System.Windows.Forms.Button
         $btnClose.Text = "Close"
+        $btnClose.UseMnemonic = $false
         $btnClose.Location = New-Object System.Drawing.Point(800, 602)
         $btnClose.Size = New-Object System.Drawing.Size(150, 38)
         $btnClose.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
         $btnClose.ForeColor = [System.Drawing.Color]::White
         $btnClose.FlatStyle = "Flat"
-        $btnClose.Font = $actionBtnFont
+        $btnClose.Font = Get-UltixFittedFont -Control $btnClose -Role "ModalAction"
         $btnClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $btnClose.Anchor = 'Bottom, Right'
 

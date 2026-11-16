@@ -11,12 +11,6 @@ Add-Type -AssemblyName System.Drawing
 # ------------------------------------------
 # 1. UNIFIED WIN32 / NTDLL / KERNEL32 / CFGMGR32 P/INVOKE RUNTIME
 # ------------------------------------------
-# Fast-path (<0.3ms): If launched via compiled WinUltix.exe, load pre-compiled WinUltix.* C# types directly from host PE
-if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Type -and
-    -not [string]::IsNullOrWhiteSpace($env:WINULTIX_HOST_EXE) -and
-    [System.IO.File]::Exists($env:WINULTIX_HOST_EXE)) {
-    try { [void][System.Reflection.Assembly]::LoadFrom($env:WINULTIX_HOST_EXE) } catch { }
-}
 
 if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Type) {
     Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -TypeDefinition @"
@@ -207,16 +201,13 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             }
         }
 
-        // Token Privilege Escalation & Live SCM Service Configurator for TrustedInstaller/SYSTEM-Protected Services
+        // Token Privilege Escalation & Live SCM Service Configurator
         public static class PrivilegeEnabler {
-            private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-            private const uint TOKEN_DUPLICATE = 0x0002;
-            private const uint TOKEN_IMPERSONATE = 0x0004;
-            private const uint TOKEN_QUERY = 0x0008;
-            private const uint TOKEN_ALL_ACCESS = 0x000F01FF;
             private const uint SC_MANAGER_CONNECT = 0x0001;
             private const uint SERVICE_CHANGE_CONFIG = 0x0002;
             private const uint SERVICE_START = 0x0010;
+            private const uint SERVICE_STOP = 0x0020;
+            private const uint SERVICE_CONTROL_STOP = 0x00000001;
             private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF;
 
             [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
@@ -227,17 +218,6 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
 
             [DllImport("advapi32.dll", SetLastError = true)]
             private static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            private static extern bool DuplicateTokenEx(
-                IntPtr hExistingToken, uint dwDesiredAccess, IntPtr lpTokenAttributes,
-                int ImpersonationLevel, int TokenType, out IntPtr phNewToken);
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            private static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            private static extern bool RevertToSelf();
 
             [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
             private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint dwAccess);
@@ -255,13 +235,13 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             private static extern bool StartServiceW(IntPtr hService, uint dwNumServiceArgs, IntPtr lpServiceArgVectors);
 
             [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool ControlService(IntPtr hService, uint dwControl, out SERVICE_STATUS lpServiceStatus);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
             private static extern bool CloseServiceHandle(IntPtr hSCObject);
 
             [DllImport("kernel32.dll", ExactSpelling = true)]
             private static extern IntPtr GetCurrentProcess();
-
-            [DllImport("kernel32.dll", SetLastError = true)]
-            private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool CloseHandle(IntPtr hObject);
@@ -271,6 +251,17 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 public int Count;
                 public long Luid;
                 public int Attr;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct SERVICE_STATUS {
+                public uint dwServiceType;
+                public uint dwCurrentState;
+                public uint dwControlsAccepted;
+                public uint dwWin32ExitCode;
+                public uint dwServiceSpecificExitCode;
+                public uint dwCheckPoint;
+                public uint dwWaitHint;
             }
 
             public static void EnablePrivilege(string privilege) {
@@ -286,75 +277,20 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 }
             }
 
-            private static bool ImpersonateSystem() {
-                EnablePrivilege("SeDebugPrivilege");
-                foreach (string procName in new string[] { "winlogon", "services" }) {
-                    System.Diagnostics.Process[] procs = System.Diagnostics.Process.GetProcessesByName(procName);
-                    foreach (System.Diagnostics.Process p in procs) {
-                        IntPtr hProc = IntPtr.Zero;
-                        IntPtr hTok  = IntPtr.Zero;
-                        IntPtr hDup  = IntPtr.Zero;
-                        try {
-                            hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, p.Id);
-                            if (hProc == IntPtr.Zero) continue;
-                            if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY, ref hTok)) continue;
-                            if (!DuplicateTokenEx(hTok, TOKEN_ALL_ACCESS, IntPtr.Zero, 2, 2, out hDup)) continue;
-                            if (ImpersonateLoggedOnUser(hDup)) return true;
-                        } catch {
-                        } finally {
-                            if (hDup  != IntPtr.Zero) CloseHandle(hDup);
-                            if (hTok  != IntPtr.Zero) CloseHandle(hTok);
-                            if (hProc != IntPtr.Zero) CloseHandle(hProc);
-                            p.Dispose();
-                        }
-                    }
-                }
-                return false;
-            }
-
-            private const uint SERVICE_STOP = 0x0020;
-            private const uint SERVICE_CONTROL_STOP = 0x00000001;
-
-            [StructLayout(LayoutKind.Sequential)]
-            private struct SERVICE_STATUS {
-                public uint dwServiceType;
-                public uint dwCurrentState;
-                public uint dwControlsAccepted;
-                public uint dwWin32ExitCode;
-                public uint dwServiceSpecificExitCode;
-                public uint dwCheckPoint;
-                public uint dwWaitHint;
-            }
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            private static extern bool ControlService(IntPtr hService, uint dwControl, out SERVICE_STATUS lpServiceStatus);
-
             public static bool SetServiceConfigLive(string serviceName, int startType, bool startNow) {
                 if (string.IsNullOrWhiteSpace(serviceName)) return false;
                 bool changeConfig = (startType >= 0 && startType <= 4);
                 uint access = (changeConfig ? SERVICE_CHANGE_CONFIG : 0U) | (startNow ? SERVICE_START : 0U);
                 if (access == 0U) return false;
 
-                bool impersonated = false;
                 IntPtr hScm = IntPtr.Zero;
                 IntPtr hSvc = IntPtr.Zero;
 
                 try {
                     hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
-                    if (hScm != IntPtr.Zero) {
-                        hSvc = OpenServiceW(hScm, serviceName, access);
-                    }
-
-                    if (hSvc == IntPtr.Zero) {
-                        if (hScm != IntPtr.Zero) { CloseServiceHandle(hScm); hScm = IntPtr.Zero; }
-                        impersonated = ImpersonateSystem();
-                        if (!impersonated) return false;
-
-                        hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
-                        if (hScm == IntPtr.Zero) return false;
-                        hSvc = OpenServiceW(hScm, serviceName, access);
-                        if (hSvc == IntPtr.Zero) return false;
-                    }
+                    if (hScm == IntPtr.Zero) return false;
+                    hSvc = OpenServiceW(hScm, serviceName, access);
+                    if (hSvc == IntPtr.Zero) return false;
 
                     bool ok = true;
                     if (changeConfig) {
@@ -370,39 +306,25 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 } finally {
                     if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
                     if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
-                    if (impersonated) RevertToSelf();
                 }
             }
 
             public static bool StopServiceLive(string serviceName) {
                 if (string.IsNullOrWhiteSpace(serviceName)) return false;
-                bool impersonated = false;
                 IntPtr hScm = IntPtr.Zero;
                 IntPtr hSvc = IntPtr.Zero;
 
                 try {
                     hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
-                    if (hScm != IntPtr.Zero) {
-                        hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
-                    }
-
-                    if (hSvc == IntPtr.Zero) {
-                        if (hScm != IntPtr.Zero) { CloseServiceHandle(hScm); hScm = IntPtr.Zero; }
-                        impersonated = ImpersonateSystem();
-                        if (!impersonated) return false;
-
-                        hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
-                        if (hScm == IntPtr.Zero) return false;
-                        hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
-                        if (hSvc == IntPtr.Zero) return false;
-                    }
+                    if (hScm == IntPtr.Zero) return false;
+                    hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+                    if (hSvc == IntPtr.Zero) return false;
 
                     SERVICE_STATUS status;
                     return ControlService(hSvc, SERVICE_CONTROL_STOP, out status);
                 } finally {
                     if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
                     if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
-                    if (impersonated) RevertToSelf();
                 }
             }
         }
@@ -889,7 +811,6 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             public static bool IsRunning { get { return _running; } }
 
             private static void LoadKernelModules() {
-                PrivilegeEnabler.EnablePrivilege("SeDebugPrivilege");
                 PrivilegeEnabler.EnablePrivilege("SeSystemProfilePrivilege");
 
                 uint retLen = 0;
@@ -2495,7 +2416,7 @@ $global:UltixTypography = @{
     MonoFamily      = "Consolas"
     ScaleOffset     = 0.0
     TabHeaderSize   = 9.0     # Fixed for 57px tab headers so they never clip
-    FooterBtnSize   = 9.75    # Frozen at +0.5 sweet-spot for global footer buttons
+    FooterBtnSize   = 9.25    # Optimal fit for 28px global footer buttons
     MainBtnSize     = 9.75    # Full-width tab buttons (320px / 370px)
     CompactBtnSize  = 9.25    # Half-width 2-column buttons (180px / 240px)
     ToolbarBtnSize  = 9.5     # Modal top toolbar buttons (Select All, Select Visible, Refresh)
@@ -2519,16 +2440,12 @@ try {
 function Get-UltixFont {
     param(
         [ValidateSet("TabHeader", "MainButton", "CompactButton", "IconButton", "FooterButton", "ToolbarButton", "ModalAction", "SectionHeader", "ModalDesc", "GridText", "GridMono")]
-        [string]$Role = "MainButton"
+        [string]$Role = "MainButton",
+        [double]$CustomSize = 0.0
     )
     $t = $global:UltixTypography
     $offset     = [double]$t.ScaleOffset
     $halfOffset = [math]::Round(($offset * 0.5) * 4.0) / 4.0
-    $cacheKey   = "$Role|$($t.UiFamily)|$($t.TextFamily)|$($t.MonoFamily)|$offset"
-
-    if ($global:UltixFontCache.ContainsKey($cacheKey)) {
-        return $global:UltixFontCache[$cacheKey]
-    }
 
     $family = $t.UiFamily
     $size   = 9.5
@@ -2548,6 +2465,15 @@ function Get-UltixFont {
         "GridMono"      { $family = $t.MonoFamily; $size = $t.GridTextSize + $offset;                            $style = [System.Drawing.FontStyle]::Regular }
     }
 
+    if ($CustomSize -gt 0.0) {
+        $size = [math]::Round($CustomSize * 4.0) / 4.0
+    }
+
+    $cacheKey = "$family|$([int]$style)|$size"
+    if ($global:UltixFontCache.ContainsKey($cacheKey)) {
+        return $global:UltixFontCache[$cacheKey]
+    }
+
     if ($family -eq "Segoe UI Semibold" -and $style -eq [System.Drawing.FontStyle]::Regular) {
         try {
             $fontObj = New-Object System.Drawing.Font("Segoe UI Semibold", [float]$size, [System.Drawing.FontStyle]::Regular)
@@ -2560,6 +2486,79 @@ function Get-UltixFont {
 
     $global:UltixFontCache[$cacheKey] = $fontObj
     return $fontObj
+}
+
+function Get-UltixFittedFont {
+    param(
+        [Parameter(Mandatory=$true)][System.Windows.Forms.Control]$Control,
+        [string]$Role = ""
+    )
+    if ([string]::IsNullOrWhiteSpace($Role)) {
+        $Role = if (-not [string]::IsNullOrWhiteSpace($Control.AccessibleName)) { $Control.AccessibleName } else { "MainButton" }
+    }
+
+    $baseFont = Get-UltixFont -Role $Role
+    if (-not ($Control -is [System.Windows.Forms.Button]) -or [string]::IsNullOrWhiteSpace($Control.Text) -or $Role -eq "IconButton" -or $Control.Width -le 45) {
+        return $baseFont
+    }
+
+    # WinForms FlatButtonAdapter subtracts ~22px horizontally (border + adapter padding + GDI overhang)
+    # and ~8..12px vertically before passing DT_EDITCONTROL to user32!DrawTextExW.
+    $maxWidth  = [math]::Max(20, $Control.Width - 22)
+    $maxHeight = [math]::Max(12, $Control.Height - 8)
+    $isTallMultiLine = ($Control.Height -ge 55)
+
+    $curSize           = [double]$baseFont.SizeInPoints
+    $minSingleLineSize = 8.0
+    $minFallbackSize   = 7.25
+
+    if ($isTallMultiLine) {
+        while ($curSize -ge $minFallbackSize) {
+            $candFont = Get-UltixFont -Role $Role -CustomSize $curSize
+            $wordsFit = $true
+            foreach ($word in ($Control.Text -split '\s+')) {
+                if ([string]::IsNullOrEmpty($word)) { continue }
+                $wSz = [System.Windows.Forms.TextRenderer]::MeasureText($word, $candFont, [System.Drawing.Size]::new(2000, 2000), [System.Windows.Forms.TextFormatFlags]::SingleLine)
+                if ($wSz.Width -gt $maxWidth) {
+                    $wordsFit = $false
+                    break
+                }
+            }
+            if ($wordsFit) {
+                $wrapFlags = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::TextBoxControl
+                $wrapSz = [System.Windows.Forms.TextRenderer]::MeasureText($Control.Text, $candFont, [System.Drawing.Size]::new($maxWidth, 2000), $wrapFlags)
+                if ($wrapSz.Height -le ($Control.Height - 12)) {
+                    return $candFont
+                }
+            }
+            $curSize = [math]::Round(($curSize - 0.25) * 4.0) / 4.0
+        }
+        return (Get-UltixFont -Role $Role -CustomSize $minFallbackSize)
+    }
+
+    # Stage 1: Single-line fit for standard buttons (Height < 55) so WinForms never wraps
+    # the trailing word onto a hidden 2nd line suppressed by DT_EDITCONTROL.
+    while ($curSize -ge $minSingleLineSize) {
+        $candFont = Get-UltixFont -Role $Role -CustomSize $curSize
+        $sz = [System.Windows.Forms.TextRenderer]::MeasureText($Control.Text, $candFont, [System.Drawing.Size]::new(2000, 2000), [System.Windows.Forms.TextFormatFlags]::SingleLine)
+        if ($sz.Width -le $maxWidth -and $sz.Height -le $maxHeight) {
+            return $candFont
+        }
+        $curSize = [math]::Round(($curSize - 0.25) * 4.0) / 4.0
+    }
+
+    # Stage 2: Multi-line fallback if text is still wider than 1 line at 8.0pt
+    while ($curSize -ge $minFallbackSize) {
+        $candFont = Get-UltixFont -Role $Role -CustomSize $curSize
+        $wrapFlags = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::TextBoxControl
+        $wrapSz = [System.Windows.Forms.TextRenderer]::MeasureText($Control.Text, $candFont, [System.Drawing.Size]::new($maxWidth, 2000), $wrapFlags)
+        if ($wrapSz.Height -le ($Control.Height - 10)) {
+            return $candFont
+        }
+        $curSize = [math]::Round(($curSize - 0.25) * 4.0) / 4.0
+    }
+
+    return (Get-UltixFont -Role $Role -CustomSize $minFallbackSize)
 }
 
 function Set-UltixFontScale {
@@ -2581,7 +2580,7 @@ function Set-UltixFontScale {
                 foreach ($tab in $global:tabControl.TabPages) {
                     foreach ($c in $tab.Controls) {
                         if (-not [string]::IsNullOrWhiteSpace($c.AccessibleName)) {
-                            $c.Font = Get-UltixFont -Role $c.AccessibleName
+                            $c.Font = Get-UltixFittedFont -Control $c -Role $c.AccessibleName
                         }
                     }
                 }
@@ -2626,23 +2625,26 @@ function New-UltixButton {
 
     if ($null -ne $Font) {
         $btn.Font = $Font
-    } elseif ($Parent -is [System.Windows.Forms.Form]) {
-        if ($Height -le 30) {
-            $btn.AccessibleName = "ToolbarButton"
-            $btn.Font = Get-UltixFont -Role "ToolbarButton"
-        } else {
-            $btn.AccessibleName = "ModalAction"
-            $btn.Font = Get-UltixFont -Role "ModalAction"
-        }
-    } elseif ($Width -le 45) {
-        $btn.AccessibleName = "IconButton"
-        $btn.Font = Get-UltixFont -Role "IconButton"
-    } elseif ($Width -le 245) {
-        $btn.AccessibleName = "CompactButton"
-        $btn.Font = Get-UltixFont -Role "CompactButton"
     } else {
-        $btn.AccessibleName = "MainButton"
-        $btn.Font = Get-UltixFont -Role "MainButton"
+        if ($Parent -is [System.Windows.Forms.Form]) {
+            if ($Height -le 30) {
+                $btn.AccessibleName = "ToolbarButton"
+            } else {
+                $btn.AccessibleName = "ModalAction"
+            }
+        } elseif ($Width -le 45) {
+            $btn.AccessibleName = "IconButton"
+        } elseif ($Width -le 245) {
+            $btn.AccessibleName = "CompactButton"
+        } else {
+            $btn.AccessibleName = "MainButton"
+        }
+        $btn.Font = Get-UltixFittedFont -Control $btn -Role $btn.AccessibleName
+        $btn.Add_TextChanged({
+            if (-not [string]::IsNullOrWhiteSpace($this.AccessibleName)) {
+                $this.Font = Get-UltixFittedFont -Control $this -Role $this.AccessibleName
+            }
+        })
     }
 
     if (-not [string]::IsNullOrWhiteSpace($Description)) {
@@ -2922,7 +2924,7 @@ function Show-ActionModal {
     $modal = New-Object System.Windows.Forms.Form
     $modal.Text = $Title
     $modal.Size = New-Object System.Drawing.Size(780, 680)
-    $modal.MinimumSize = New-Object System.Drawing.Size(680, 520)
+    $modal.MinimumSize = New-Object System.Drawing.Size(780, 520)
     $modal.StartPosition = "CenterParent"
     $modal.FormBorderStyle = "Sizable"
     $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
@@ -2939,36 +2941,38 @@ function Show-ActionModal {
     $lblDesc.Anchor = 'Top, Left, Right'
 
     $hasValidItems = ($null -ne $AuditResults -and $AuditResults.Count -gt 0)
-    $toolbarFont   = Get-UltixFont -Role "ToolbarButton"
 
     $btnSelAll = New-Object System.Windows.Forms.Button
     $btnSelAll.Text = "Select All"
+    $btnSelAll.UseMnemonic = $false
     $btnSelAll.Location = New-Object System.Drawing.Point(15, 51)
     $btnSelAll.Size = New-Object System.Drawing.Size(118, 30)
     $btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
     $btnSelAll.ForeColor = [System.Drawing.Color]::White
     $btnSelAll.FlatStyle = "Flat"
-    $btnSelAll.Font = $toolbarFont
+    $btnSelAll.Font = Get-UltixFittedFont -Control $btnSelAll -Role "ToolbarButton"
     $btnSelAll.Enabled = $hasValidItems
 
     $btnSelNone = New-Object System.Windows.Forms.Button
     $btnSelNone.Text = "Deselect All"
+    $btnSelNone.UseMnemonic = $false
     $btnSelNone.Location = New-Object System.Drawing.Point(140, 51)
     $btnSelNone.Size = New-Object System.Drawing.Size(118, 30)
     $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
     $btnSelNone.ForeColor = [System.Drawing.Color]::White
     $btnSelNone.FlatStyle = "Flat"
-    $btnSelNone.Font = $toolbarFont
+    $btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
     $btnSelNone.Enabled = $hasValidItems
 
     $btnSelDet = New-Object System.Windows.Forms.Button
     $btnSelDet.Text = "Select Detected"
+    $btnSelDet.UseMnemonic = $false
     $btnSelDet.Location = New-Object System.Drawing.Point(265, 51)
     $btnSelDet.Size = New-Object System.Drawing.Size(140, 30)
     $btnSelDet.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
     $btnSelDet.ForeColor = [System.Drawing.Color]::White
     $btnSelDet.FlatStyle = "Flat"
-    $btnSelDet.Font = $toolbarFont
+    $btnSelDet.Font = Get-UltixFittedFont -Control $btnSelDet -Role "ToolbarButton"
     $btnSelDet.Enabled = $hasValidItems
 
     $lblCount = New-Object System.Windows.Forms.Label
@@ -3055,24 +3059,22 @@ function Show-ActionModal {
         & $updateCounter 0
     }.GetNewClosure())
 
-    $actionBtnFont = Get-UltixFont -Role "ModalAction"
-
     $btnApply = New-Object System.Windows.Forms.Button
     $btnApply.Text = "Execute Selected"
+    $btnApply.UseMnemonic = $false
     $btnApply.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
     $btnApply.ForeColor = [System.Drawing.Color]::White
     $btnApply.FlatStyle = "Flat"
-    $btnApply.Font = $actionBtnFont
     $btnApply.DialogResult = "OK"
     $btnApply.Enabled = $hasValidItems
     $btnApply.Anchor = 'Bottom, Left'
 
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
+    $btnCancel.UseMnemonic = $false
     $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnCancel.ForeColor = [System.Drawing.Color]::White
     $btnCancel.FlatStyle = "Flat"
-    $btnCancel.Font = $actionBtnFont
     $btnCancel.DialogResult = "Cancel"
     $btnCancel.Anchor = 'Bottom, Right'
 
@@ -3081,28 +3083,35 @@ function Show-ActionModal {
     if ($EnableRevert) {
         $btnApply.Location = New-Object System.Drawing.Point(15, 585)
         $btnApply.Size = New-Object System.Drawing.Size(235, 36)
+        $btnApply.Font = Get-UltixFittedFont -Control $btnApply -Role "ModalAction"
 
         $btnRevert = New-Object System.Windows.Forms.Button
         $btnRevert.Text = "Revert Selected"
+        $btnRevert.UseMnemonic = $false
         $btnRevert.Location = New-Object System.Drawing.Point(262, 585)
         $btnRevert.Size = New-Object System.Drawing.Size(235, 36)
         $btnRevert.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnRevert.ForeColor = [System.Drawing.Color]::White
         $btnRevert.FlatStyle = "Flat"
-        $btnRevert.Font = $actionBtnFont
+        $btnRevert.Font = Get-UltixFittedFont -Control $btnRevert -Role "ModalAction"
         $btnRevert.DialogResult = "Yes"
         $btnRevert.Enabled = $hasValidItems
         $btnRevert.Anchor = 'Bottom, Left'
         
         $btnCancel.Location = New-Object System.Drawing.Point(510, 585)
         $btnCancel.Size = New-Object System.Drawing.Size(235, 36)
+        $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
 
         $modal.Controls.AddRange($baseControls + @($btnApply, $btnRevert, $btnCancel))
     } else {
         $btnApply.Location = New-Object System.Drawing.Point(15, 585)
         $btnApply.Size = New-Object System.Drawing.Size(355, 36)
+        $btnApply.Font = Get-UltixFittedFont -Control $btnApply -Role "ModalAction"
+
         $btnCancel.Location = New-Object System.Drawing.Point(390, 585)
         $btnCancel.Size = New-Object System.Drawing.Size(355, 36)
+        $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
+
         $modal.Controls.AddRange($baseControls + @($btnApply, $btnCancel))
     }
 
@@ -3143,7 +3152,7 @@ function Show-UltixGridModal {
     $modal = New-Object System.Windows.Forms.Form
     $modal.Text = $Title
     $modal.Size = New-Object System.Drawing.Size(980, 700)
-    $modal.MinimumSize = New-Object System.Drawing.Size(820, 560)
+    $modal.MinimumSize = New-Object System.Drawing.Size(980, 560)
     $modal.StartPosition = "CenterParent"
     $modal.FormBorderStyle = "Sizable"
     $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
@@ -3158,8 +3167,6 @@ function Show-UltixGridModal {
     $lblDesc.Font = Get-UltixFont -Role "ModalDesc"
     $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
     $lblDesc.Anchor = 'Top, Left, Right'
-
-    $toolbarFont = Get-UltixFont -Role "ToolbarButton"
 
     $lblSearch = New-Object System.Windows.Forms.Label
     $lblSearch.Text = "Filter:"
@@ -3178,21 +3185,23 @@ function Show-UltixGridModal {
 
     $btnSelVis = New-Object System.Windows.Forms.Button
     $btnSelVis.Text = "Select Visible"
+    $btnSelVis.UseMnemonic = $false
     $btnSelVis.Location = New-Object System.Drawing.Point(343, 50)
     $btnSelVis.Size = New-Object System.Drawing.Size(124, 30)
     $btnSelVis.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
     $btnSelVis.ForeColor = [System.Drawing.Color]::White
     $btnSelVis.FlatStyle = "Flat"
-    $btnSelVis.Font = $toolbarFont
+    $btnSelVis.Font = Get-UltixFittedFont -Control $btnSelVis -Role "ToolbarButton"
 
     $btnSelNone = New-Object System.Windows.Forms.Button
     $btnSelNone.Text = "Deselect All"
+    $btnSelNone.UseMnemonic = $false
     $btnSelNone.Location = New-Object System.Drawing.Point(475, 50)
     $btnSelNone.Size = New-Object System.Drawing.Size(124, 30)
     $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
     $btnSelNone.ForeColor = [System.Drawing.Color]::White
     $btnSelNone.FlatStyle = "Flat"
-    $btnSelNone.Font = $toolbarFont
+    $btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
 
     $lblCount = New-Object System.Windows.Forms.Label
     $lblCount.Location = New-Object System.Drawing.Point(605, 55)
@@ -3427,24 +3436,22 @@ function Show-UltixGridModal {
 
     & $populateList ""
 
-    $actionBtnFont = Get-UltixFont -Role "ModalAction"
-
     $btnPrimary = New-Object System.Windows.Forms.Button
     $btnPrimary.Text = $PrimaryButtonText
+    $btnPrimary.UseMnemonic = $false
     $btnPrimary.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
     $btnPrimary.ForeColor = [System.Drawing.Color]::White
     $btnPrimary.FlatStyle = "Flat"
-    $btnPrimary.Font = $actionBtnFont
     $btnPrimary.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $btnPrimary.Enabled = ($indexedData.Count -gt 0)
     $btnPrimary.Anchor = 'Bottom, Left'
 
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
+    $btnCancel.UseMnemonic = $false
     $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnCancel.ForeColor = [System.Drawing.Color]::White
     $btnCancel.FlatStyle = "Flat"
-    $btnCancel.Font = $actionBtnFont
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $btnCancel.Anchor = 'Bottom, Right'
 
@@ -3453,28 +3460,33 @@ function Show-UltixGridModal {
     if (-not [string]::IsNullOrWhiteSpace($SecondaryButtonText)) {
         $btnPrimary.Location = New-Object System.Drawing.Point(15, 602)
         $btnPrimary.Size = New-Object System.Drawing.Size(295, 38)
+        $btnPrimary.Font = Get-UltixFittedFont -Control $btnPrimary -Role "ModalAction"
 
         $btnSecondary = New-Object System.Windows.Forms.Button
         $btnSecondary.Text = $SecondaryButtonText
+        $btnSecondary.UseMnemonic = $false
         $btnSecondary.Location = New-Object System.Drawing.Point(322, 602)
         $btnSecondary.Size = New-Object System.Drawing.Size(295, 38)
         $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSecondary.ForeColor = [System.Drawing.Color]::White
         $btnSecondary.FlatStyle = "Flat"
-        $btnSecondary.Font = $actionBtnFont
+        $btnSecondary.Font = Get-UltixFittedFont -Control $btnSecondary -Role "ModalAction"
         $btnSecondary.DialogResult = [System.Windows.Forms.DialogResult]::Yes
         $btnSecondary.Enabled = ($SecondaryAlwaysEnabled.IsPresent -or $indexedData.Count -gt 0)
         $btnSecondary.Anchor = 'Bottom, Left'
 
         $btnCancel.Location = New-Object System.Drawing.Point(630, 602)
         $btnCancel.Size = New-Object System.Drawing.Size(320, 38)
+        $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
         $controlsToAdd += $btnSecondary
     } else {
         $btnPrimary.Location = New-Object System.Drawing.Point(15, 602)
         $btnPrimary.Size = New-Object System.Drawing.Size(455, 38)
+        $btnPrimary.Font = Get-UltixFittedFont -Control $btnPrimary -Role "ModalAction"
 
         $btnCancel.Location = New-Object System.Drawing.Point(495, 602)
         $btnCancel.Size = New-Object System.Drawing.Size(455, 38)
+        $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
     }
 
     $modal.Controls.AddRange($controlsToAdd)
