@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z4_SERVICES.PS1 - SERVICES & SYSTEM MODULE (v3.14)
+# Z4_SERVICES.PS1 - SERVICES & SYSTEM MODULE
 # Z4_Services: Symmetrically revertible Office (Light) and Gaming (Heavy) service profiles, Telemetry Scheduled Tasks lockdown, and 3 interactive managers (System Services, Scheduled Tasks, and Deep Startup Manager).
 # ==========================================
 
@@ -25,11 +25,15 @@ function Invoke-ServicesAudit {
             }
 
             $currentStart = $null
+            $svcType      = $null
+            $userFlags    = $null
             if ($null -ne $svcRoot) {
                 $svcKey = $svcRoot.OpenSubKey($rule.Name, $false)
                 if ($null -ne $svcKey) {
                     try {
                         $currentStart = $svcKey.GetValue("Start", $null)
+                        $svcType      = $svcKey.GetValue("Type", $null)
+                        $userFlags    = $svcKey.GetValue("UserServiceFlags", $null)
                     } finally {
                         $svcKey.Dispose()
                     }
@@ -37,6 +41,11 @@ function Invoke-ServicesAudit {
             }
 
             $isDetected = ($null -ne $currentStart -and [int]$currentStart -ne [int]$rule.ExpectedStart)
+            if (-not $isDetected -and [int]$rule.ExpectedStart -eq 4 -and $null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
+                if ($null -ne $userFlags -and [int]$userFlags -ne 0) {
+                    $isDetected = $true
+                }
+            }
 
             $results.Add([PSCustomObject]@{
                 UIDisplayName = $rule.UIDisplayName
@@ -58,34 +67,48 @@ function Test-UltixTaskAdminWritable {
         [Parameter(Mandatory=$true)][string]$TaskName
     )
 
-    $relPath  = ($TaskPath.Trim('\') + "\" + $TaskName).TrimStart('\')
-    $treePath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\$relPath"
+    $relPath = ($TaskPath.Trim('\') + "\" + $TaskName).TrimStart('\')
+    $subPath = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\$relPath"
 
-    if (Test-Path -LiteralPath $treePath) {
-        try {
-            [byte[]]$sdBytes = (Get-ItemProperty -LiteralPath $treePath -Name "SD" -ErrorAction SilentlyContinue).SD
-            if ($null -ne $sdBytes -and $sdBytes.Length -ge 20) {
-                $rawSd = New-Object System.Security.AccessControl.RawSecurityDescriptor($sdBytes, 0)
-                if ($null -ne $rawSd.DiscretionaryAcl) {
-                    $adminWritable = $false
-                    foreach ($ace in $rawSd.DiscretionaryAcl) {
-                        # AceQualifier 0 = AccessAllowed
-                        if ([int]$ace.AceQualifier -ne 0) { continue }
-                        $sidVal = $ace.SecurityIdentifier.Value
-                        # S-1-5-32-544 (Administrators), S-1-5-32-545 (Users), S-1-5-11 (Authenticated Users), S-1-1-0 (Everyone)
-                        if ($sidVal -in @("S-1-5-32-544", "S-1-5-32-545", "S-1-5-11", "S-1-1-0")) {
-                            # Check Write/Modify/GenericWrite/GenericAll bits (0x50000006)
-                            if (($ace.AccessMask -band 0x50000006) -ne 0) {
-                                $adminWritable = $true
-                                break
+    try {
+        $treeKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subPath, $false)
+        if ($null -ne $treeKey) {
+            try {
+                [byte[]]$sdBytes = $treeKey.GetValue("SD", $null)
+                if ($null -ne $sdBytes -and $sdBytes.Length -ge 20) {
+                    $rawSd = New-Object System.Security.AccessControl.RawSecurityDescriptor($sdBytes, 0)
+                    if ($null -ne $rawSd.DiscretionaryAcl) {
+                        $targetSids    = @("S-1-5-32-544", "S-1-5-32-545", "S-1-5-11", "S-1-1-0")
+                        # KEY_SET_VALUE(0x2) | KEY_CREATE_SUB_KEY(0x4) | DELETE(0x10000) | WRITE_DAC(0x40000) | WRITE_OWNER(0x80000) | GENERIC_WRITE(0x40000000) | GENERIC_ALL(0x10000000)
+                        $writeDelMask  = 0x500D0006
+                        $adminWritable = $false
+
+                        # Pass 1: Honor canonical AccessDenied ACEs (AceQualifier 1) before AccessAllowed
+                        foreach ($ace in $rawSd.DiscretionaryAcl) {
+                            if ([int]$ace.AceQualifier -eq 1 -and $ace.SecurityIdentifier.Value -in $targetSids) {
+                                if (($ace.AccessMask -band $writeDelMask) -ne 0) {
+                                    return $false
+                                }
                             }
                         }
+
+                        # Pass 2: Verify AccessAllowed ACEs (AceQualifier 0)
+                        foreach ($ace in $rawSd.DiscretionaryAcl) {
+                            if ([int]$ace.AceQualifier -eq 0 -and $ace.SecurityIdentifier.Value -in $targetSids) {
+                                if (($ace.AccessMask -band $writeDelMask) -ne 0) {
+                                    $adminWritable = $true
+                                    break
+                                }
+                            }
+                        }
+                        if (-not $adminWritable) { return $false }
                     }
-                    if (-not $adminWritable) { return $false }
                 }
+            } finally {
+                $treeKey.Dispose()
             }
-        } catch { }
-    }
+        }
+    } catch { }
 
     return $true
 }
@@ -145,7 +168,7 @@ function Get-ServicesState_Light {
         @{ UIDisplayName = "Telemetry: Problem Reports Control Panel Support (wercplsupport)"; Name = "wercplsupport"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 2 }
         @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Updates: Windows Update Medic Service - Re-enabling requires reboot (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
         @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
         @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
@@ -172,8 +195,8 @@ function Get-ServicesState_Heavy {
         @{ UIDisplayName = "Diagnostics: Performance Logs & Alerts (pla)"; Name = "pla"; ExpectedStart = 4; DefaultStart = 3 }
 
         # Updates, Edge Updaters & Delivery Optimization
-        @{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
-        @{ UIDisplayName = "Updates: Delivery Optimization P2P - Used by WinGet/Store msstore downloads (DoSvc)"; Name = "DoSvc"; ExpectedStart = 3; DefaultStart = 2; OptIn = $true }
+        @{ UIDisplayName = "Updates: Windows Update Medic Service - Re-enabling requires reboot (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
+        @{ UIDisplayName = "Updates: Delivery Optimization P2P - Used by WinGet/Store; re-enabling requires reboot (DoSvc)"; Name = "DoSvc"; ExpectedStart = 3; DefaultStart = 2; OptIn = $true }
         @{ UIDisplayName = "Edge: Edge Update Service - Required by WinGet for Edge/WebView2 updates (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2; OptIn = $true }
         @{ UIDisplayName = "Edge: Edge Update Service M - Required by WinGet for Edge/WebView2 updates (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 
@@ -282,12 +305,17 @@ function Invoke-ApplyTasks {
             $okCount   = 0
             $skipCount = 0
             foreach ($task in $tasks) { 
+                $fullTaskId = "$($task.TaskPath)$($task.TaskName)"
                 try {
                     if ($Op -eq 'Apply') {
-                        Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null
-                        Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+                        Invoke-UltixStep -Command "Stop-ScheduledTask -TaskPath '$($task.TaskPath)' -TaskName '$($task.TaskName)'; Disable-ScheduledTask -TaskPath '$($task.TaskPath)' -TaskName '$($task.TaskName)'" -Action {
+                            Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null
+                            Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+                        } -SuccessOutput "Disabled task: $fullTaskId" -Module "Z4_Services"
                     } else {
-                        Enable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+                        Invoke-UltixStep -Command "Enable-ScheduledTask -TaskPath '$($task.TaskPath)' -TaskName '$($task.TaskName)'" -Action {
+                            Enable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+                        } -SuccessOutput "Enabled task: $fullTaskId" -Module "Z4_Services"
                     }
                     $okCount++
                 } catch {
@@ -352,21 +380,26 @@ function Invoke-ApplyServices {
             try {
                 # Lock Start value in registry & live SCM memory first to prevent trigger-start race condition
                 $shouldAutoStart = ($Op -eq 'Revert' -and $targetValue -eq 2)
-                Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue -StartService:$shouldAutoStart
+                Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue -StartService:$shouldAutoStart -Module "Z4_Services"
 
                 # Also update UserServiceFlags (0 = disabled) for Per-User service templates when disabling
                 $svcType = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
                 $isPerUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
                 if ($isPerUserTemplate) {
                     $flagVal = if ($Op -eq 'Apply') { 0 } else { 3 }
-                    Set-ItemProperty -LiteralPath $svcRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
+                    try {
+                        Set-UltixRegValue -Path $svcRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Module "Z4_Services"
+                    } catch { }
+                }
+
+                if ($isPerUserTemplate) {
+                    Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue | ForEach-Object {
+                        Set-ProtectedServiceStart -ServiceName $_.Name -StartValue $targetValue -Module "Z4_Services"
+                    }
                 }
 
                 if ($Op -eq 'Apply') {
-                    Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                    if ($isPerUserTemplate) {
-                        Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                    }
+                    Stop-UltixService -ServiceName $svc.Name -IncludePerUserInstances:$isPerUserTemplate -Module "Z4_Services"
                 }
             } catch {
                 if ($null -ne $UltixSync) {
@@ -387,7 +420,8 @@ function Invoke-ApplyServices {
 function Get-SystemServicesTable_Worker {
     # Critical kernel/SCM/RPC/Storage/Shell/Security/AppX services protected from modification
     $criticalServices = "^(?i)(RpcSs|DcomLaunch|RpcEptMapper|LSM|SamSs|PlugPlay|EventLog|BFE|mpssvc|nsi|ProfSvc|gpsvc|CryptSvc|TrustedInstaller|WinDefend|WdNisSvc|MpDefenderCoreService|SecurityHealthService|wscsvc|Dhcp|Dnscache|Winmgmt|Schedule|UserManager|CoreMessagingRegistrar|SystemEventsBroker|Power|BrokerInfrastructure|Appinfo|AppXSvc|StateRepository|TextInputManagementService|TimeBrokerSvc|ClipSVC|AppIDSvc|KeyIso|VaultSvc|Netlogon|LanmanWorkstation|LanmanServer|Wcmsvc|NlaSvc|AudioSrv|AudioEndpointBuilder|MMCSS|FontCache|StorSvc|vds|volmgr|partmgr|mountmgr|stornvme|storahci|Ntfs|FltMgr|Tcpip|AFD)$"
-    
+    $tiScmProtected   = "^(?i)(WaaSMedicSvc|DoSvc|UsoSvc|wuauserv|BITS|uhssvc)$"
+
     $svcRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
     $rawServices = @(Get-Service -ErrorAction SilentlyContinue)
     $total = [math]::Max(1, $rawServices.Count)
@@ -432,7 +466,14 @@ function Get-SystemServicesTable_Worker {
             }
 
             if ($startCode -in @(0, 1)) { $isCrit = $true }
-            $startDisp = if ($isCrit) { "$startLabel [CRITICAL - LOCKED]" } else { $startLabel }
+            $isTiProtected = (-not $isCrit) -and ($sName -match $tiScmProtected)
+            $startDisp = if ($isCrit) {
+                "$startLabel [CRITICAL - LOCKED]"
+            } elseif ($isTiProtected) {
+                "$startLabel [TI-Protected / Reboot to re-enable]"
+            } else {
+                $startLabel
+            }
 
             $svcs.Add([PSCustomObject]@{
                 Name        = $sName
@@ -473,7 +514,7 @@ function Show-ServicesGrid {
         $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
         $lblDesc = New-Object System.Windows.Forms.Label
-        $lblDesc.Text = "Full live control over Windows Services. 'Start' automatically unlocks Disabled (Start=4) services to Manual before starting. Critical OS services (Red) are locked."
+        $lblDesc.Text = "Full live control over Windows Services. 'Start' unlocks Disabled services (TI-Protected services like WaaSMedicSvc/DoSvc require a reboot after re-enabling). Critical OS services (Red) are locked."
         $lblDesc.UseMnemonic = $false
         $lblDesc.Location = New-Object System.Drawing.Point(15, 10)
         $lblDesc.Size = New-Object System.Drawing.Size(935, 38)
@@ -788,20 +829,28 @@ function Show-ServicesGrid {
 
                                 if ($curStart -eq 4 -or $baseStart -eq 4) {
                                     $UltixSync.Logs.Enqueue(" -> Auto-unlocking Disabled service '$sName' to Manual (Start=3) & Starting...")
-                                    Set-ProtectedServiceStart -ServiceName $sName -StartValue 3 -StartService
-                                    if ($baseSvcName -ne $sName -and (Test-Path -LiteralPath $baseRegPath)) {
-                                        Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue 3 -StartService
-                                    }
                                     $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
-                                    if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
-                                        Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+                                    $isUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
+                                    if ($isUserTemplate) {
+                                        try {
+                                            Set-UltixRegValue -Path $baseRegPath -Name "UserServiceFlags" -Value 3 -Type DWord -Module "Z4_Services"
+                                        } catch { }
                                     }
+                                    if ($baseSvcName -ne $sName -and (Test-Path -LiteralPath $baseRegPath)) {
+                                        # Unlock Per-User template without calling StartService directly on the template
+                                        Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue 3 -Module "Z4_Services"
+                                    }
+                                    Set-ProtectedServiceStart -ServiceName $sName -StartValue 3 -StartService:(-not ($isUserTemplate -and $baseSvcName -eq $sName)) -Module "Z4_Services"
                                 } else {
+                                    $syncStart = if ($curStart -in @(2, 3)) { [int]$curStart } else { -1 }
                                     $UltixSync.Logs.Enqueue(" -> Starting service: $sName ($($svc.DisplayName))")
-                                    if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
-                                        [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($sName, -1, $true)
-                                    }
-                                    Start-Service -Name $sName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                                    Invoke-UltixStep -Command "[WinUltix.PrivilegeEnabler]::SetServiceConfigLive('$sName', $syncStart, `$true); Start-Service -Name '$sName'" -Action {
+                                        if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
+                                            [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($sName, $syncStart, $true)
+                                        }
+                                        Start-Service -Name $sName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                                        "$sName -> Status: $((Get-Service -Name $sName -ErrorAction SilentlyContinue).Status)"
+                                    } -Module "Z4_Services"
                                 }
 
                                 $curStatus = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
@@ -809,16 +858,8 @@ function Show-ServicesGrid {
                             }
                             "Stop" {
                                 $UltixSync.Logs.Enqueue(" -> Stopping service: $sName ($($svc.DisplayName))")
-                                Stop-Service -Name $sName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                                if ($baseSvcName -ne $sName) {
-                                    Get-Service -Name "${baseSvcName}_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                                }
+                                Stop-UltixService -ServiceName $sName -IncludePerUserInstances:($baseSvcName -ne $sName) -Module "Z4_Services"
                                 $afterStop = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
-                                if ($afterStop -eq 'Running' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
-                                    [void][WinUltix.PrivilegeEnabler]::StopServiceLive($sName)
-                                    Start-Sleep -Milliseconds 250
-                                    $afterStop = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
-                                }
                                 $UltixSync.Logs.Enqueue("    [OK] ${sName} -> Status: $afterStop.")
                             }
                             default {
@@ -831,27 +872,27 @@ function Show-ServicesGrid {
                                 $modeLabel = if ($targetStart -eq 2) { "Automatic (2)" } elseif ($targetStart -eq 3) { "Manual (3)" } else { "Disabled (4)" }
 
                                 $UltixSync.Logs.Enqueue(" -> Setting StartType [$modeLabel]: $sName ($($svc.DisplayName))")
-                                Set-ProtectedServiceStart -ServiceName $sName -StartValue $targetStart
+                                Set-ProtectedServiceStart -ServiceName $sName -StartValue $targetStart -Module "Z4_Services"
 
                                 if (Test-Path -LiteralPath $baseRegPath) {
                                     if ($baseSvcName -ne $sName) {
-                                        Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart
+                                        Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart -Module "Z4_Services"
                                     }
                                     $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
                                     if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
-                                        Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
+                                        try {
+                                            Set-UltixRegValue -Path $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Module "Z4_Services"
+                                        } catch { }
                                     }
                                     if ($targetStart -in @(3, 4)) {
-                                        Remove-ItemProperty -LiteralPath $baseRegPath -Name "DelayedAutostart" -Force -ErrorAction SilentlyContinue
+                                        try {
+                                            Remove-UltixRegItem -Path $baseRegPath -Name "DelayedAutostart" -IgnoreMissing -Module "Z4_Services"
+                                        } catch { }
                                     }
                                 }
 
                                 if ($targetStart -eq 4) {
-                                    Stop-Service -Name $sName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                                    Get-Service -Name "${baseSvcName}_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                                    if ((Get-Service -Name $sName -ErrorAction SilentlyContinue).Status -eq 'Running' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
-                                        [void][WinUltix.PrivilegeEnabler]::StopServiceLive($sName)
-                                    }
+                                    Stop-UltixService -ServiceName $baseSvcName -IncludePerUserInstances:($baseSvcName -ne $sName) -Module "Z4_Services"
                                     $UltixSync.Logs.Enqueue("    [OK] $sName locked to Disabled (Start=4) and stopped.")
                                 } else {
                                     $UltixSync.Logs.Enqueue("    [OK] $sName StartType updated to $modeLabel in Registry & live SCM.")
@@ -1064,7 +1105,8 @@ function Get-StartupState_Worker {
             if ($null -ne $keyObj) {
                 try {
                     foreach ($valName in $keyObj.Property) {
-                        $valData = [string]$keyObj.GetValue($valName)
+                        $lookupName = if ($valName -eq "(Default)") { "" } else { $valName }
+                        $valData    = [string]$keyObj.GetValue($lookupName, "")
                         $state = if ($reg.Approved -ne "") {
                             Resolve-StartupApprovedState -ApprovedRegPath $reg.Approved -EntryName $valName
                         } else {
@@ -1156,12 +1198,14 @@ function Show-StartupGrid {
                     $UltixSync.Logs.Enqueue(" -> Deleting startup entry: $($item.Name) [$($item.Location)]")
                     try {
                         if ($item.Type -eq "Registry") {
-                            Remove-ItemProperty -LiteralPath $item.RegPath -Name $item.Name -Force -ErrorAction Stop
+                            Remove-UltixRegItem -Path $item.RegPath -Name $item.Name -Module "Z4_Services"
                         } else {
-                            Remove-Item -LiteralPath $item.Command -Force -ErrorAction Stop
+                            Invoke-UltixStep -Command "Remove-Item -LiteralPath '$($item.Command)' -Force" -Action {
+                                Remove-Item -LiteralPath $item.Command -Force -ErrorAction Stop
+                            } -SuccessOutput "Removed startup shortcut: $($item.Name)" -Module "Z4_Services"
                         }
                         if (-not [string]::IsNullOrWhiteSpace($item.ApprovedPath) -and (Test-Path -LiteralPath $item.ApprovedPath)) {
-                            Remove-ItemProperty -LiteralPath $item.ApprovedPath -Name $item.Name -Force -ErrorAction SilentlyContinue
+                            Remove-UltixRegItem -Path $item.ApprovedPath -Name $item.Name -IgnoreMissing -Module "Z4_Services"
                         }
                         $UltixSync.Logs.Enqueue("    [OK] Permanently removed $($item.Name).")
                     } catch {
@@ -1173,18 +1217,15 @@ function Show-StartupGrid {
                         continue
                     }
                     try {
-                        if (-not (Test-Path -LiteralPath $item.ApprovedPath)) {
-                            New-Item -Path $item.ApprovedPath -Force | Out-Null
-                        }
                         if ($item.State -match "^Disabled") {
                             [byte[]]$enableBytes = @(0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-                            Set-ItemProperty -LiteralPath $item.ApprovedPath -Name $item.Name -Value $enableBytes -Type Binary -Force -ErrorAction Stop
+                            Set-UltixRegValue -Path $item.ApprovedPath -Name $item.Name -Value $enableBytes -Type Binary -Module "Z4_Services"
                             $UltixSync.Logs.Enqueue(" -> [ENABLED]  $($item.Name) [$($item.Location)]")
                         } else {
                             [byte[]]$headerBytes  = @(0x03, 0x00, 0x00, 0x00)
                             [byte[]]$timeBytes    = [BitConverter]::GetBytes([DateTime]::UtcNow.ToFileTimeUtc())
                             [byte[]]$disableBytes = $headerBytes + $timeBytes
-                            Set-ItemProperty -LiteralPath $item.ApprovedPath -Name $item.Name -Value $disableBytes -Type Binary -Force -ErrorAction Stop
+                            Set-UltixRegValue -Path $item.ApprovedPath -Name $item.Name -Value $disableBytes -Type Binary -Module "Z4_Services"
                             $UltixSync.Logs.Enqueue(" -> [DISABLED] $($item.Name) [$($item.Location)]")
                         }
                     } catch {
@@ -1242,8 +1283,10 @@ function Get-ScheduledTasks_Worker {
             $clean = $matches[1].Trim()
         } elseif ($clean -match '(?i)^(.+?\.(?:exe|bat|cmd|vbs|ps1|msc|com|scr|hta|js|wsf))(?:$|\s)') {
             $clean = $matches[1].Trim()
-        } else {
+        } elseif (-not [System.IO.File]::Exists($clean.Trim('"')) -and -not [System.IO.File]::Exists(($clean.Trim('"') + ".exe"))) {
             $clean = ($clean.Trim('"') -split '\s+')[0]
+        } else {
+            $clean = $clean.Trim('"')
         }
 
         # Ignore Task Scheduler runtime tokens $(Arg0) and URI protocol handlers
@@ -1325,7 +1368,7 @@ function Get-ScheduledTasks_Worker {
     }
 
     $protectedTaskNames = "^(?i)(WinUltix_CPPC_Failsafe|MpIdleTask|Windows Defender.*|BitLocker.*|PcaPatchDbTask|SdbinstMergeDbTask)$"
-    $msTelemetryPaths   = "(?i)^\\Microsoft\\Windows\\(Application Experience|Autochk|Customer Experience Improvement Program|DiskDiagnostic|Feedback|Location|Maps|Mobile Broadband Accounts|NetTrace|Power Efficiency Diagnostics|PushToInstall|RetailDemo|CloudExperienceHost|Windows Error Reporting|WaaSMedic)\\"
+    $msTelemetryPaths   = "(?i)^\\Microsoft\\Windows\\(Application Experience|Autochk|Customer Experience Improvement Program|DiskDiagnostic|Feedback|Location|Maps|Mobile Broadband Accounts|NetTrace|PerformanceTrace|Power Efficiency Diagnostics|PushToInstall|RetailDemo|CloudExperienceHost|Windows Error Reporting|WaaSMedic)\\"
 
     $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
     $total = [math]::Max(1, $allTasks.Count)
@@ -1446,11 +1489,14 @@ function Show-TasksGrid {
                 $current++
                 $UltixSync.Progress = [int](($current / $total) * 100)
 
+                $fullTaskId = "$($item.TaskPath)$($item.Name)"
                 if ($Action -eq "Primary") {
-                    $UltixSync.Logs.Enqueue(" -> Unregistering task: $($item.TaskPath)$($item.Name)")
+                    $UltixSync.Logs.Enqueue(" -> Unregistering task: $fullTaskId")
                     try {
-                        Stop-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction SilentlyContinue | Out-Null
-                        Unregister-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -Confirm:$false -ErrorAction Stop
+                        Invoke-UltixStep -Command "Stop-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'; Unregister-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)' -Confirm:`$false" -Action {
+                            Stop-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction SilentlyContinue | Out-Null
+                            Unregister-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -Confirm:$false -ErrorAction Stop
+                        } -SuccessOutput "Unregistered task: $fullTaskId" -Module "Z4_Services"
                         $UltixSync.Logs.Enqueue("    [OK] Permanently removed $($item.Name).")
                     } catch {
                         $UltixSync.Logs.Enqueue("    [!] Failed to remove $($item.Name): $($_.Exception.Message)")
@@ -1458,12 +1504,16 @@ function Show-TasksGrid {
                 } else {
                     try {
                         if ($item.State -eq "Disabled") {
-                            Enable-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction Stop | Out-Null
-                            $UltixSync.Logs.Enqueue(" -> [ENABLED]  $($item.TaskPath)$($item.Name)")
+                            Invoke-UltixStep -Command "Enable-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'" -Action {
+                                Enable-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction Stop | Out-Null
+                            } -SuccessOutput "Enabled task: $fullTaskId" -Module "Z4_Services"
+                            $UltixSync.Logs.Enqueue(" -> [ENABLED]  $fullTaskId")
                         } else {
-                            Stop-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction SilentlyContinue | Out-Null
-                            Disable-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction Stop | Out-Null
-                            $UltixSync.Logs.Enqueue(" -> [DISABLED] $($item.TaskPath)$($item.Name)")
+                            Invoke-UltixStep -Command "Stop-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'; Disable-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'" -Action {
+                                Stop-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction SilentlyContinue | Out-Null
+                                Disable-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction Stop | Out-Null
+                            } -SuccessOutput "Disabled task: $fullTaskId" -Module "Z4_Services"
+                            $UltixSync.Logs.Enqueue(" -> [DISABLED] $fullTaskId")
                         }
                     } catch {
                         $UltixSync.Logs.Enqueue("    [!] Failed to toggle $($item.Name): $($_.Exception.Message)")

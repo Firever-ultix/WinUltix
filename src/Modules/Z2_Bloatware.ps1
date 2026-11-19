@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE (v3.14)
+# Z2_BLOATWARE.PS1 - BLOATWARE & APPS MODULE
 # Z2_Bloatware: Multi-profile OneDrive amputation, 64-target UWP Bloatware & Windows Recall/Copilot AI removal, FOD Preset, Appx Framework Garbage Collector, CBS Stubs, and 4 manual package/feature inspector grids.
 # ==========================================
 
@@ -9,8 +9,8 @@
 # Z2: SHARED PROTECTED APPX WHITELIST (AUTO-HYDRATED INTO RUNSPACES)
 # ------------------------------------------
 function Get-UltixProtectedAppxRegex {
-    # Ironclad whitelist: Core Shell/OS UI (Win10 & Win11 24H2/25H2/26H2), Defender/SecHealth, Gaming/Store/WinGet Identity & Source Index, Shared Runtimes, and Hardware Media Codecs
-    return "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|Microsoft\.Winget\.Source|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
+    # Ironclad whitelist: Core Shell/OS UI (Win10 & Win11 24H2/25H2/26H2), Defender/SecHealth, GamingServices/Xbox/Store/WinGet Identity & Source Index, Shared Runtimes, and Hardware Media Codecs
+    return "PeopleExperienceHost|Microsoft\.GamingServices|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.XboxGameOverlay|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|Microsoft\.Winget\.|Microsoft\.WindowsPackageManager|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
 }
 
 function Get-UltixInboxNicFodStatus {
@@ -34,16 +34,12 @@ function Get-UltixInboxNicFodStatus {
                 # If InfPath starts with oemXX.inf, the card uses a vendor-supplied driver package (FOD not needed)
                 if ([string]::IsNullOrWhiteSpace($infPath) -or $infPath -match '^(?i)oem\d+\.inf$') { continue }
 
-                # Inbox driver only matters for physical PCI/USB hardware (ignore virtual WAN Miniports / SWD)
-                $matchingId = [string]$drvKey.GetValue("MatchingDeviceId", "")
-                if ($matchingId -notmatch '^(?i)(PCI|USB)\\') { continue }
-
                 $drvDesc = [string]$drvKey.GetValue("DriverDesc", "")
 
-                # Verify if a bound physical device instance is currently active in CfgMgr32
+                # Verify if a bound physical device instance (PCI, USB, ACPI/CNVio, SDIO) is currently active in CfgMgr32
                 $isActiveHw = $false
                 $devInstId  = [string]$drvKey.GetValue("DeviceInstanceID", "")
-                if ($devInstId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($devInstId) -eq 0) {
+                if ($devInstId -match '^(?i)(PCI|USB|ACPI|SD)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($devInstId) -eq 0) {
                     $isActiveHw = $true
                 }
 
@@ -53,7 +49,7 @@ function Get-UltixInboxNicFodStatus {
                         try {
                             [string[]]$rootDev = $linkKey.GetValue("RootDevice", @())
                             foreach ($pnpId in $rootDev) {
-                                if ($pnpId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($pnpId) -eq 0) {
+                                if ($pnpId -match '^(?i)(PCI|USB|ACPI|SD)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($pnpId) -eq 0) {
                                     $isActiveHw = $true
                                     break
                                 }
@@ -65,7 +61,10 @@ function Get-UltixInboxNicFodStatus {
                 }
 
                 if ($isActiveHw) {
-                    if ($infPath -match '(?i)(wlan|wifi|netwtw|netrtwl|netr28|netathr|netbc6)' -or $drvDesc -match '(?i)(Wi-Fi|WiFi|Wireless|802\.11|WLAN)') {
+                    $ifType    = $drvKey.GetValue("*IfType", 0)
+                    $physMedia = $drvKey.GetValue("*PhysicalMediaType", 0)
+                    $isWlan    = ($ifType -eq 71 -or $physMedia -eq 9 -or $infPath -match '(?i)(wlan|wifi|netwtw|netrtwl|netr28|netathr|netbc6)' -or $drvDesc -match '(?i)(Wi-Fi|WiFi|Wireless|802\.11|WLAN)')
+                    if ($isWlan) {
                         $usingInboxWifi = $true
                     } else {
                         $usingInboxEth = $true
@@ -131,7 +130,9 @@ function Get-OneDriveState {
         }
     }
 
-    $liveProc  = Get-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue
+    $liveProcs = @(Get-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue)
+    $hasLiveProc = ($liveProcs.Count -gt 0)
+    foreach ($lp in $liveProcs) { if ($null -ne $lp) { $lp.Dispose() } }
     $odTasks   = @(Get-ScheduledTask -TaskName "*OneDrive*" -ErrorAction SilentlyContinue)
     $hasRunKey = $false
 
@@ -153,7 +154,7 @@ function Get-OneDriveState {
         }
     }
 
-    $isCoreDetected = ($hasBinary -or $hasRunKey -or ($null -ne $liveProc) -or ($odTasks.Count -gt 0))
+    $isCoreDetected = ($hasBinary -or $hasRunKey -or $hasLiveProc -or ($odTasks.Count -gt 0))
 
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Core: OneDrive Setup and Startup Routine"
@@ -407,7 +408,7 @@ function Get-BloatwareState {
         @{ Label = "Mail & Calendar (CommunicationsApps)";        Pattern = "*windowscommunicationsapps*" }
         @{ Label = "Microsoft 365 / Office Hub";                  Pattern = "*MicrosoftOfficeHub*" }
         @{ Label = "Microsoft OneNote (UWP)";                     Pattern = "*OneNote*" }
-        @{ Label = "Microsoft Family Safety";                     Pattern = "*MicrosoftFamily*|*Family*" }
+        @{ Label = "Microsoft Family Safety";                     Pattern = "*MicrosoftFamily*|*ParentalControls*" }
         @{ Label = "Microsoft Clipchamp Video Editor";            Pattern = "*Clipchamp*" }
         @{ Label = "Windows Dev Home (DevHome)";                  Pattern = "*DevHome*" }
         @{ Label = "Power Automate Desktop";                      Pattern = "*PowerAutomateDesktop*" }
@@ -463,7 +464,7 @@ function Get-BloatwareState {
         @{ Label = "Norton Security Suite";                       Pattern = "*Norton*" }
         @{ Label = "Lenovo OEM Bloatware & Vantage Stubs";        Pattern = "*Lenovo*" }
         @{ Label = "Dell SupportAssist & OEM Stubs";              Pattern = "*Dell*" }
-        @{ Label = "HP Support Assistant & OEM Stubs";            Pattern = "*HP*" }
+        @{ Label = "HP Support Assistant & OEM Stubs";            Pattern = "AD2F1837.*|*HPInc*|*Hewlett-Packard*|*HPSupportAssistant*|*HPJumpStarts*|*HPSystemInformation*" }
     )
 
     $protectedRegex = Get-UltixProtectedAppxRegex
@@ -649,11 +650,13 @@ function Invoke-RemoveOneDrive {
             Get-ChildItem -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
                 try { $_.Attributes = 'Normal' } catch {}
             }
+            Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$TargetDir' -Recurse -Force" -Module "Z2_Bloatware"
             Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-UltixExpertResult -OutputText "Removed OneDrive directory: $TargetDir" -ExitCode 0 -Module "Z2_Bloatware"
 
             if (Test-Path -LiteralPath $TargetDir) {
                 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [*] Releasing Shell Extension lock via Explorer refresh...") }
-                Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+                [void](Stop-UltixProcess -Name @("explorer") -Module "Z2_Bloatware")
                 Start-Sleep -Milliseconds 600
                 Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
                 if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
@@ -663,8 +666,9 @@ function Invoke-RemoveOneDrive {
         }
 
         # Pre-kill all OneDrive and companion processes holding file/registry handles
-        Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 600
+        if ((Stop-UltixProcess -Name @("OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth") -Module "Z2_Bloatware") -gt 0) {
+            Start-Sleep -Milliseconds 600
+        }
 
         $userProfiles = @(Get-UltixUserProfiles)
         $loadedHives  = @($userProfiles | Where-Object { $_.IsHiveLoaded -and -not [string]::IsNullOrWhiteSpace($_.HiveRoot) })
@@ -685,10 +689,12 @@ function Invoke-RemoveOneDrive {
             try {
                 if ($data.Type -eq "Core") {
                     # 1. Unregister all OneDrive scheduled tasks so they cannot respawn OneDriveSetup/Updater
+                    Write-UltixExpertCommand -CommandText "Get-ScheduledTask -TaskName '*OneDrive*' | Unregister-ScheduledTask -Confirm:`$false" -Module "Z2_Bloatware"
                     Get-ScheduledTask -TaskName "*OneDrive*" -ErrorAction SilentlyContinue | ForEach-Object {
                         Stop-ScheduledTask -InputObject $_ -ErrorAction SilentlyContinue | Out-Null
                         Unregister-ScheduledTask -InputObject $_ -Confirm:$false -ErrorAction SilentlyContinue
                     }
+                    Write-UltixExpertResult -OutputText "Unregistered OneDrive scheduled tasks" -ExitCode 0 -Module "Z2_Bloatware"
 
                     # 2. Check if any actual OneDrive installation binary exists before invoking OneDriveSetup.exe
                     # (Running OneDriveSetup.exe when already uninstalled needlessly recreates HKCU\...\OneDrive\Accounts!)
@@ -724,8 +730,8 @@ function Invoke-RemoveOneDrive {
 
                         foreach ($setupExe in ($setupCandidates | Select-Object -Unique)) {
                             if ([System.IO.File]::Exists($setupExe)) {
-                                Start-Process -FilePath $setupExe -ArgumentList "/uninstall" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
-                                Start-Process -FilePath $setupExe -ArgumentList "/uninstall /allusers" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+                                [void](Invoke-UltixExe -FilePath $setupExe -Arguments @("/uninstall") -Module "Z2_Bloatware")
+                                [void](Invoke-UltixExe -FilePath $setupExe -Arguments @("/uninstall", "/allusers") -Module "Z2_Bloatware")
                                 break
                             }
                         }
@@ -733,8 +739,12 @@ function Invoke-RemoveOneDrive {
                         # Wait for any detached child OneDriveSetup.exe processes to finish writing teardown keys, then kill
                         $childProcs = @(Get-Process -Name "OneDriveSetup", "OneDrive", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue)
                         if ($childProcs.Count -gt 0) {
-                            $childProcs | Wait-Process -Timeout 8 -ErrorAction SilentlyContinue
-                            Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+                            try {
+                                $childProcs | Wait-Process -Timeout 8 -ErrorAction SilentlyContinue
+                            } finally {
+                                foreach ($cp in $childProcs) { if ($null -ne $cp) { $cp.Dispose() } }
+                            }
+                            [void](Stop-UltixProcess -Name @("OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth") -Module "Z2_Bloatware")
                         }
                         Start-Sleep -Milliseconds 500
                     }
@@ -772,7 +782,7 @@ function Invoke-RemoveOneDrive {
                                 try {
                                     foreach ($valName in $rKey.Property) {
                                         if ($valName -like "OneDrive*") {
-                                            Remove-ItemProperty -LiteralPath $rPath -Name $valName -Force -ErrorAction SilentlyContinue
+                                            Remove-UltixRegItem -Path $rPath -Name $valName -IgnoreMissing -Module "Z2_Bloatware"
                                         }
                                     }
                                 } finally {
@@ -800,7 +810,7 @@ function Invoke-RemoveOneDrive {
                                     $sub.Dispose()
                                 }
                                 if ($shouldRemove -and -not [string]::IsNullOrWhiteSpace($cName)) {
-                                    Remove-Item -LiteralPath "$nsPath\$cName" -Recurse -Force -ErrorAction SilentlyContinue
+                                    Remove-UltixRegItem -Path "$nsPath\$cName" -IgnoreMissing -Module "Z2_Bloatware"
                                 }
                             }
                         }
@@ -813,7 +823,7 @@ function Invoke-RemoveOneDrive {
                 elseif ($data.Type -eq "Registry") {
                     $registryTargetsToVerify.Add([string]$data.Path)
                     if (Test-Path -LiteralPath $data.Path) {
-                        Remove-Item -LiteralPath $data.Path -Recurse -Force -ErrorAction Stop
+                        Remove-UltixRegItem -Path $data.Path -Module "Z2_Bloatware"
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Registry key removed: $($data.Path)") }
                     }
                 }
@@ -832,10 +842,10 @@ function Invoke-RemoveOneDrive {
         }
 
         # Final post-kill sweep: ensure any OneDriveSetup teardown thread that exited late cannot leave recreated Accounts keys
-        Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+        [void](Stop-UltixProcess -Name @("OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth") -Module "Z2_Bloatware")
         foreach ($regPath in ($registryTargetsToVerify | Select-Object -Unique)) {
-            if (-not [string]::IsNullOrWhiteSpace($regPath) -and (Test-Path -LiteralPath $regPath)) {
-                Remove-Item -LiteralPath $regPath -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not [string]::IsNullOrWhiteSpace($regPath)) {
+                Remove-UltixRegItem -Path $regPath -IgnoreMissing -Module "Z2_Bloatware"
             }
         }
         if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
@@ -870,9 +880,12 @@ function Invoke-RemoveCapabilities {
             }
             foreach ($cap in $item.ActionData) {
                 try {
+                    Write-UltixExpertCommand -CommandText "Remove-WindowsCapability -Online -Name '$($cap.Name)'" -Module "Z2_Bloatware"
                     Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+                    Write-UltixExpertResult -OutputText "Removed FOD capability: $($cap.Name)" -ExitCode 0 -Module "Z2_Bloatware"
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Removed FOD: $($cap.Name)") }
                 } catch {
+                    Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to remove $($cap.Name): $($_.Exception.Message)") }
                 }
             }
@@ -907,13 +920,22 @@ function Invoke-GarbageCollector {
             }
             try {
                 if ($item.ActionData.Type -eq "Framework") {
-                    Remove-AppxPackage -Package $item.ActionData.Target -AllUsers -ErrorAction Stop
+                    Write-UltixExpertCommand -CommandText "Remove-AppxPackage -Package '$($item.ActionData.Target)' -AllUsers" -Module "Z2_Bloatware"
+                    try {
+                        Remove-AppxPackage -Package $item.ActionData.Target -AllUsers -ErrorAction Stop
+                    } catch {
+                        Remove-AppxPackage -Package $item.ActionData.Target -ErrorAction Stop
+                    }
+                    Write-UltixExpertResult -OutputText "Removed orphaned framework: $($item.ActionData.Target)" -ExitCode 0 -Module "Z2_Bloatware"
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Removed orphaned framework: $($item.ActionData.Target)") }
                 } elseif ($item.ActionData.Type -eq "Provisioned") {
+                    Write-UltixExpertCommand -CommandText "Remove-AppxProvisionedPackage -Online -PackageName '$($item.ActionData.Target)'" -Module "Z2_Bloatware"
                     Remove-AppxProvisionedPackage -Online -PackageName $item.ActionData.Target -ErrorAction Stop | Out-Null
+                    Write-UltixExpertResult -OutputText "Deprovisioned orphaned base: $($item.ActionData.Target)" -ExitCode 0 -Module "Z2_Bloatware"
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Deprovisioned orphaned base: $($item.ActionData.Target)") }
                 }
             } catch {
+                Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                 if ($null -ne $UltixSync) {
                     $UltixSync.Logs.Enqueue("    [!] Error removing $($item.UIDisplayName): $($_.Exception.Message)")
                 }
@@ -941,7 +963,18 @@ function Invoke-RemoveBloatware {
         $total   = $Items.Count
         $current = 0
 
-        Stop-Process -Name "Widgets", "WidgetService", "StoreExperienceHost", "WinStore.App", "Copilot", "msteams", "olk", "aixhost", "GameBar" -Force -ErrorAction SilentlyContinue
+        # Terminate only processes belonging to user-selected targets (never kill WinStore.App or unselected apps)
+        $procsToKill = [System.Collections.Generic.List[string]]::new()
+        foreach ($sel in $Items) {
+            if ($sel.UIDisplayName -match '(?i)Widgets')          { $procsToKill.Add("Widgets"); $procsToKill.Add("WidgetService") }
+            if ($sel.UIDisplayName -match '(?i)Copilot|Recall')   { $procsToKill.Add("Copilot"); $procsToKill.Add("aixhost") }
+            if ($sel.UIDisplayName -match '(?i)Teams')            { $procsToKill.Add("msteams") }
+            if ($sel.UIDisplayName -match '(?i)New Outlook')      { $procsToKill.Add("olk") }
+            if ($sel.UIDisplayName -match '(?i)Xbox Game Bar')    { $procsToKill.Add("GameBar") }
+        }
+        if ($procsToKill.Count -gt 0) {
+            [void](Stop-UltixProcess -Name @($procsToKill | Select-Object -Unique) -Module "Z2_Bloatware")
+        }
 
         # Query online DISM image ONCE before the loop and track provisioned state via HashSet
         $provisionedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -973,9 +1006,10 @@ function Invoke-RemoveBloatware {
                 }
 
                 foreach ($pol in ($aiPolicies | Select-Object -Unique)) {
-                    if (-not (Test-Path -LiteralPath $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
-                    Set-ItemProperty -LiteralPath $pol -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-                    Set-ItemProperty -LiteralPath $pol -Name "TurnOffSavingSnapshots" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    try {
+                        Set-UltixRegValue -Path $pol -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -Module "Z2_Bloatware"
+                        Set-UltixRegValue -Path $pol -Name "TurnOffSavingSnapshots" -Value 1 -Type DWord -Module "Z2_Bloatware"
+                    } catch { }
                 }
 
                 if ($item.ActionData.RecallFeature -eq $true) {
@@ -983,13 +1017,18 @@ function Invoke-RemoveBloatware {
                         $UltixSync.Logs.Enqueue("    [*] Stripping Windows Recall Optional Feature payload via CBS...")
                     }
                     try {
+                        Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -Remove -NoRestart" -Module "Z2_Bloatware"
                         Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -Remove -NoRestart -ErrorAction Stop | Out-Null
+                        Write-UltixExpertResult -OutputText "Recall feature disabled and payload removed" -ExitCode 0 -Module "Z2_Bloatware"
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled and payload removed.") }
                     } catch {
                         try {
+                            Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -NoRestart" -Module "Z2_Bloatware"
                             Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -NoRestart -ErrorAction Stop | Out-Null
+                            Write-UltixExpertResult -OutputText "Recall feature disabled" -ExitCode 0 -Module "Z2_Bloatware"
                             if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled.") }
                         } catch {
+                            Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                             if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] CBS Recall feature modification skipped: $($_.Exception.Message)") }
                         }
                     }
@@ -1009,8 +1048,9 @@ function Invoke-RemoveBloatware {
                 }
 
                 foreach ($pol in ($policies | Select-Object -Unique)) {
-                    if (-not (Test-Path -LiteralPath $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
-                    Set-ItemProperty -LiteralPath $pol -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    try {
+                        Set-UltixRegValue -Path $pol -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -Module "Z2_Bloatware"
+                    } catch { }
                 }
             }
 
@@ -1019,6 +1059,7 @@ function Invoke-RemoveBloatware {
                 $pfn = $pkg.PackageFamilyName
 
                 try {
+                    Write-UltixExpertCommand -CommandText "Remove-AppxPackage -Package '$($pkg.PackageFullName)' -AllUsers" -Module "Z2_Bloatware"
                     try {
                         Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
                         [void]$provisionedSet.Remove($pkg.PackageFullName)
@@ -1026,13 +1067,19 @@ function Invoke-RemoveBloatware {
                         Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
                     }
 
+                    Write-UltixExpertResult -OutputText "Removed Appx package: $($pkg.Name)" -ExitCode 0 -Module "Z2_Bloatware"
                     # Register in Deprovisioned store to prevent Windows Update from reinstalling it
                     if (-not [string]::IsNullOrWhiteSpace($pfn)) {
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$pfn"
-                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                        if (-not (Test-Path -LiteralPath $deprovPath)) {
+                            Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+                            New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+                            Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $pfn" -ExitCode 0 -Module "Z2_Bloatware"
+                        }
                     }
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Removed Appx: $($pkg.Name)") }
                 } catch {
+                    Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                     if ($pkg.Name -match "(?i)Copilot|Recall") {
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] API uninstallation blocked for $($pkg.Name). Relying on GPO lockdown.") }
                     } else {
@@ -1046,19 +1093,25 @@ function Invoke-RemoveBloatware {
                 if (-not $provisionedSet.Contains($prov.PackageName)) { continue }
 
                 try {
+                    Write-UltixExpertCommand -CommandText "Remove-AppxProvisionedPackage -Online -PackageName '$($prov.PackageName)'" -Module "Z2_Bloatware"
                     Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop | Out-Null
                     [void]$provisionedSet.Remove($prov.PackageName)
+                    Write-UltixExpertResult -OutputText "Deprovisioned base image: $($prov.DisplayName)" -ExitCode 0 -Module "Z2_Bloatware"
 
                     # Lock Deprovisioned registry key even for provisioned-only packages
                     $pkgParts = $prov.PackageName -split '_'
                     if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
                         $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
-                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                        if (-not (Test-Path -LiteralPath $deprovPath)) {
+                            Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+                            New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+                            Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $provPfn" -ExitCode 0 -Module "Z2_Bloatware"
+                        }
                     }
-
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Deprovisioned base image: $($prov.DisplayName)") }
                 } catch {
+                    Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                     [void]$provisionedSet.Remove($prov.PackageName)
                     if ($_.Exception.HResult -notin @(-2147024894, -2147024893) -and $_.Exception.Message -notmatch "(?i)0x80070002|0x80070003") {
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [-] Error deprovisioning $($prov.DisplayName): $($_.Exception.Message)") }
@@ -1096,9 +1149,12 @@ function Invoke-RemoveCapabilityStubs {
                 $UltixSync.Logs.Enqueue(" -> Purging CBS Stub: $($item.UIDisplayName)")
             }
             try {
+                Write-UltixExpertCommand -CommandText "Remove-WindowsPackage -Online -PackageName '$($item.ActionData)' -NoRestart" -Module "Z2_Bloatware"
                 Remove-WindowsPackage -Online -PackageName $item.ActionData -NoRestart -ErrorAction Stop | Out-Null
+                Write-UltixExpertResult -OutputText "Eradicated CBS stub: $($item.ActionData)" -ExitCode 0 -Module "Z2_Bloatware"
                 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Eradicated stub package: $($item.ActionData)") }
             } catch {
+                Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Error purging stub: $($_.Exception.Message)") }
             }
         }
@@ -1160,17 +1216,24 @@ function Show-AppxGrid {
                 $UltixSync.Progress = [int](($current / $total) * 100)
                 $UltixSync.Logs.Enqueue(" -> Removing Appx: $($app.Name)")
                 try {
+                    Write-UltixExpertCommand -CommandText "Remove-AppxPackage -Package '$($app.PackageFullName)' -AllUsers" -Module "Z2_Bloatware"
                     try {
                         Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
                     } catch {
                         Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
                     }
+                    Write-UltixExpertResult -OutputText "Removed Appx package: $($app.Name)" -ExitCode 0 -Module "Z2_Bloatware"
                     if (-not [string]::IsNullOrWhiteSpace($app.PackageFamilyName)) {
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$($app.PackageFamilyName)"
-                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                        if (-not (Test-Path -LiteralPath $deprovPath)) {
+                            Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+                            New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+                            Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $($app.PackageFamilyName)" -ExitCode 0 -Module "Z2_Bloatware"
+                        }
                     }
                     $UltixSync.Logs.Enqueue("    [OK] $($app.Name) removed and deprovisioned.")
                 } catch {
+                    Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                     $UltixSync.Logs.Enqueue("    [!] Error removing $($app.Name): $($_.Exception.Message)")
                 }
             }
@@ -1229,15 +1292,22 @@ function Show-AppxProvGrid {
                 $UltixSync.Progress = [int](($current / $total) * 100)
                 $UltixSync.Logs.Enqueue(" -> Deprovisioning: $($app.DisplayName)")
                 try {
+                    Write-UltixExpertCommand -CommandText "Remove-AppxProvisionedPackage -Online -PackageName '$($app.PackageName)'" -Module "Z2_Bloatware"
                     Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
+                    Write-UltixExpertResult -OutputText "$($app.DisplayName) deprovisioned from base image" -ExitCode 0 -Module "Z2_Bloatware"
                     $pkgParts = $app.PackageName -split '_'
                     if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
                         $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
-                        if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                        if (-not (Test-Path -LiteralPath $deprovPath)) {
+                            Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+                            New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+                            Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $provPfn" -ExitCode 0 -Module "Z2_Bloatware"
+                        }
                     }
                     $UltixSync.Logs.Enqueue("    [OK] $($app.DisplayName) deprovisioned.")
                 } catch {
+                    Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                     $UltixSync.Logs.Enqueue("    [!] Error deprovisioning $($app.DisplayName): $($_.Exception.Message)")
                 }
             }
@@ -1326,9 +1396,12 @@ function Show-CapsGrid {
 
                 $UltixSync.Logs.Enqueue(" -> Removing capability: $($cap.Name)")
                 try {
+                    Write-UltixExpertCommand -CommandText "Remove-WindowsCapability -Online -Name '$($cap.Name)'" -Module "Z2_Bloatware"
                     Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+                    Write-UltixExpertResult -OutputText "$($cap.Name) removed" -ExitCode 0 -Module "Z2_Bloatware"
                     $UltixSync.Logs.Enqueue("    [OK] $($cap.Name) removed.")
                 } catch {
+                    Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                     $UltixSync.Logs.Enqueue("    [!] Failed to remove $($cap.Name): $($_.Exception.Message)")
                 }
             }
@@ -1400,14 +1473,19 @@ function Show-OptFeaturesGrid {
                 try {
                     if ($Action -eq "Primary") {
                         $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
+                        Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -NoRestart" -Module "Z2_Bloatware"
                         Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+                        Write-UltixExpertResult -OutputText "$($feat.FeatureName) disabled" -ExitCode 0 -Module "Z2_Bloatware"
                         $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
                     } else {
                         $UltixSync.Logs.Enqueue(" -> Enabling feature: $($feat.FeatureName)")
+                        Write-UltixExpertCommand -CommandText "Enable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -All -NoRestart" -Module "Z2_Bloatware"
                         Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop | Out-Null
+                        Write-UltixExpertResult -OutputText "$($feat.FeatureName) enabled" -ExitCode 0 -Module "Z2_Bloatware"
                         $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) enabled (Reboot may be required).")
                     }
                 } catch {
+                    Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
                     $UltixSync.Logs.Enqueue("    [!] Failed to modify $($feat.FeatureName): $($_.Exception.Message)")
                 }
             }

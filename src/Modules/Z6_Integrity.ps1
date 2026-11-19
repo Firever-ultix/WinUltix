@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE (v3.14)
+# Z6_INTEGRITY.PS1 - SYSTEM INTEGRITY MODULE
 # Z6_Integrity: System First-Aid & OS repair (ChkDisk + DISM + SFC with fast health audit, WinSxS ResetBase compression, WMI repository salvage, Windows Update & CryptSvc reset, Network Stack refresh, Print Spooler First-Aid, and Icon Cache rebuild).
 # ==========================================
 
@@ -23,8 +23,10 @@ function Start-ExternalConsoleAsync {
         param($CmdTitle, $CmdChain)
         # /v:on enables delayed environment variable expansion (!ERRORLEVEL! / !WUX_ERR!)
         # Preserves real command exit code across 'pause >nul'
-        $fullArgs = "/v:on /c `"title $CmdTitle & color 0A & set WUX_ERR=0 & $CmdChain & if !WUX_ERR! EQU 0 (set WUX_ERR=!ERRORLEVEL!) & echo. & echo Operation finished (Exit Code: !WUX_ERR!). Press any key to close... & pause >nul & exit /b !WUX_ERR!`""
+        $safeTitle = $CmdTitle -replace '["&|<>^]', ''
+        $fullArgs  = "/v:on /c `"title $safeTitle & color 0A & set WUX_ERR=0 & $CmdChain & if !WUX_ERR! EQU 0 (set WUX_ERR=!ERRORLEVEL!) & echo. & echo Operation finished (Exit Code: !WUX_ERR!). Press any key to close... & pause >nul & exit /b !WUX_ERR!`""
         
+        Write-UltixExpertCommand -CommandText "cmd.exe $fullArgs" -Module "Z6_Integrity"
         $exitCode = -1
         $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $fullArgs -PassThru -ErrorAction Stop
         try {
@@ -33,6 +35,7 @@ function Start-ExternalConsoleAsync {
         } finally {
             $proc.Dispose()
         }
+        Write-UltixExpertResult -OutputText "External maintenance console [$CmdTitle] closed" -ExitCode $exitCode -Module "Z6_Integrity"
 
         return [PSCustomObject]@{
             Title    = $CmdTitle
@@ -77,6 +80,8 @@ function Get-WinSxSState {
     $exitCode       = -1
     $proc           = $null
     $loggedFinalize = $false
+
+    Write-UltixExpertCommand -CommandText "dism.exe /Online /Cleanup-Image /AnalyzeComponentStore /English" -Module "Z6_Integrity"
 
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
@@ -149,8 +154,8 @@ function Get-WinSxSState {
     $dismOutput = $sbOutput.ToString()
 
     # 100% locale-independent positional extraction: in DISM AnalyzeComponentStore table,
-    # the 2nd colon-separated size entry (MB/GB) is always Actual Size of Component Store
-    $sizeMatches = @([regex]::Matches($dismOutput, '(?im):\s*([\d\.,]+\s*[MGK]B)\b'))
+    # the 2nd colon-separated size entry (Bytes/KB/MB/GB/TB) is always Actual Size of Component Store
+    $sizeMatches = @([regex]::Matches($dismOutput, '(?im):\s*([\d\.,]+\s*(?:[TGMK]B|Bytes))\b'))
     $actualSize  = if ($sizeMatches.Count -ge 2) {
         $sizeMatches[1].Groups[1].Value.Trim()
     } elseif ($sizeMatches.Count -eq 1) {
@@ -170,6 +175,7 @@ function Get-WinSxSState {
     )
 
     $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+    Write-UltixExpertResult -OutputText "Actual Size: $actualSize | Reclaimable Packages: $reclaimableCount | Cleanup Recommended: $recommended" -ExitCode $exitCode -Module "Z6_Integrity"
 
     return [PSCustomObject]@{
         UIDisplayName = "WinSxS Payload (Actual Size: $actualSize)"
@@ -206,8 +212,7 @@ function Invoke-SystemHealthAudit {
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         Unlock-UltixTrustedInstaller
         $UltixSync.Progress = 35
-        $null = & dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
-        $dismExit = $LASTEXITCODE
+        $dismExit = Invoke-UltixExe -FilePath "dism.exe" -Arguments @("/Online", "/Cleanup-Image", "/CheckHealth", "/English") -Module "Z6_Integrity"
 
         # 100% locale-independent CBS corruption registry markers + DISM exit code
         $cbsKey     = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing"
@@ -222,7 +227,9 @@ function Invoke-SystemHealthAudit {
         # Zero-WMI, 100% locale-independent NTFS Dirty Bit verification via kernel32!DeviceIoControl (FSCTL_IS_VOLUME_DIRTY)
         $UltixSync.Progress = 70
         $sysDrive  = $env:SystemDrive.TrimEnd('\')
-        $dirtyCode = [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+        $dirtyCode = Invoke-UltixStep -Command "[WinUltix.NativeMethods]::IsVolumeDirty('$sysDrive') (FSCTL_IS_VOLUME_DIRTY)" -Action {
+            [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+        } -Module "Z6_Integrity"
         $isDirty   = ($dirtyCode -eq 1)
 
         $UltixSync.Progress = 90
@@ -292,21 +299,21 @@ function Clear-NetworkStack {
         try {
             $UltixSync.Progress = 25
             $UltixSync.Logs.Enqueue(" -> [1/4] Flushing DNS Resolver Cache (ipconfig /flushdns)...")
-            $null = & ipconfig.exe /flushdns 2>&1
+            $null = Invoke-UltixExe -FilePath "ipconfig.exe" -Arguments @("/flushdns") -Module "Z6_Integrity"
 
             $UltixSync.Progress = 50
             $UltixSync.Logs.Enqueue(" -> [2/4] Clearing ARP routing tables & resetting WinHTTP proxy...")
-            $null = & arp.exe -d * 2>&1
-            $null = & netsh.exe winhttp reset proxy 2>&1
+            $null = Invoke-UltixExe -FilePath "arp.exe" -Arguments @("-d", "*") -Module "Z6_Integrity"
+            $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winhttp", "reset", "proxy") -Module "Z6_Integrity"
 
             $UltixSync.Progress = 75
             $UltixSync.Logs.Enqueue(" -> [3/4] Resetting Winsock Catalog (netsh winsock reset)...")
-            $null = & netsh.exe winsock reset 2>&1
+            $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winsock", "reset") -Module "Z6_Integrity"
 
             $UltixSync.Progress = 95
             $UltixSync.Logs.Enqueue(" -> [4/4] Resetting TCP/IPv4 & IPv6 Stack (netsh int ip/ipv6 reset)...")
-            $null = & netsh.exe int ip reset 2>&1
-            $null = & netsh.exe int ipv6 reset 2>&1
+            $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("int", "ip", "reset") -Module "Z6_Integrity"
+            $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("int", "ipv6", "reset") -Module "Z6_Integrity"
 
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [OK] Network stack refreshed (Reboot recommended to finalize Winsock reset).")
@@ -334,19 +341,15 @@ function Repair-PrintSubsystem {
             $spoolReg = "HKLM:\SYSTEM\CurrentControlSet\Services\Spooler"
             $curStart = (Get-ItemProperty -LiteralPath $spoolReg -Name "Start" -ErrorAction SilentlyContinue).Start
             if ($curStart -eq 4) {
-                Set-ProtectedServiceStart -ServiceName "Spooler" -StartValue 2
+                Set-ProtectedServiceStart -ServiceName "Spooler" -StartValue 2 -Module "Z6_Integrity"
                 $UltixSync.Logs.Enqueue(" -> Re-enabled Print Spooler service (Was locked to Disabled by Gaming Profile).")
             }
 
-            $spoolerProcs = @(Get-Process -Name "spoolsv" -ErrorAction SilentlyContinue)
-            if ($spoolerProcs.Count -gt 0) {
-                foreach ($p in $spoolerProcs) {
-                    try { $p.Kill() } catch { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-                    finally { $p.Dispose() }
-                }
+            Stop-UltixService -ServiceName "Spooler" -Module "Z6_Integrity"
+            $killedSpool = Stop-UltixProcess -Name "spoolsv" -Module "Z6_Integrity"
+            if ($killedSpool -gt 0) {
                 $UltixSync.Logs.Enqueue(" -> Terminated locked spoolsv.exe process.")
             } else {
-                Stop-Service -Name "Spooler" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                 $UltixSync.Logs.Enqueue(" -> Stopped Print Spooler service.")
             }
 
@@ -355,32 +358,37 @@ function Repair-PrintSubsystem {
 
             $spoolPath = "$env:windir\System32\spool\PRINTERS"
             if (Test-Path -LiteralPath $spoolPath) {
-                $purgedCount = 0
-                Get-ChildItem -Path "$spoolPath\*" -Include "*.SHD", "*.SPL", "*.TMP" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    try {
-                        $_.Attributes = 'Normal'
-                        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-                        $purgedCount++
-                    } catch { }
-                }
+                $purgedCount = Invoke-UltixStep -Command "Remove-Item '$spoolPath\*.SHD,*.SPL,*.TMP' -Force" -Action {
+                    $cnt = 0
+                    Get-ChildItem -Path "$spoolPath\*" -Include "*.SHD", "*.SPL", "*.TMP" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        try {
+                            $_.Attributes = 'Normal'
+                            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+                            $cnt++
+                        } catch { }
+                    }
+                    return $cnt
+                } -SuccessOutput "Purged orphaned print queue files" -Module "Z6_Integrity"
                 $UltixSync.Logs.Enqueue(" -> Purged $purgedCount orphaned .SHD/.SPL print queue file(s).")
             }
 
             $UltixSync.Progress = 80
-            $printWorkflow = @(Get-Service -Name "PrintWorkflowUserSvc*" -ErrorAction SilentlyContinue)
+            $printWorkflow = @(Get-Service -Name "PrintWorkflowUserSvc_*" -ErrorAction SilentlyContinue)
             if ($printWorkflow.Count -gt 0) {
+                Stop-UltixService -ServiceName "PrintWorkflowUserSvc" -IncludePerUserInstances -Module "Z6_Integrity"
                 foreach ($wfSvc in $printWorkflow) {
-                    try {
-                        Stop-Service -InputObject $wfSvc -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                        Start-Service -InputObject $wfSvc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                    } finally {
-                        $wfSvc.Dispose()
-                    }
+                    $wfName = $wfSvc.Name
+                    $wfSvc.Dispose()
+                    Invoke-UltixStep -Command "Start-Service -Name '$wfName'" -Action {
+                        Start-Service -Name $wfName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                    } -SuccessOutput "Started $wfName" -Module "Z6_Integrity"
                 }
-                $UltixSync.Logs.Enqueue(" -> Restarted dynamic PrintWorkflowUserSvc service.")
+                $UltixSync.Logs.Enqueue(" -> Restarted $($printWorkflow.Count) dynamic PrintWorkflowUserSvc instance(s).")
             }
 
-            Start-Service -Name "Spooler" -WarningAction SilentlyContinue -ErrorAction Stop
+            Invoke-UltixStep -Command "Start-Service -Name 'Spooler'" -Action {
+                Start-Service -Name "Spooler" -WarningAction SilentlyContinue -ErrorAction Stop
+            } -SuccessOutput "Print Spooler service started" -Module "Z6_Integrity"
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [OK] Print Spooler service is back online.")
         } catch {
@@ -403,13 +411,13 @@ function Repair-WindowsUpdateSubsystem {
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         $wuServices = @("dosvc", "bits", "wuauserv", "cryptSvc", "msiserver")
         try {
-            # Stage 1: Stop WU, BITS, Cryptographic & MSI services
+            # Stage 1: Stop WU, BITS, Cryptographic & MSI services via unified SCM stopper
             $UltixSync.Progress = 15
             $UltixSync.Logs.Enqueue(" -> [1/5] Stopping wuauserv, cryptSvc, bits, dosvc, and msiserver...")
             foreach ($svc in $wuServices) {
-                Stop-Service -Name $svc -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                Stop-UltixService -ServiceName $svc -Module "Z6_Integrity"
             }
-            Start-Sleep -Milliseconds 800
+            Start-Sleep -Milliseconds 500
 
             # Stage 2: Purge corrupted BITS queue files (qmgr*.dat)
             $UltixSync.Progress = 35
@@ -418,34 +426,39 @@ function Repair-WindowsUpdateSubsystem {
                 "$env:ALLUSERSPROFILE\Application Data\Microsoft\Network\Downloader"
             ) | Select-Object -Unique
 
-            $qmgrCount = 0
-            foreach ($bPath in $bitsPaths) {
-                if (Test-Path -LiteralPath $bPath) {
-                    Get-ChildItem -Path "$bPath\qmgr*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                        try {
-                            $_.Attributes = 'Normal'
-                            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-                            $qmgrCount++
-                        } catch { }
+            $qmgrCount = Invoke-UltixStep -Command "Remove-Item '$env:ProgramData\Microsoft\Network\Downloader\qmgr*' -Force" -Action {
+                $cnt = 0
+                foreach ($bPath in $bitsPaths) {
+                    if (Test-Path -LiteralPath $bPath) {
+                        Get-ChildItem -Path "$bPath\qmgr*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                            try {
+                                $_.Attributes = 'Normal'
+                                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+                                $cnt++
+                            } catch { }
+                        }
                     }
                 }
-            }
+                return $cnt
+            } -SuccessOutput "Purged BITS transfer queue files" -Module "Z6_Integrity"
             $UltixSync.Logs.Enqueue(" -> [2/5] Purged $qmgrCount corrupted BITS transfer queue file(s) (qmgr*.dat).")
 
             # Stage 3: Reset Catroot2 signature cache & SoftwareDistribution DataStore
             $UltixSync.Progress = 55
             $catroot2  = "$env:windir\System32\catroot2"
             $dataStore = "$env:windir\SoftwareDistribution\DataStore"
-            foreach ($targetDir in @($catroot2, $dataStore)) {
-                if (Test-Path -LiteralPath $targetDir) {
-                    Get-ChildItem -LiteralPath $targetDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                        try {
-                            $_.Attributes = 'Normal'
-                            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                        } catch { }
+            Invoke-UltixStep -Command "Remove-Item '$catroot2\*', '$dataStore\*' -Recurse -Force" -Action {
+                foreach ($targetDir in @($catroot2, $dataStore)) {
+                    if (Test-Path -LiteralPath $targetDir) {
+                        Get-ChildItem -LiteralPath $targetDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                            try {
+                                $_.Attributes = 'Normal'
+                                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                            } catch { }
+                        }
                     }
                 }
-            }
+            } -SuccessOutput "Flushed Catroot2 catalog cache and WU DataStore" -Module "Z6_Integrity"
             $UltixSync.Logs.Enqueue(" -> [3/5] Flushed Catroot2 cryptographic catalog cache and WU DataStore.")
 
             # Stage 4: Single-pass batch re-registration of active Win10/11 Cryptographic & WU COM DLLs
@@ -466,11 +479,7 @@ function Repair-WindowsUpdateSubsystem {
             }
 
             if ($validDllPaths.Count -gt 0) {
-                $batchArgs = "/s " + ($validDllPaths -join " ")
-                $regProc = Start-Process -FilePath "regsvr32.exe" -ArgumentList $batchArgs -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-                if ($null -ne $regProc) {
-                    try { $regProc.WaitForExit(15000) | Out-Null } finally { $regProc.Dispose() }
-                }
+                $null = Invoke-UltixExe -FilePath "regsvr32.exe" -Arguments (@("/s") + $validDllPaths) -Module "Z6_Integrity"
             }
             $UltixSync.Logs.Enqueue(" -> [4/5] Batch re-registered $($validDllPaths.Count) Cryptographic, WinTrust, and WU COM DLLs.")
         } catch {
@@ -481,10 +490,11 @@ function Repair-WindowsUpdateSubsystem {
             $svcDefaults = @{ "cryptSvc" = 2; "bits" = 3; "wuauserv" = 3; "dosvc" = 2; "msiserver" = 3 }
             foreach ($svc in @("cryptSvc", "bits", "wuauserv", "dosvc", "msiserver")) {
                 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+                if (-not (Test-Path -LiteralPath $sPath)) { continue }
                 $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-                $targetSt = if ($curSt -eq 4) { $svcDefaults[$svc] } else { [int]$curSt }
+                $targetSt = if ($null -eq $curSt -or $curSt -eq 4) { $svcDefaults[$svc] } else { [int]$curSt }
                 $startNow = ($svc -in @("cryptSvc", "bits", "wuauserv", "dosvc"))
-                Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService:$startNow
+                Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService:$startNow -Module "Z6_Integrity"
             }
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [5/5] [OK] Windows Update, Delivery Optimization & Cryptographic services restored and online.")
@@ -504,17 +514,20 @@ function Invoke-WMIAudit {
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         $UltixSync.Progress = 40
-        $verifyOut = (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+        $verifyOut = Invoke-UltixStep -Command "winmgmt.exe /verifyrepository" -Action {
+            (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+        } -Module "Z6_Integrity"
 
         $UltixSync.Progress = 75
-        $cimHealthy = $false
-        try {
-            $null = Get-CimInstance -Namespace "root\cimv2" -ClassName Win32_OperatingSystem -Property Caption -ErrorAction Stop
-            $null = Get-CimInstance -Namespace "root\StandardCimv2" -ClassName MSFT_NetAdapter -ErrorAction Stop
-            $cimHealthy = $true
-        } catch {
-            $cimHealthy = $false
-        }
+        $cimHealthy = Invoke-UltixStep -Command "Test-CimNamespaces (root\cimv2, root\StandardCimv2)" -Action {
+            try {
+                $null = Get-CimInstance -Namespace "root\cimv2" -ClassName Win32_OperatingSystem -Property Caption -ErrorAction Stop
+                $null = Get-CimInstance -Namespace "root\StandardCimv2" -ClassName MSFT_NetAdapter -ErrorAction Stop
+                return $true
+            } catch {
+                return $false
+            }
+        } -Module "Z6_Integrity"
 
         $UltixSync.Progress = 100
         return [PSCustomObject]@{
@@ -543,22 +556,31 @@ function Repair-WMIRepository {
 
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
         try {
+            $wmiReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\Winmgmt"
+            $wmiStart = (Get-ItemProperty -LiteralPath $wmiReg -Name "Start" -ErrorAction SilentlyContinue).Start
+            if ($wmiStart -eq 4) {
+                Set-ProtectedServiceStart -ServiceName "Winmgmt" -StartValue 2 -StartService -Module "Z6_Integrity"
+            } else {
+                Start-Service -Name "Winmgmt" -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            }
+
             $UltixSync.Progress = 25
             $UltixSync.Logs.Enqueue(" -> [1/3] Running winmgmt /verifyrepository...")
-            $verifyOut = (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+            $verifyOut = Invoke-UltixStep -Command "winmgmt.exe /verifyrepository" -Action {
+                (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+            } -Module "Z6_Integrity"
             $UltixSync.Logs.Enqueue("    [*] Status: $verifyOut")
 
             $UltixSync.Progress = 55
             $UltixSync.Logs.Enqueue(" -> [2/3] Executing non-destructive winmgmt /salvagerepository...")
-            $salvageOut = (& winmgmt.exe /salvagerepository 2>&1 | Out-String).Trim()
+            $salvageOut = Invoke-UltixStep -Command "winmgmt.exe /salvagerepository" -Action {
+                (& winmgmt.exe /salvagerepository 2>&1 | Out-String).Trim()
+            } -Module "Z6_Integrity"
             $UltixSync.Logs.Enqueue("    [*] Result: $salvageOut")
 
             $UltixSync.Progress = 85
             $UltixSync.Logs.Enqueue(" -> [3/3] Refreshing WMI Performance Adapter (wmiadap /f)...")
-            $adapProc = Start-Process -FilePath "wmiadap.exe" -ArgumentList "/f" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-            if ($null -ne $adapProc) {
-                try { $adapProc.WaitForExit(15000) | Out-Null } finally { $adapProc.Dispose() }
-            }
+            $null = Invoke-UltixExe -FilePath "wmiadap.exe" -Arguments @("/f") -Module "Z6_Integrity"
 
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [OK] WMI Repository verification and salvage routine finished.")
@@ -582,49 +604,50 @@ function Clear-ShellIconCache {
         try {
             $UltixSync.Progress = 25
             $UltixSync.Logs.Enqueue(" -> [1/4] Stopping Explorer shell to release memory-mapped .db handles...")
-            Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+            $null = Stop-UltixProcess -Name "explorer" -Module "Z6_Integrity"
             Start-Sleep -Milliseconds 600
 
             $UltixSync.Progress = 55
             $explorerCacheDir = "$env:LOCALAPPDATA\Microsoft\Windows\Explorer"
-            $purgedIcons  = 0
-            $purgedThumbs = 0
+            $counts = Invoke-UltixStep -Command "Remove-Item '$explorerCacheDir\iconcache*.db,thumbcache*.db' -Force" -Action {
+                $pIcons  = 0
+                $pThumbs = 0
+                if (Test-Path -LiteralPath $explorerCacheDir) {
+                    Get-ChildItem -Path "$explorerCacheDir\iconcache*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        try {
+                            $_.Attributes = 'Normal'
+                            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+                            $pIcons++
+                        } catch { }
+                    }
+                    Get-ChildItem -Path "$explorerCacheDir\thumbcache*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        try {
+                            $_.Attributes = 'Normal'
+                            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+                            $pThumbs++
+                        } catch { }
+                    }
+                }
 
-            if (Test-Path -LiteralPath $explorerCacheDir) {
-                Get-ChildItem -Path "$explorerCacheDir\iconcache*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $legacyIconDb = "$env:LOCALAPPDATA\IconCache.db"
+                if (Test-Path -LiteralPath $legacyIconDb) {
                     try {
-                        $_.Attributes = 'Normal'
-                        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-                        $purgedIcons++
+                        $item = Get-Item -LiteralPath $legacyIconDb -Force -ErrorAction SilentlyContinue
+                        if ($null -ne $item) { $item.Attributes = 'Normal' }
+                        Remove-Item -LiteralPath $legacyIconDb -Force -ErrorAction Stop
+                        $pIcons++
                     } catch { }
                 }
-                Get-ChildItem -Path "$explorerCacheDir\thumbcache*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    try {
-                        $_.Attributes = 'Normal'
-                        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-                        $purgedThumbs++
-                    } catch { }
-                }
-            }
-
-            $legacyIconDb = "$env:LOCALAPPDATA\IconCache.db"
-            if (Test-Path -LiteralPath $legacyIconDb) {
-                try {
-                    $item = Get-Item -LiteralPath $legacyIconDb -Force -ErrorAction SilentlyContinue
-                    if ($null -ne $item) { $item.Attributes = 'Normal' }
-                    Remove-Item -LiteralPath $legacyIconDb -Force -ErrorAction Stop
-                    $purgedIcons++
-                } catch { }
-            }
+                return @($pIcons, $pThumbs)
+            } -SuccessOutput "Purged icon and thumbnail cache databases" -Module "Z6_Integrity"
+            $purgedIcons  = $counts[0]
+            $purgedThumbs = $counts[1]
 
             $UltixSync.Logs.Enqueue(" -> [2/4] Purged $purgedIcons iconcache_*.db and $purgedThumbs thumbcache_*.db file(s).")
 
             $UltixSync.Progress = 80
             $UltixSync.Logs.Enqueue(" -> [3/4] Triggering ie4uinit.exe cache rebuild...")
-            $ieProc = Start-Process -FilePath "ie4uinit.exe" -ArgumentList "-show" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-            if ($null -ne $ieProc) {
-                try { $ieProc.WaitForExit(10000) | Out-Null } finally { $ieProc.Dispose() }
-            }
+            $null = Invoke-UltixExe -FilePath "ie4uinit.exe" -Arguments @("-show") -Module "Z6_Integrity"
 
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [4/4] [OK] Shell Icon & Thumbnail caches rebuilt cleanly.")
@@ -633,7 +656,9 @@ function Clear-ShellIconCache {
         } finally {
             $expProcs = @(Get-Process -Name "explorer" -ErrorAction SilentlyContinue)
             if ($expProcs.Count -eq 0) {
-                Start-Process "explorer.exe"
+                Invoke-UltixStep -Command "Start-Process 'explorer.exe'" -Action {
+                    Start-Process "explorer.exe"
+                } -SuccessOutput "Explorer shell restarted" -Module "Z6_Integrity"
             } else {
                 foreach ($ep in $expProcs) { $ep.Dispose() }
             }
@@ -655,21 +680,27 @@ function Repair-TimeSynchronization {
         try {
             $UltixSync.Progress = 25
             $UltixSync.Logs.Enqueue(" -> [1/4] Re-registering Windows Time service (W32Time) & unlocking SCM configuration...")
-            Stop-Service -Name "W32Time" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            & w32tm.exe /unregister 2>$null | Out-Null
+            Stop-UltixService -ServiceName "W32Time" -Module "Z6_Integrity"
+            $null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/unregister") -Module "Z6_Integrity"
             Start-Sleep -Milliseconds 300
-            & w32tm.exe /register 2>$null | Out-Null
-            Set-ProtectedServiceStart -ServiceName "W32Time" -StartValue 3
+            $null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/register") -Module "Z6_Integrity"
+            Set-ProtectedServiceStart -ServiceName "W32Time" -StartValue 3 -Module "Z6_Integrity"
 
             $UltixSync.Progress = 55
             $UltixSync.Logs.Enqueue(" -> [2/4] Starting Windows Time service & configuring resilient NTP pool (Cloudflare / Pool.ntp / MS)...")
-            Start-Service -Name "W32Time" -WarningAction SilentlyContinue -ErrorAction Stop
-            & w32tm.exe /config /manualpeerlist:"pool.ntp.org,0x8 time.cloudflare.com,0x8 time.windows.com,0x9" /syncfromflags:manual /reliable:yes /update 2>$null | Out-Null
+            Invoke-UltixStep -Command "Start-Service -Name 'W32Time'" -Action {
+                Start-Service -Name "W32Time" -WarningAction SilentlyContinue -ErrorAction Stop
+            } -SuccessOutput "W32Time service started" -Module "Z6_Integrity"
+
+            $ntpPeers = "pool.ntp.org,0x8 time.cloudflare.com,0x8 time.windows.com,0x9"
+            $null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/config", "/manualpeerlist:$ntpPeers", "/syncfromflags:manual", "/reliable:yes", "/update") -Module "Z6_Integrity"
 
             $UltixSync.Progress = 85
             $UltixSync.Logs.Enqueue(" -> [3/4] Triggering immediate NTP clock resynchronization (w32tm /resync /rediscover)...")
-            $null = & w32tm.exe /resync /rediscover 2>&1
-            $srcOut = (& w32tm.exe /query /source 2>&1 | Out-String).Trim()
+            $null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/resync", "/rediscover") -Module "Z6_Integrity"
+            $srcOut = Invoke-UltixStep -Command "w32tm.exe /query /source" -Action {
+                (& w32tm.exe /query /source 2>&1 | Out-String).Trim()
+            } -Module "Z6_Integrity"
 
             $UltixSync.Progress = 100
             $UltixSync.Logs.Enqueue(" -> [4/4] [OK] System clock synchronized (Active NTP Source: $srcOut).")
@@ -716,7 +747,7 @@ function Repair-UwpGamingRuntime {
                 if (Test-Path -LiteralPath $sPath) {
                     $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
                     $targetSt = if ($curSt -eq 4 -or $svc -eq "dosvc") { $svcMap[$svc] } else { [int]$curSt }
-                    Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService
+                    Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService -Module "Z6_Integrity"
                 }
             }
 
@@ -725,21 +756,25 @@ function Repair-UwpGamingRuntime {
             if (Test-Path -LiteralPath $deprovRoot) {
                 Get-ChildItem -LiteralPath $deprovRoot -ErrorAction SilentlyContinue | Where-Object {
                     $_.PSChildName -match '(?i)(Winget|DesktopAppInstaller|WindowsStore|StorePurchaseApp|Xbox|GamingServices|VCLibs|UI\.Xaml|WindowsAppRuntime)'
-                } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                } | ForEach-Object {
+                    Remove-UltixRegItem -Path "$deprovRoot\$($_.PSChildName)" -IgnoreMissing -Module "Z6_Integrity"
+                }
             }
 
             $UltixSync.Progress = 35
             $UltixSync.Logs.Enqueue(" -> [2/4] Flushing corrupted Microsoft Store LocalCache & running wsreset -i...")
-            Stop-Process -Name "WinStore.App", "StoreExperienceHost", "WindowsPackageManagerServer", "winget" -Force -ErrorAction SilentlyContinue
+            $null = Stop-UltixProcess -Name @("WinStore.App", "StoreExperienceHost", "WindowsPackageManagerServer", "winget") -Module "Z6_Integrity"
             $storeCache = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_*\LocalCache" -Directory -ErrorAction SilentlyContinue
             foreach ($dir in $storeCache) {
                 Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
             }
 
-            $wsProc = Start-Process -FilePath "wsreset.exe" -ArgumentList "-i" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-            if ($null -ne $wsProc) {
-                try { $wsProc.WaitForExit(6000) | Out-Null } finally { $wsProc.Dispose() }
-            }
+            Invoke-UltixStep -Command "wsreset.exe -i" -Action {
+                $wsProc = Start-Process -FilePath "wsreset.exe" -ArgumentList "-i" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+                if ($null -ne $wsProc) {
+                    try { $wsProc.WaitForExit(6000) | Out-Null } finally { $wsProc.Dispose() }
+                }
+            } -SuccessOutput "Triggered Microsoft Store reset (wsreset -i)" -Module "Z6_Integrity"
 
             $UltixSync.Progress = 50
             $UltixSync.Logs.Enqueue(" -> [3/4] Re-registering Store, WinGet (DesktopAppInstaller) & Xbox manifests...")
@@ -757,7 +792,9 @@ function Repair-UwpGamingRuntime {
                     $manifest = Join-Path $pkg.InstallLocation "AppxManifest.xml"
                     if ([System.IO.File]::Exists($manifest)) {
                         try {
-                            Add-AppxPackage -DisableDevelopmentMode -Register $manifest -ErrorAction Stop
+                            Invoke-UltixStep -Command "Add-AppxPackage -DisableDevelopmentMode -Register '$manifest'" -Action {
+                                Add-AppxPackage -DisableDevelopmentMode -Register $manifest -ErrorAction Stop
+                            } -SuccessOutput "Registered $($pkg.Name)" -Module "Z6_Integrity"
                             $reRegCount++
                         } catch { }
                     }
@@ -768,28 +805,54 @@ function Repair-UwpGamingRuntime {
             # Stage 4: Clear dead WinHTTP/WinINet proxy locks & repair WinGet repository index (source2.msix)
             $UltixSync.Progress = 80
             $UltixSync.Logs.Enqueue(" -> [4/4] Resetting WinHTTP proxy locks & repairing WinGet source index (source2.msix)...")
-            $null = & netsh.exe winhttp reset proxy 2>&1
-            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-            $tmpMsix = Join-Path $env:TEMP "WinUltix_WingetSource2.msix"
-            try {
-                [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-                $wc = New-Object System.Net.WebClient
-                try {
-                    $wc.DownloadFile("https://cdn.winget.microsoft.com/cache/source2.msix", $tmpMsix)
-                } finally {
-                    $wc.Dispose()
-                }
+            $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winhttp", "reset", "proxy") -Module "Z6_Integrity"
+            Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Module "Z6_Integrity"
+            $tmpMsix    = Join-Path $env:TEMP "WinUltix_WingetSource2.msix"
+            $sourceUrl  = "https://cdn.winget.microsoft.com/cache/source2.msix"
+            $activeNics = @(Get-UltixActiveNetworkAdapters)
 
-                $UltixSync.Progress = 92
-                if ([System.IO.File]::Exists($tmpMsix) -and ([System.IO.FileInfo]::new($tmpMsix)).Length -gt 1048576) {
-                    Add-AppxPackage -Path $tmpMsix -ForceApplicationShutdown -ErrorAction Stop
-                    $UltixSync.Logs.Enqueue("    [OK] Installed fresh WinGet v2 index package (source2.msix).")
-                }
-            } catch {
-                $UltixSync.Logs.Enqueue("    [!] WinGet source2.msix refresh notice: $($_.Exception.Message)")
-            } finally {
-                if (Test-Path -LiteralPath $tmpMsix) {
-                    Remove-Item -LiteralPath $tmpMsix -Force -ErrorAction SilentlyContinue
+            if ($activeNics.Count -eq 0 -or -not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) {
+                $UltixSync.Logs.Enqueue("    [*] Offline environment detected (no routed gateway) — skipping remote WinGet source2.msix download.")
+            } else {
+                try {
+                    $dlBytes = Invoke-UltixStep -Command "HttpWebRequest GET '$sourceUrl' (Timeout: 10s/15s) -> '$tmpMsix'" -Action {
+                        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+                        $req = [System.Net.HttpWebRequest]::Create($sourceUrl)
+                        $req.Method           = "GET"
+                        $req.Timeout          = 10000
+                        $req.ReadWriteTimeout = 15000
+                        $req.UserAgent        = "WinUltix-Integrity/3.19"
+
+                        $resp = $null
+                        $inStream = $null
+                        $outStream = $null
+                        try {
+                            $resp      = $req.GetResponse()
+                            $inStream  = $resp.GetResponseStream()
+                            $outStream = [System.IO.File]::Create($tmpMsix)
+                            $inStream.CopyTo($outStream)
+                            $outStream.Flush()
+                            return [int64]$outStream.Length
+                        } finally {
+                            if ($null -ne $outStream) { $outStream.Dispose() }
+                            if ($null -ne $inStream)  { $inStream.Dispose() }
+                            if ($null -ne $resp)      { $resp.Dispose() }
+                        }
+                    } -Module "Z6_Integrity"
+
+                    $UltixSync.Progress = 92
+                    if ([System.IO.File]::Exists($tmpMsix) -and $dlBytes -gt 1048576) {
+                        Invoke-UltixStep -Command "Add-AppxPackage -Path '$tmpMsix' -ForceApplicationShutdown" -Action {
+                            Add-AppxPackage -Path $tmpMsix -ForceApplicationShutdown -ErrorAction Stop
+                        } -SuccessOutput "Installed WinGet v2 index package (source2.msix)" -Module "Z6_Integrity"
+                        $UltixSync.Logs.Enqueue("    [OK] Installed fresh WinGet v2 index package (source2.msix).")
+                    }
+                } catch {
+                    $UltixSync.Logs.Enqueue("    [!] WinGet source2.msix refresh skipped (offline/timeout): $($_.Exception.Message)")
+                } finally {
+                    if (Test-Path -LiteralPath $tmpMsix) {
+                        Remove-Item -LiteralPath $tmpMsix -Force -ErrorAction SilentlyContinue
+                    }
                 }
             }
 

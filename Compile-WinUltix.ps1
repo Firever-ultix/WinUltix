@@ -1,5 +1,5 @@
 ﻿# ==========================================
-# WINULTIX - CLEAN IN-PROCESS RUNSPACE COMPILER (v3.14)
+# WINULTIX - CLEAN IN-PROCESS RUNSPACE COMPILER
 # Zero-P/Invoke Managed Host, Native In-Process Runspace & Crisp 256px Splash
 # ==========================================
 
@@ -21,68 +21,150 @@ $smaDllPath  = [psobject].Assembly.Location
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 if (-not (Test-Path $mainFile)) { Write-Error "[!] Entry point $mainFile not found."; exit 1 }
 
+# Auto-detect $Global:AppVersion from src\WinUltix.ps1 (Single Source of Truth)
+$appVersion = "v3.19"
+$mainRaw    = Get-Content -Path $mainFile -Raw -Encoding UTF8
+if ($mainRaw -match '\$Global:AppVersion\s*=\s*["'']([^"'']+)["'']') {
+    $rawVer     = $matches[1].Trim()
+    $appVersion = if ($rawVer.StartsWith("v", [System.StringComparison]::OrdinalIgnoreCase)) { $rawVer } else { "v$rawVer" }
+}
+$verCore  = ($appVersion -replace '^[vV]', '') -replace '[^0-9\.].*$', ''
+$verParts = @($verCore.Split('.') | Where-Object { $_ -ne '' })
+while ($verParts.Count -lt 4) { $verParts += '0' }
+$assemblyVersion = ($verParts[0..3]) -join '.'
+
+function ConvertTo-AsciiSafeSegment {
+    param(
+        [string]$Segment,
+        [ValidateSet("Code", "Expandable", "Literal", "CSharp")]
+        [string]$Mode = "Code"
+    )
+    if ([string]::IsNullOrEmpty($Segment)) { return $Segment }
+
+    $s = $Segment.Replace([string][char]0x2014, "--").Replace([string][char]0x2013, "-")
+    $s = $s.Replace([string][char]0x2018, "'").Replace([string][char]0x2019, "'")
+    $s = $s.Replace([string][char]0x201C, '"').Replace([string][char]0x201D, '"')
+    $s = $s.Replace([string][char]0x2022, "-").Replace([string][char]0x2026, "...")
+    $s = $s.Replace([string][char]0x2192, "->").Replace([string][char]0x00A0, " ")
+
+    switch ($Mode) {
+        "Expandable" {
+            $s = $s.Replace([string][char]0x2605, '$([char]0x2605)')
+            $s = $s.Replace([string][char]0x2713, '$([char]0x2713)')
+            $s = $s.Replace([string][char]0x00B5, '$([char]0x00B5)')
+        }
+        "CSharp" {
+            $s = $s.Replace([string][char]0x2605, '\u2605')
+            $s = $s.Replace([string][char]0x2713, '\u2713')
+            $s = $s.Replace([string][char]0x00B5, '\u00B5')
+        }
+        default {
+            $s = $s.Replace([string][char]0x2605, '*')
+            $s = $s.Replace([string][char]0x2713, '[OK]')
+            $s = $s.Replace([string][char]0x00B5, 'u')
+        }
+    }
+    return $s
+}
+
 function ConvertTo-AsciiSafePowerShell {
     param(
         [string]$Content,
         [switch]$Compact
     )
-    # Replace UTF-8 punctuation/symbols whose trailing bytes (0x93/0x94) collide with smart quotes in CP1250 No-BOM mode
-    $clean = $Content.Replace([string][char]0x2014, "--").Replace([string][char]0x2013, "-")
-    $clean = $clean.Replace([string][char]0x2605, '$([char]0x2605)')
-    $clean = $clean.Replace([string][char]0x2713, '$([char]0x2713)')
-    $clean = $clean.Replace([string][char]0x00B5, '$([char]0x00B5)')
+    if ([string]::IsNullOrEmpty($Content)) { return "" }
 
-    if ($Compact) {
-        $outLines       = [System.Collections.Generic.List[string]]::new()
-        $hereCloseToken = ""
-        $isCSharpBlock  = $false
+    $tokens = $null
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($Content, [ref]$tokens, [ref]$errors)
 
-        foreach ($rawLine in ($clean -split "\r?\n")) {
-            if ($hereCloseToken -eq "") {
-                $trimmed = $rawLine.Trim()
-                if ($trimmed.Length -eq 0) { continue }
-                if ($trimmed.StartsWith("#") -or $trimmed.StartsWith("//")) { continue }
-
-                # Ensure a space precedes backtick line continuations so trimmed lines never merge tokens
-                if ($trimmed.EndsWith('`') -and $trimmed -notmatch '\s`$') {
-                    $trimmed = $trimmed.Substring(0, $trimmed.Length - 1) + ' `'
-                }
-                $outLines.Add($trimmed)
-
-                if ($trimmed -match '@"$') {
-                    $hereCloseToken = '"@'
-                    $isCSharpBlock  = ($trimmed -match 'Add-Type')
-                } elseif ($trimmed -match "@'$") {
-                    $hereCloseToken = "'@"
-                    $isCSharpBlock  = ($trimmed -match 'Add-Type')
-                }
-            } else {
-                # Inside a here-string: only close when matching the exact closing delimiter at column 0
-                if ($rawLine -match "^$([regex]::Escape($hereCloseToken))") {
-                    $outLines.Add($rawLine.Trim())
-                    $hereCloseToken = ""
-                    $isCSharpBlock  = $false
-                } elseif ($isCSharpBlock) {
-                    $tCs = $rawLine.Trim()
-                    if ($tCs.Length -gt 0 -and -not $tCs.StartsWith("//")) {
-                        $outLines.Add($tCs)
-                    }
-                } else {
-                    # Preserve nested PowerShell here-strings (e.g. New-PreFlightShortcut in Z7) verbatim
-                    $outLines.Add($rawLine)
-                }
-            }
-        }
-        return ($outLines -join "`r`n")
+    if ($null -eq $tokens -or $tokens.Count -eq 0) {
+        return (ConvertTo-AsciiSafeSegment -Segment $Content -Mode "Code")
     }
 
-    return $clean
+    $contentLen = $Content.Length
+    $sb = [System.Text.StringBuilder]::new($contentLen)
+    $cursor = 0
+    $sawAddType = $false
+
+    foreach ($tok in $tokens) {
+        if ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::EndOfInput) { break }
+
+        $start = [math]::Max(0, [math]::Min($tok.Extent.StartOffset, $contentLen))
+        $end   = [math]::Max($start, [math]::Min($tok.Extent.EndOffset, $contentLen))
+
+        if ($start -lt $cursor) {
+            if ($end -le $cursor) { continue }
+            $start = $cursor
+        }
+
+        if ($start -gt $cursor) {
+            $gap = $Content.Substring($cursor, $start - $cursor)
+            [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $gap -Mode "Code"))
+        }
+
+        $rawTok = if ($end -gt $start) { $Content.Substring($start, $end - $start) } else { "" }
+        if ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment) {
+            if (-not $Compact) {
+                [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $rawTok -Mode "Code"))
+            }
+        } elseif ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::HereStringExpandable) {
+            $segMode = if ($sawAddType) { "CSharp" } else { "Expandable" }
+            [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $rawTok -Mode $segMode))
+            $sawAddType = $false
+        } elseif ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::HereStringLiteral) {
+            $segMode = if ($sawAddType) { "CSharp" } else { "Literal" }
+            [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $rawTok -Mode $segMode))
+            $sawAddType = $false
+        } elseif ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::StringExpandable) {
+            [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $rawTok -Mode "Expandable"))
+        } elseif ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::StringLiteral) {
+            [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $rawTok -Mode "Literal"))
+        } else {
+            if ($rawTok -eq "Add-Type") { $sawAddType = $true }
+            elseif ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::NewLine -or $tok.Kind -eq [System.Management.Automation.Language.TokenKind]::Semi) { $sawAddType = $false }
+            [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $rawTok -Mode "Code"))
+        }
+
+        $cursor = $end
+    }
+
+    if ($cursor -lt $contentLen) {
+        [void]$sb.Append((ConvertTo-AsciiSafeSegment -Segment $Content.Substring($cursor) -Mode "Code"))
+    }
+
+    $clean = $sb.ToString()
+    if (-not $Compact) { return $clean }
+
+    # Compact whitespace outside here-strings while preserving column-0 closing delimiters verbatim
+    $outLines       = [System.Collections.Generic.List[string]]::new()
+    $hereCloseToken = ""
+    foreach ($rawLine in ($clean -split "\r?\n")) {
+        if ($hereCloseToken -eq "") {
+            $trimmed = $rawLine.Trim()
+            if ($trimmed.Length -eq 0) { continue }
+            if ($trimmed.EndsWith('`') -and $trimmed -notmatch '\s`$') {
+                $trimmed = $trimmed.Substring(0, $trimmed.Length - 1) + ' `'
+            }
+            $outLines.Add($trimmed)
+            if ($trimmed -match '@"$') { $hereCloseToken = '"@' }
+            elseif ($trimmed -match "@'$") { $hereCloseToken = "'@" }
+        } else {
+            if ($rawLine -match "^$([regex]::Escape($hereCloseToken))") {
+                $outLines.Add($rawLine.Trim())
+                $hereCloseToken = ""
+            } else {
+                $outLines.Add($rawLine)
+            }
+        }
+    }
+    return ($outLines -join "`r`n")
 }
 
 # 1. Assemble Compact Monolith in memory (100% 7-bit ASCII-safe UTF-8 No-BOM for 'irm | iex')
-Write-Host "Linking & compacting modular architecture (v3.14)..." -ForegroundColor Cyan
+Write-Host "Linking & compacting modular architecture ($appVersion)..." -ForegroundColor Cyan
 $sbPs1 = [System.Text.StringBuilder]::new()
-[void]$sbPs1.AppendLine("# WINULTIX v3.14 - ZERO-WMI MONOLITH (https://github.com/Firever-ultix/WinUltix)")
+[void]$sbPs1.AppendLine("# WINULTIX $appVersion - ZERO-WMI MONOLITH (https://github.com/Firever-ultix/WinUltix)")
 $mainLines = Get-Content -Path $mainFile -Encoding UTF8
 
 foreach ($line in $mainLines) {
@@ -145,8 +227,8 @@ using System.Management.Automation.Runspaces;
 [assembly: AssemblyProduct("WinUltix")]
 [assembly: AssemblyCompany("Firever")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Firever - MIT License")]
-[assembly: AssemblyVersion("3.14.0.0")]
-[assembly: AssemblyFileVersion("3.14.0.0")]
+[assembly: AssemblyVersion("__ASSEMBLY_VERSION__")]
+[assembly: AssemblyFileVersion("__ASSEMBLY_VERSION__")]
 
 namespace WinUltixLauncher {
     internal sealed class DarkSplashForm : Form {
@@ -181,6 +263,7 @@ namespace WinUltixLauncher {
                     bytes[i + 12] == 0x49 && bytes[i + 13] == 0x48 && bytes[i + 14] == 0x44 && bytes[i + 15] == 0x52) {
 
                     int w = (bytes[i + 16] << 24) | (bytes[i + 17] << 16) | (bytes[i + 18] << 8) | bytes[i + 19];
+                    if (w <= 0 || w > 1024) continue;
                     int pos = i + 8;
                     int endPos = -1;
 
@@ -250,7 +333,7 @@ namespace WinUltixLauncher {
             using (Font fSub = new Font("Consolas", 9.0f, FontStyle.Regular))
             using (SolidBrush bCyan = new SolidBrush(Color.Cyan))
             using (SolidBrush bGray = new SolidBrush(Color.FromArgb(175, 185, 195))) {
-                g.DrawString("WINULTIX v3.14", fTitle, bCyan, 86, 26);
+                g.DrawString("WINULTIX __APP_VERSION__", fTitle, bCyan, 86, 26);
                 g.DrawString("Initializing Kernel & Hardware Runtime...", fSub, bGray, 88, 58);
                 g.DrawString("Zero-WMI Native Engine | Firever", fSub, Brushes.DimGray, 88, 78);
             }
@@ -310,7 +393,8 @@ namespace WinUltixLauncher {
                             if (ps.HadErrors && ps.Streams.Error.Count > 0) {
                                 splashReadyEvent.Set();
                                 ErrorRecord err = ps.Streams.Error[0];
-                                string errText = err.Exception.ToString() + Environment.NewLine + Environment.NewLine + err.InvocationInfo.PositionMessage;
+                                string posMsg = (err.InvocationInfo != null) ? err.InvocationInfo.PositionMessage : string.Empty;
+                                string errText = err.Exception.ToString() + Environment.NewLine + Environment.NewLine + posMsg;
                                 MessageBox.Show(errText, "WinUltix - Startup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             }
                         }
@@ -327,6 +411,7 @@ namespace WinUltixLauncher {
 }
 '@
 
+$csharpSource = $csharpSource.Replace("__ASSEMBLY_VERSION__", $assemblyVersion).Replace("__APP_VERSION__", $appVersion)
 $csHostFile = Join-Path $outDir "CleanHost.cs"
 [System.IO.File]::WriteAllText($csHostFile, $csharpSource, $utf8NoBom)
 

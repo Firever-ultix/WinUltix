@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# CORE_HELPERS.PS1 - UNIFIED CORE ENGINE (v3.14)
+# CORE_HELPERS.PS1 - UNIFIED CORE ENGINE
 # Core_Helpers: Unified C# P/Invoke runtime (DWM, DPI, Shell, Token Privileges, COM AppActivator, CPU Topology, NtDll Timer/DPC, CfgMgr32 PnpTree), async Runspace engine ($UltixSync), 4-color UI factories, and JSON profile snapshotter.
 # ==========================================
 
@@ -238,6 +238,15 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             private static extern bool ControlService(IntPtr hService, uint dwControl, out SERVICE_STATUS lpServiceStatus);
 
             [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool QueryServiceObjectSecurity(
+                IntPtr hService, uint dwSecurityInformation, byte[] lpSecurityDescriptor,
+                uint cbBufSize, out uint pcbBytesNeeded);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool SetServiceObjectSecurity(
+                IntPtr hService, uint dwSecurityInformation, byte[] lpSecurityDescriptor);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
             private static extern bool CloseServiceHandle(IntPtr hSCObject);
 
             [DllImport("kernel32.dll", ExactSpelling = true)]
@@ -245,6 +254,13 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
 
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool CloseHandle(IntPtr hObject);
+
+            private const uint READ_CONTROL = 0x00020000;
+            private const uint WRITE_DAC = 0x00040000;
+            private const uint WRITE_OWNER = 0x00080000;
+            private const int SERVICE_ALL_ACCESS = 0x000F01FF;
+            private const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+            private const uint DACL_SECURITY_INFORMATION = 0x00000004;
 
             [StructLayout(LayoutKind.Sequential, Pack = 1)]
             private struct TokPriv1Luid {
@@ -277,6 +293,61 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 }
             }
 
+            private static bool GrantAdminServiceAccess(IntPtr hScm, string serviceName) {
+                var adminSid = new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null);
+
+                IntPtr hSvcDac = OpenServiceW(hScm, serviceName, READ_CONTROL | WRITE_DAC);
+                if (hSvcDac == IntPtr.Zero) {
+                    EnablePrivilege("SeTakeOwnershipPrivilege");
+                    IntPtr hSvcOwn = OpenServiceW(hScm, serviceName, WRITE_OWNER);
+                    if (hSvcOwn != IntPtr.Zero) {
+                        try {
+                            var ownerSd = new System.Security.AccessControl.RawSecurityDescriptor(
+                                System.Security.AccessControl.ControlFlags.None, adminSid, null, null, null);
+                            byte[] ownerBytes = new byte[ownerSd.BinaryLength];
+                            ownerSd.GetBinaryForm(ownerBytes, 0);
+                            SetServiceObjectSecurity(hSvcOwn, OWNER_SECURITY_INFORMATION, ownerBytes);
+                        } finally {
+                            CloseServiceHandle(hSvcOwn);
+                        }
+                        hSvcDac = OpenServiceW(hScm, serviceName, READ_CONTROL | WRITE_DAC);
+                    }
+                }
+
+                if (hSvcDac == IntPtr.Zero) return false;
+                try {
+                    uint needed = 0;
+                    QueryServiceObjectSecurity(hSvcDac, DACL_SECURITY_INFORMATION, null, 0, out needed);
+                    if (needed == 0) return false;
+
+                    byte[] sdBuf = new byte[needed];
+                    if (!QueryServiceObjectSecurity(hSvcDac, DACL_SECURITY_INFORMATION, sdBuf, needed, out needed)) {
+                        return false;
+                    }
+
+                    var rsd = new System.Security.AccessControl.RawSecurityDescriptor(sdBuf, 0);
+                    if (rsd.DiscretionaryAcl == null) {
+                        rsd.DiscretionaryAcl = new System.Security.AccessControl.RawAcl(2, 1);
+                    }
+                    rsd.DiscretionaryAcl.InsertAce(0, new System.Security.AccessControl.CommonAce(
+                        System.Security.AccessControl.AceFlags.None,
+                        System.Security.AccessControl.AceQualifier.AccessAllowed,
+                        SERVICE_ALL_ACCESS,
+                        adminSid,
+                        false,
+                        null));
+
+                    byte[] newSd = new byte[rsd.BinaryLength];
+                    rsd.GetBinaryForm(newSd, 0);
+                    return SetServiceObjectSecurity(hSvcDac, DACL_SECURITY_INFORMATION, newSd);
+                } catch {
+                    return false;
+                } finally {
+                    CloseServiceHandle(hSvcDac);
+                }
+            }
+
             public static bool SetServiceConfigLive(string serviceName, int startType, bool startNow) {
                 if (string.IsNullOrWhiteSpace(serviceName)) return false;
                 bool changeConfig = (startType >= 0 && startType <= 4);
@@ -290,6 +361,9 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
                     if (hScm == IntPtr.Zero) return false;
                     hSvc = OpenServiceW(hScm, serviceName, access);
+                    if (hSvc == IntPtr.Zero && GrantAdminServiceAccess(hScm, serviceName)) {
+                        hSvc = OpenServiceW(hScm, serviceName, access);
+                    }
                     if (hSvc == IntPtr.Zero) return false;
 
                     bool ok = true;
@@ -318,6 +392,9 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
                     if (hScm == IntPtr.Zero) return false;
                     hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+                    if (hSvc == IntPtr.Zero && GrantAdminServiceAccess(hScm, serviceName)) {
+                        hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+                    }
                     if (hSvc == IntPtr.Zero) return false;
 
                     SERVICE_STATUS status;
@@ -792,19 +869,33 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             private static readonly Guid SystemTraceControlGuid = new Guid("9e814aad-3204-11d2-9a82-006008a86939");
             private static readonly EventRecordCallback _callbackDelegate = new EventRecordCallback(OnEventRecord);
 
+            private sealed class ProfilerSessionState {
+                public readonly KernelModuleRange[] Modules;
+                public readonly long[] WindowTicks;
+                public readonly long[] WindowCounts;
+                public readonly long[] TotalTicks;
+                public readonly long[] TotalCounts;
+                public readonly long[] SessionPeakTicks;
+                public long SessionStartQpc;
+
+                public ProfilerSessionState(KernelModuleRange[] modules, long startQpc) {
+                    Modules          = modules;
+                    WindowTicks      = new long[modules.Length];
+                    WindowCounts     = new long[modules.Length];
+                    TotalTicks       = new long[modules.Length];
+                    TotalCounts      = new long[modules.Length];
+                    SessionPeakTicks = new long[modules.Length];
+                    SessionStartQpc  = startQpc;
+                }
+            }
+
+            private static readonly object _lifecycleLock = new object();
             private static volatile bool _running = false;
             private static string _activeSessionName = "WinUltix_DpcProfiler";
             private static ulong _sessionHandle = 0;
             private static ulong _traceHandle = 0;
             private static System.Threading.Thread _workerThread = null;
-
-            private static KernelModuleRange[] _modules = new KernelModuleRange[0];
-            private static long[] _windowTicks = new long[0];
-            private static long[] _windowCounts = new long[0];
-            private static long[] _totalTicks = new long[0];
-            private static long[] _totalCounts = new long[0];
-            private static long[] _sessionPeakTicks = new long[0];
-            private static long _sessionStartQpc = 0;
+            private static ProfilerSessionState _sessionState = new ProfilerSessionState(new KernelModuleRange[0], 0);
             private static long _qpcFreq = 10000000L;
             private static long _maxSaneTicks = 5000000L;
 
@@ -862,33 +953,30 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     }
 
                     list.Sort();
-                    _modules          = list.ToArray();
-                    _windowTicks      = new long[_modules.Length];
-                    _windowCounts     = new long[_modules.Length];
-                    _totalTicks       = new long[_modules.Length];
-                    _totalCounts      = new long[_modules.Length];
-                    _sessionPeakTicks = new long[_modules.Length];
-                    QueryPerformanceCounter(out _sessionStartQpc);
+                    long nowQpc;
+                    QueryPerformanceCounter(out nowQpc);
+                    System.Threading.Volatile.Write(ref _sessionState, new ProfilerSessionState(list.ToArray(), nowQpc));
                 } finally {
                     Marshal.FreeHGlobal(buf);
                 }
             }
 
             public static void ResetStats() {
+                ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                if (st == null) return;
                 long now;
                 QueryPerformanceCounter(out now);
-                System.Threading.Interlocked.Exchange(ref _sessionStartQpc, now);
-                for (int i = 0; i < _modules.Length; i++) {
-                    System.Threading.Interlocked.Exchange(ref _windowTicks[i], 0);
-                    System.Threading.Interlocked.Exchange(ref _windowCounts[i], 0);
-                    System.Threading.Interlocked.Exchange(ref _totalTicks[i], 0);
-                    System.Threading.Interlocked.Exchange(ref _totalCounts[i], 0);
-                    System.Threading.Interlocked.Exchange(ref _sessionPeakTicks[i], 0);
+                System.Threading.Interlocked.Exchange(ref st.SessionStartQpc, now);
+                for (int i = 0; i < st.Modules.Length; i++) {
+                    System.Threading.Interlocked.Exchange(ref st.WindowTicks[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.WindowCounts[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.TotalTicks[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.TotalCounts[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.SessionPeakTicks[i], 0);
                 }
             }
 
-            private static int FindModuleIndex(ulong routineAddr) {
-                KernelModuleRange[] mods = _modules;
+            private static int FindModuleIndex(KernelModuleRange[] mods, ulong routineAddr) {
                 int lo = 0;
                 int hi = mods.Length - 1;
                 while (lo <= hi) {
@@ -908,6 +996,9 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             private static void OnEventRecord(IntPtr pEventRecord) {
                 if (!_running || pEventRecord == IntPtr.Zero) return;
 
+                ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                if (st == null || st.Modules.Length == 0) return;
+
                 byte opcode = Marshal.ReadByte(pEventRecord, 45);
                 if (opcode != 68 && opcode != 67 && opcode != 69 && opcode != 66 && opcode != 50) return;
 
@@ -924,20 +1015,20 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 ulong routine = unchecked((ulong)Marshal.ReadInt64(userData, 8));
                 if (routine < 0xFFFF000000000000UL) return;
 
-                int idx = FindModuleIndex(routine);
+                int idx = FindModuleIndex(st.Modules, routine);
                 if (idx < 0) return;
 
                 long delta = exitTs - initTs;
                 if (delta < 0 || delta > _maxSaneTicks) delta = 0;
 
-                System.Threading.Interlocked.Add(ref _windowTicks[idx], delta);
-                System.Threading.Interlocked.Increment(ref _windowCounts[idx]);
-                System.Threading.Interlocked.Add(ref _totalTicks[idx], delta);
-                System.Threading.Interlocked.Increment(ref _totalCounts[idx]);
+                System.Threading.Interlocked.Add(ref st.WindowTicks[idx], delta);
+                System.Threading.Interlocked.Increment(ref st.WindowCounts[idx]);
+                System.Threading.Interlocked.Add(ref st.TotalTicks[idx], delta);
+                System.Threading.Interlocked.Increment(ref st.TotalCounts[idx]);
 
-                long curPeak = System.Threading.Interlocked.Read(ref _sessionPeakTicks[idx]);
+                long curPeak = System.Threading.Interlocked.Read(ref st.SessionPeakTicks[idx]);
                 if (delta > curPeak) {
-                    System.Threading.Interlocked.Exchange(ref _sessionPeakTicks[idx], delta);
+                    System.Threading.Interlocked.Exchange(ref st.SessionPeakTicks[idx], delta);
                 }
             }
 
@@ -965,120 +1056,131 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             }
 
             public static bool Start() {
-                if (_running) return true;
-                if (IntPtr.Size != 8) return false;
+                lock (_lifecycleLock) {
+                    if (_running) return true;
+                    if (IntPtr.Size != 8) return false;
 
-                long freq;
-                if (QueryPerformanceFrequency(out freq) && freq > 0) {
-                    _qpcFreq = freq;
-                    _maxSaneTicks = freq / 2;
-                }
+                    long freq;
+                    if (QueryPerformanceFrequency(out freq) && freq > 0) {
+                        _qpcFreq = freq;
+                        _maxSaneTicks = freq / 2;
+                    }
 
-                LoadKernelModules();
-                if (_modules.Length == 0) return false;
+                    LoadKernelModules();
+                    ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                    if (st == null || st.Modules.Length == 0) return false;
 
-                _activeSessionName = "WinUltix_DpcProfiler";
-                Guid privGuid = Guid.NewGuid();
-                uint privMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
-                IntPtr props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
-                uint status = 0;
+                    _activeSessionName = "WinUltix_DpcProfiler";
+                    Guid privGuid = Guid.NewGuid();
+                    uint privMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
+                    IntPtr props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
+                    uint status = 0;
 
-                try {
-                    ControlTraceW(0, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP);
-                    Marshal.FreeHGlobal(props);
-                    props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
-                    status = StartTraceW(out _sessionHandle, _activeSessionName, props);
-
-                    if (status != 0) {
-                        Marshal.FreeHGlobal(props);
-                        _activeSessionName = "NT Kernel Logger";
-                        props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                    try {
                         ControlTraceW(0, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP);
                         Marshal.FreeHGlobal(props);
-                        props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                        props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
                         status = StartTraceW(out _sessionHandle, _activeSessionName, props);
+
+                        if (status != 0) {
+                            Marshal.FreeHGlobal(props);
+                            _activeSessionName = "NT Kernel Logger";
+                            props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                            ControlTraceW(0, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP);
+                            Marshal.FreeHGlobal(props);
+                            props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                            status = StartTraceW(out _sessionHandle, _activeSessionName, props);
+                        }
+                    } finally {
+                        Marshal.FreeHGlobal(props);
                     }
-                } finally {
-                    Marshal.FreeHGlobal(props);
-                }
 
-                if (status != 0) return false;
+                    if (status != 0) return false;
 
-                IntPtr logfile = Marshal.AllocHGlobal(448);
-                IntPtr loggerNamePtr = Marshal.StringToHGlobalUni(_activeSessionName);
-                try {
-                    for (int i = 0; i < 448; i++) Marshal.WriteByte(logfile, i, 0);
-                    Marshal.WriteIntPtr(logfile, 8, loggerNamePtr);
-                    uint traceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
-                    Marshal.WriteInt32(logfile, 28, unchecked((int)traceMode));
-                    IntPtr cbPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
-                    Marshal.WriteIntPtr(logfile, 424, cbPtr);
-
-                    _traceHandle = OpenTraceW(logfile);
-                } finally {
-                    Marshal.FreeHGlobal(loggerNamePtr);
-                    Marshal.FreeHGlobal(logfile);
-                }
-
-                if (_traceHandle == 0 || _traceHandle == unchecked((ulong)-1L)) {
-                    Stop();
-                    return false;
-                }
-
-                QueryPerformanceCounter(out _sessionStartQpc);
-                _running = true;
-                ulong hTraceCopy = _traceHandle;
-                _workerThread = new System.Threading.Thread(delegate() {
+                    IntPtr logfile = IntPtr.Zero;
+                    IntPtr loggerNamePtr = IntPtr.Zero;
                     try {
-                        ProcessTrace(new ulong[] { hTraceCopy }, 1, IntPtr.Zero, IntPtr.Zero);
-                    } catch { }
-                });
-                _workerThread.IsBackground = true;
-                _workerThread.Name = "WinUltix_EtwDpcWorker";
-                _workerThread.Start();
-                return true;
+                        logfile = Marshal.AllocHGlobal(448);
+                        loggerNamePtr = Marshal.StringToHGlobalUni(_activeSessionName);
+                        for (int i = 0; i < 448; i++) Marshal.WriteByte(logfile, i, 0);
+                        Marshal.WriteIntPtr(logfile, 8, loggerNamePtr);
+                        uint traceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
+                        Marshal.WriteInt32(logfile, 28, unchecked((int)traceMode));
+                        IntPtr cbPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
+                        Marshal.WriteIntPtr(logfile, 424, cbPtr);
+
+                        _traceHandle = OpenTraceW(logfile);
+                    } finally {
+                        if (loggerNamePtr != IntPtr.Zero) Marshal.FreeHGlobal(loggerNamePtr);
+                        if (logfile != IntPtr.Zero) Marshal.FreeHGlobal(logfile);
+                    }
+
+                    if (_traceHandle == 0 || _traceHandle == unchecked((ulong)-1L)) {
+                        Stop();
+                        return false;
+                    }
+
+                    long nowStart;
+                    QueryPerformanceCounter(out nowStart);
+                    System.Threading.Interlocked.Exchange(ref st.SessionStartQpc, nowStart);
+
+                    _running = true;
+                    ulong hTraceCopy = _traceHandle;
+                    _workerThread = new System.Threading.Thread(delegate() {
+                        try {
+                            ProcessTrace(new ulong[] { hTraceCopy }, 1, IntPtr.Zero, IntPtr.Zero);
+                        } catch { }
+                    });
+                    _workerThread.IsBackground = true;
+                    _workerThread.Name = "WinUltix_EtwDpcWorker";
+                    _workerThread.Start();
+                    return true;
+                }
             }
 
             public static void Stop() {
-                _running = false;
-                if (_traceHandle != 0 && _traceHandle != unchecked((ulong)-1L)) {
-                    try { CloseTrace(_traceHandle); } catch { }
-                    _traceHandle = 0;
-                }
-                if (_sessionHandle != 0 || !string.IsNullOrEmpty(_activeSessionName)) {
-                    IntPtr props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
-                    try { ControlTraceW(_sessionHandle, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP); } catch { }
-                    finally { Marshal.FreeHGlobal(props); }
-                    _sessionHandle = 0;
-                }
-                if (_workerThread != null && _workerThread.IsAlive) {
-                    try { _workerThread.Join(400); } catch { }
-                    _workerThread = null;
+                lock (_lifecycleLock) {
+                    _running = false;
+                    if (_sessionHandle != 0 || !string.IsNullOrEmpty(_activeSessionName)) {
+                        IntPtr props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                        try { ControlTraceW(_sessionHandle, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP); } catch { }
+                        finally { Marshal.FreeHGlobal(props); }
+                        _sessionHandle = 0;
+                    }
+                    if (_traceHandle != 0 && _traceHandle != unchecked((ulong)-1L)) {
+                        try { CloseTrace(_traceHandle); } catch { }
+                        _traceHandle = 0;
+                    }
+                    if (_workerThread != null && _workerThread.IsAlive) {
+                        try { _workerThread.Join(1500); } catch { }
+                        _workerThread = null;
+                    }
                 }
             }
 
             public static List<DriverLoadRecord> SampleDriverLoads() {
                 var results = new List<DriverLoadRecord>();
-                if (!_running || _modules.Length == 0) return results;
+                ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                if (!_running || st == null || st.Modules.Length == 0) return results;
 
                 long nowQpc;
                 QueryPerformanceCounter(out nowQpc);
-                long startQpc = System.Threading.Interlocked.Read(ref _sessionStartQpc);
+                long startQpc = System.Threading.Interlocked.Read(ref st.SessionStartQpc);
                 double elapsedSec = Math.Max(1.0, (double)(nowQpc - startQpc) / (double)_qpcFreq);
                 int elapsedInt = Math.Max(1, (int)Math.Round(elapsedSec));
 
                 double tickToUs = 1000000.0 / (double)_qpcFreq;
-                for (int i = 0; i < _modules.Length; i++) {
-                    long winTicks  = System.Threading.Interlocked.Exchange(ref _windowTicks[i], 0);
-                    long winCounts = System.Threading.Interlocked.Exchange(ref _windowCounts[i], 0);
-                    long totTicks  = System.Threading.Interlocked.Read(ref _totalTicks[i]);
-                    long totCounts = System.Threading.Interlocked.Read(ref _totalCounts[i]);
-                    long peakTicks = System.Threading.Interlocked.Read(ref _sessionPeakTicks[i]);
+                for (int i = 0; i < st.Modules.Length; i++) {
+                    long winTicks  = System.Threading.Interlocked.Exchange(ref st.WindowTicks[i], 0);
+                    long winCounts = System.Threading.Interlocked.Exchange(ref st.WindowCounts[i], 0);
+                    long totTicks  = System.Threading.Interlocked.Read(ref st.TotalTicks[i]);
+                    long totCounts = System.Threading.Interlocked.Read(ref st.TotalCounts[i]);
+                    long peakTicks = System.Threading.Interlocked.Read(ref st.SessionPeakTicks[i]);
 
                     if (totCounts > 0 || winCounts > 0 || peakTicks > 0) {
                         results.Add(new DriverLoadRecord {
-                            DriverName  = _modules[i].DriverName,
-                            ServiceKey  = _modules[i].ServiceKey,
+                            DriverName  = st.Modules[i].DriverName,
+                            ServiceKey  = st.Modules[i].ServiceKey,
                             UsPerSec    = Math.Round(winTicks * tickToUs, 1),
                             AvgUsPerSec = Math.Round((totTicks * tickToUs) / elapsedSec, 1),
                             MaxPeakUs   = Math.Round(peakTicks * tickToUs, 1),
@@ -1329,9 +1431,25 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             }
 
             public static HubProbeResult ProbeHub(string hubInstanceId) {
-                var res = new HubProbeResult();
-                if (string.IsNullOrEmpty(hubInstanceId)) return res;
+                if (string.IsNullOrEmpty(hubInstanceId)) return new HubProbeResult();
+                if (PnpTree.GetDeviceConfigStatus(hubInstanceId) != 0) return new HubProbeResult();
 
+                HubProbeResult result = new HubProbeResult();
+                System.Threading.Thread worker = new System.Threading.Thread(delegate() {
+                    result = ProbeHubCore(hubInstanceId);
+                });
+                worker.IsBackground = true;
+                worker.Name = "WinUltix_UsbHubProbe";
+                worker.Start();
+
+                if (!worker.Join(350)) {
+                    return new HubProbeResult();
+                }
+                return result;
+            }
+
+            private static HubProbeResult ProbeHubCore(string hubInstanceId) {
+                var res = new HubProbeResult();
                 string symPath = @"\\?\" + hubInstanceId.Replace('\\', '#') + "#{f18a0e88-c30c-11d0-8815-00a0c906bed8}";
                 IntPtr hHub = CreateFileW(symPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
                 if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) {
@@ -1339,11 +1457,15 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 }
                 if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) return res;
 
-                IntPtr bufNode = Marshal.AllocHGlobal(128);
-                IntPtr bufV2   = Marshal.AllocHGlobal(32);
-                IntPtr bufEx   = Marshal.AllocHGlobal(64);
+                IntPtr bufNode = IntPtr.Zero;
+                IntPtr bufV2   = IntPtr.Zero;
+                IntPtr bufEx   = IntPtr.Zero;
 
                 try {
+                    bufNode = Marshal.AllocHGlobal(128);
+                    bufV2   = Marshal.AllocHGlobal(32);
+                    bufEx   = Marshal.AllocHGlobal(64);
+
                     for (int i = 0; i < 128; i++) Marshal.WriteByte(bufNode, i, 0);
                     uint ret = 0;
                     if (!DeviceIoControl(hHub, IOCTL_USB_GET_NODE_INFORMATION, bufNode, 76, bufNode, 76, out ret, IntPtr.Zero)) {
@@ -1351,6 +1473,7 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     }
 
                     int numPorts = Marshal.ReadByte(bufNode, 6);
+                    if (numPorts <= 0 || numPorts > 127) return res;
                     res.TotalPorts = numPorts;
 
                     for (int p = 1; p <= numPorts; p++) {
@@ -1382,7 +1505,7 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                                 res.ActivePorts++;
 
                                 bool isDedicatedSsPort = ((protocols & 0x04) != 0 && (protocols & 0x02) == 0);
-                                bool isOperatingSsPlus = ((v2Flags & 0x04) != 0);
+                                bool isOperatingSsPlus = ((v2Flags & 0x04) != 0) || (speed >= 4);
                                 bool isOperatingSs     = ((v2Flags & 0x01) != 0) || (speed >= 3) || isDedicatedSsPort || (bcdUsb >= 0x0300);
                                 bool isSsCapableDevice = ((v2Flags & 0x02) != 0) || ((v2Flags & 0x08) != 0);
 
@@ -1404,10 +1527,10 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                             }
                         }
                     }
-                } finally {
-                    Marshal.FreeHGlobal(bufNode);
-                    Marshal.FreeHGlobal(bufV2);
-                    Marshal.FreeHGlobal(bufEx);
+                } catch { } finally {
+                    if (bufNode != IntPtr.Zero) Marshal.FreeHGlobal(bufNode);
+                    if (bufV2 != IntPtr.Zero) Marshal.FreeHGlobal(bufV2);
+                    if (bufEx != IntPtr.Zero) Marshal.FreeHGlobal(bufEx);
                     CloseHandle(hHub);
                 }
                 return res;
@@ -1578,6 +1701,224 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                     rect,
                     textColor,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            }
+        }
+
+        // Thread-Safe Win32 Live Expert Command & Output Console (AllocConsole + Unified Dark Theme & Geometry)
+        public static class ExpertConsole {
+            [StructLayout(LayoutKind.Sequential)]
+            private struct COORD {
+                public short X;
+                public short Y;
+                public COORD(short x, short y) { X = x; Y = y; }
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct SMALL_RECT {
+                public short Left;
+                public short Top;
+                public short Right;
+                public short Bottom;
+                public SMALL_RECT(short l, short t, short r, short b) { Left = l; Top = t; Right = r; Bottom = b; }
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct CONSOLE_SCREEN_BUFFER_INFO_EX {
+                public uint cbSize;
+                public COORD dwSize;
+                public COORD dwCursorPosition;
+                public ushort wAttributes;
+                public SMALL_RECT srWindow;
+                public COORD dwMaximumWindowSize;
+                public ushort wPopupAttributes;
+                public bool bFullscreenSupported;
+                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+                public uint[] ColorTable;
+            }
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool AllocConsole();
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr GetConsoleWindow();
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr GetStdHandle(int nStdHandle);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool SetConsoleTitleW(string lpConsoleTitle);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool WriteConsoleW(IntPtr hConsoleOutput, string lpBuffer, uint nNumberOfCharsToWrite, out uint lpNumberOfCharsWritten, IntPtr lpReserved);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetConsoleScreenBufferInfoEx(IntPtr hConsoleOutput, ref CONSOLE_SCREEN_BUFFER_INFO_EX lpConsoleScreenBufferInfoEx);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleScreenBufferInfoEx(IntPtr hConsoleOutput, ref CONSOLE_SCREEN_BUFFER_INFO_EX lpConsoleScreenBufferInfoEx);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleTextAttribute(IntPtr hConsoleOutput, ushort wAttributes);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool FillConsoleOutputAttribute(IntPtr hConsoleOutput, ushort wAttribute, uint nLength, COORD dwWriteCoord, out uint lpNumberOfAttrsWritten);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleScreenBufferSize(IntPtr hConsoleOutput, COORD dwSize);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleWindowInfo(IntPtr hConsoleOutput, bool bAbsolute, ref SMALL_RECT lpConsoleWindow);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern COORD GetLargestConsoleWindowSize(IntPtr hConsoleOutput);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern bool DeleteMenu(IntPtr hMenu, uint uPosition, uint uFlags);
+
+            private delegate bool ConsoleCtrlDelegate(uint ctrlType);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleCtrlHandler(ConsoleCtrlDelegate handler, bool add);
+
+            private const int STD_INPUT_HANDLE = -10;
+            private const int STD_OUTPUT_HANDLE = -11;
+            private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+            private const uint ENABLE_MOUSE_INPUT = 0x0010;
+            private const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+            private const uint ENABLE_EXTENDED_FLAGS = 0x0080;
+            private const int SW_HIDE = 0;
+            private const int SW_SHOW = 5;
+            private const uint SC_CLOSE = 0xF060;
+            private const uint MF_BYCOMMAND = 0x00000000;
+
+            private static volatile bool _visible = false;
+            private static bool _initialized = false;
+            private static readonly object _stateLock = new object();
+            private static readonly object _writeLock = new object();
+            private static readonly ConsoleCtrlDelegate _ctrlHandler = new ConsoleCtrlDelegate(OnConsoleCtrl);
+
+            private static bool OnConsoleCtrl(uint ctrlType) {
+                if (ctrlType == 2) {
+                    SetVisible(false);
+                    return true;
+                }
+                return false;
+            }
+
+            private static void ApplyDarkThemeAndGeometry(IntPtr hOut) {
+                if (hOut == IntPtr.Zero || hOut == new IntPtr(-1)) return;
+
+                COORD maxWin = GetLargestConsoleWindowSize(hOut);
+                short cols = (maxWin.X > 20) ? (short)Math.Min(136, maxWin.X - 2) : (short)120;
+                short rows = (maxWin.Y > 12) ? (short)Math.Min(34, maxWin.Y - 2) : (short)30;
+                short bufRows = 3000;
+
+                CONSOLE_SCREEN_BUFFER_INFO_EX csbi = new CONSOLE_SCREEN_BUFFER_INFO_EX();
+                csbi.cbSize = (uint)Marshal.SizeOf(typeof(CONSOLE_SCREEN_BUFFER_INFO_EX));
+                if (GetConsoleScreenBufferInfoEx(hOut, ref csbi)) {
+                    if (csbi.ColorTable == null || csbi.ColorTable.Length < 16) {
+                        csbi.ColorTable = new uint[16];
+                    }
+                    // COLORREF format: 0x00BBGGRR — override slots 0, 1 (Blue) & 5 (PowerShell #012456 bg)
+                    csbi.ColorTable[0]  = 0x00121212; // Background: #121212
+                    csbi.ColorTable[1]  = 0x00121212; // Standard Dark Blue -> #121212
+                    csbi.ColorTable[5]  = 0x00121212; // PowerShell Default Bg Slot 5 -> #121212
+                    csbi.ColorTable[7]  = 0x00E0E0E0; // Default Foreground: #E0E0E0
+                    csbi.ColorTable[8]  = 0x00857D78; // ANSI 90 (Bright Black / Gray)
+                    csbi.ColorTable[12] = 0x005555FF; // ANSI 91 (Bright Red)
+                    csbi.ColorTable[14] = 0x0055E6FF; // ANSI 93 (Bright Yellow/Amber)
+                    csbi.wAttributes    = 0x0007;
+                    csbi.dwSize         = new COORD(cols, bufRows);
+                    csbi.srWindow       = new SMALL_RECT(0, 0, cols, rows);
+                    SetConsoleScreenBufferInfoEx(hOut, ref csbi);
+                }
+
+                SMALL_RECT tinyRect = new SMALL_RECT(0, 0, 1, 1);
+                SMALL_RECT winRect  = new SMALL_RECT(0, 0, (short)(cols - 1), (short)(rows - 1));
+                SetConsoleWindowInfo(hOut, true, ref tinyRect);
+                SetConsoleScreenBufferSize(hOut, new COORD(cols, bufRows));
+                SetConsoleWindowInfo(hOut, true, ref winRect);
+
+                // Update active text attribute & VT default reset target, then repaint all existing buffer cells
+                SetConsoleTextAttribute(hOut, 0x0007);
+                uint written;
+                FillConsoleOutputAttribute(hOut, 0x0007, (uint)(cols * bufRows), new COORD(0, 0), out written);
+            }
+
+            public static bool IsVisible {
+                get { return _visible; }
+            }
+
+            public static bool Toggle() {
+                SetVisible(!_visible);
+                return _visible;
+            }
+
+            public static void SetVisible(bool show) {
+                lock (_stateLock) {
+                    IntPtr hWnd = GetConsoleWindow();
+                    if (show) {
+                        if (hWnd == IntPtr.Zero) {
+                            AllocConsole();
+                            hWnd = GetConsoleWindow();
+                        }
+                        if (hWnd != IntPtr.Zero && !_initialized) {
+                            SetConsoleTitleW("WinUltix - Live Expert Command & Output Stream");
+                            SetConsoleCtrlHandler(_ctrlHandler, true);
+                            IntPtr hMenu = GetSystemMenu(hWnd, false);
+                            if (hMenu != IntPtr.Zero) {
+                                DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+                            }
+                            IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                            uint outMode;
+                            if (hOut != IntPtr.Zero && GetConsoleMode(hOut, out outMode)) {
+                                SetConsoleMode(hOut, outMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                            }
+                            ApplyDarkThemeAndGeometry(hOut);
+
+                            IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
+                            uint inMode;
+                            if (hIn != IntPtr.Zero && GetConsoleMode(hIn, out inMode)) {
+                                uint cleanIn = (inMode & ~(ENABLE_QUICK_EDIT_MODE | ENABLE_MOUSE_INPUT)) | ENABLE_EXTENDED_FLAGS;
+                                SetConsoleMode(hIn, cleanIn);
+                            }
+                            _initialized = true;
+                        }
+                        if (hWnd != IntPtr.Zero) {
+                            ShowWindow(hWnd, SW_SHOW);
+                        }
+                        _visible = true;
+                    } else {
+                        if (hWnd != IntPtr.Zero) {
+                            ShowWindow(hWnd, SW_HIDE);
+                        }
+                        _visible = false;
+                    }
+                }
+            }
+
+            public static void WriteLine(string text, string ansiColor) {
+                if (!_visible || string.IsNullOrEmpty(text)) return;
+                lock (_writeLock) {
+                    IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                    if (hOut == IntPtr.Zero || hOut == new IntPtr(-1)) return;
+                    // Reset only foreground (SGR 39) so background remains locked to attribute 0 (#121212)
+                    string payload = "\x1b[" + ansiColor + "m" + text + "\x1b[39m\r\n";
+                    uint written;
+                    WriteConsoleW(hOut, payload, (uint)payload.Length, out written, IntPtr.Zero);
+                }
             }
         }
     }
@@ -1830,25 +2171,37 @@ function Get-UltixFastSize {
     return $totalBytes
 }
 
-function Set-ProtectedServiceStart {
-    param(
-        [Parameter(Mandatory=$true)][string]$ServiceName,
-        [Parameter(Mandatory=$true)][int]$StartValue,
-        [switch]$StartService
-    )
-    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
-    if (-not (Test-Path -LiteralPath $regPath)) { return }
+function Grant-UltixRegistryKeyAccess {
+    param([Parameter(Mandatory=$true)][string]$RegistryPath)
+    if ([string]::IsNullOrWhiteSpace($RegistryPath)) { return }
+
+    $baseHive   = $null
+    $subKeyPath = ""
+    if ($RegistryPath -match '^(?i)(HKLM:\\|Registry::HKEY_LOCAL_MACHINE\\)(.+)$') {
+        $baseHive   = [Microsoft.Win32.Registry]::LocalMachine
+        $subKeyPath = $matches[2]
+    } elseif ($RegistryPath -match '^(?i)(HKCU:\\|Registry::HKEY_CURRENT_USER\\)(.+)$') {
+        $baseHive   = [Microsoft.Win32.Registry]::CurrentUser
+        $subKeyPath = $matches[2]
+    } elseif ($RegistryPath -match '^(?i)(HKCR:\\|Registry::HKEY_CLASSES_ROOT\\)(.+)$') {
+        $baseHive   = [Microsoft.Win32.Registry]::ClassesRoot
+        $subKeyPath = $matches[2]
+    } elseif ($RegistryPath -match '^(?i)(HKU:\\|Registry::HKEY_USERS\\)(.+)$') {
+        $baseHive   = [Microsoft.Win32.Registry]::Users
+        $subKeyPath = $matches[2]
+    }
+    if ($null -eq $baseHive -or [string]::IsNullOrWhiteSpace($subKeyPath)) { return }
 
     try {
-        Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
-    } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
         [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
         [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
-
-        $subKeyPath = "SYSTEM\CurrentControlSet\Services\$ServiceName"
         $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
 
-        $keyOwn = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+        $keyOwn = $baseHive.OpenSubKey(
+            $subKeyPath,
+            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+            [System.Security.AccessControl.RegistryRights]::TakeOwnership
+        )
         if ($null -ne $keyOwn) {
             try {
                 $aclOwn = $keyOwn.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
@@ -1859,14 +2212,18 @@ function Set-ProtectedServiceStart {
             }
         }
 
-        $keyAcl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+        $keyAcl = $baseHive.OpenSubKey(
+            $subKeyPath,
+            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+            [System.Security.AccessControl.RegistryRights]::ChangePermissions
+        )
         if ($null -ne $keyAcl) {
             try {
                 $acl = $keyAcl.GetAccessControl()
                 $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
                     $adminSid,
                     [System.Security.AccessControl.RegistryRights]::FullControl,
-                    [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
+                    ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
                     [System.Security.AccessControl.PropagationFlags]::None,
                     [System.Security.AccessControl.AccessControlType]::Allow
                 )
@@ -1876,17 +2233,142 @@ function Set-ProtectedServiceStart {
                 $keyAcl.Dispose()
             }
         }
+    } catch { }
+}
 
+function Set-ProtectedServiceStart {
+    param(
+        [Parameter(Mandatory=$true)][string]$ServiceName,
+        [Parameter(Mandatory=$true)][int]$StartValue,
+        [switch]$StartService,
+        [string]$Module = ""
+    )
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    if (-not (Test-Path -LiteralPath $regPath)) { return }
+
+    $startFlag = if ($StartService.IsPresent) { " -StartService" } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($Module)) {
+        Write-UltixExpertCommand -CommandText "Set-ProtectedServiceStart -ServiceName '$ServiceName' -StartValue $StartValue$startFlag" -Module $Module
+    }
+
+    $escalatedAcl = $false
+    try {
         Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+    } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+        $escalatedAcl = $true
+        Grant-UltixRegistryKeyAccess -RegistryPath $regPath
+        try {
+            Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+        } catch {
+            if (-not [string]::IsNullOrWhiteSpace($Module)) {
+                Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+            }
+            throw
+        }
     }
 
     # Synchronize live in-memory SCM database (services.exe) via ChangeServiceConfigW & optionally start immediately
+    $scmSynced = $false
     if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
-        [void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
+        $scmSynced = [WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
     }
     if ($StartService.IsPresent -and $StartValue -ne 4) {
         Start-Service -Name $ServiceName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     }
+
+    if (-not [string]::IsNullOrWhiteSpace($Module)) {
+        $aclNote = if ($escalatedAcl) { " | ACL: TrustedInstaller Bypassed" } else { "" }
+        $scmNote = if ($scmSynced) { " | Live SCM: Synced" } else { "" }
+        Write-UltixExpertResult -OutputText "$ServiceName -> Start=$StartValue$scmNote$aclNote" -ExitCode 0 -Module $Module
+    }
+}
+
+function Stop-UltixService {
+    param(
+        [Parameter(Mandatory=$true)][string]$ServiceName,
+        [switch]$IncludePerUserInstances,
+        [string]$Module = ""
+    )
+    $targets = [System.Collections.Generic.List[System.ServiceProcess.ServiceController]]::new()
+    try {
+        $mainSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($null -ne $mainSvc) { $targets.Add($mainSvc) }
+        if ($IncludePerUserInstances.IsPresent) {
+            foreach ($subSvc in @(Get-Service -Name "${ServiceName}_*" -ErrorAction SilentlyContinue)) {
+                $targets.Add($subSvc)
+            }
+        }
+        if ($targets.Count -eq 0) { return }
+
+        $runningTargets = @($targets | Where-Object { $_.Status -ne 'Stopped' })
+        if ($runningTargets.Count -eq 0) { return }
+
+        if (-not [string]::IsNullOrWhiteSpace($Module)) {
+            Write-UltixExpertCommand -CommandText "Stop-UltixService -ServiceName '$ServiceName'" -Module $Module
+        }
+
+        $usedScmFallback = $false
+        foreach ($svc in $runningTargets) {
+            Stop-Service -InputObject $svc -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            $svc.Refresh()
+            if ($svc.Status -ne 'Stopped' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
+                $usedScmFallback = $true
+                [void][WinUltix.PrivilegeEnabler]::StopServiceLive($svc.ServiceName)
+                Start-Sleep -Milliseconds 150
+                $svc.Refresh()
+            }
+        }
+
+        $finalStates = ($runningTargets | ForEach-Object { "$($_.ServiceName)=$($_.Status)" }) -join ", "
+        $scmNote = if ($usedScmFallback) { " | Live SCM ControlService" } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($Module)) {
+            Write-UltixExpertResult -OutputText "$finalStates$scmNote" -ExitCode 0 -Module $Module
+        }
+    } finally {
+        foreach ($t in $targets) {
+            if ($null -ne $t) { $t.Dispose() }
+        }
+    }
+}
+
+function Stop-UltixProcess {
+    param(
+        [Parameter(Mandatory=$true)][string[]]$Name,
+        [string]$Module = ""
+    )
+    $procs = @(Get-Process -Name $Name -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) { return 0 }
+
+    $killedCount = 0
+    $procNames   = ($procs | Select-Object -ExpandProperty ProcessName -Unique) -join ","
+    if (-not [string]::IsNullOrWhiteSpace($Module)) {
+        Write-UltixExpertCommand -CommandText "Stop-Process -Name '$procNames' -Force" -Module $Module
+    }
+
+    try {
+        foreach ($p in $procs) {
+            try {
+                if (-not $p.HasExited) {
+                    $p.Kill()
+                    $killedCount++
+                }
+            } catch {
+                try {
+                    Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                    $killedCount++
+                } catch { }
+            }
+        }
+    } finally {
+        foreach ($p in $procs) {
+            if ($null -ne $p) { $p.Dispose() }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Module)) {
+        Write-UltixExpertResult -OutputText "Terminated $killedCount instance(s) ($procNames)" -ExitCode 0 -Module $Module
+    }
+    return $killedCount
 }
 
 function Unlock-UltixTrustedInstaller {
@@ -1933,7 +2415,8 @@ function Get-UltixPowerAcIndex {
 function Update-ShellEnvironment {
     param(
         [array]$ModifiedItems = @(),
-        [switch]$ForceExplorerRestart
+        [switch]$ForceExplorerRestart,
+        [string]$Module = "CORE"
     )
 
     $needsExplorerRestart = $ForceExplorerRestart.IsPresent
@@ -1951,19 +2434,208 @@ function Update-ShellEnvironment {
     } catch { }
 
     if ($needsSearchRestart) {
-        Stop-Process -Name "SearchHost" -Force -ErrorAction SilentlyContinue
+        [void](Stop-UltixProcess -Name "SearchHost" -Module $Module)
         Write-GUI " -> Refreshed Windows Search UI host (SearchHost.exe)."
     }
 
     if ($needsExplorerRestart) {
         Write-GUI " -> Policy change requires shell reload. Restarting explorer.exe..."
-        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+        [void](Stop-UltixProcess -Name "explorer" -Module $Module)
         Start-Sleep -Milliseconds 400
-        if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+        $expProcs = @(Get-Process -Name "explorer" -ErrorAction SilentlyContinue)
+        if ($expProcs.Count -eq 0) {
             Start-Process "explorer.exe"
+        } else {
+            foreach ($ep in $expProcs) { if ($null -ne $ep) { $ep.Dispose() } }
         }
     } else {
         Write-GUI " -> Shell & Taskbar refreshed live via Win32 WM_SETTINGCHANGE / SHChangeNotify."
+    }
+}
+
+function Write-UltixExpertCommand {
+    param(
+        [Parameter(Mandatory=$true)][string]$CommandText,
+        [string]$Module = "CORE"
+    )
+    if (-not [WinUltix.ExpertConsole]::IsVisible) { return }
+    $ts = [DateTime]::Now.ToString("HH:mm:ss")
+    $modPadded = "[$Module]".PadRight(15)
+    # 93 = Bright Yellow/Amber for executed commands
+    [WinUltix.ExpertConsole]::WriteLine("[$ts] $modPadded > $CommandText", "93")
+}
+
+function Write-UltixExpertResult {
+    param(
+        [AllowEmptyString()][string]$OutputText,
+        [int]$ExitCode = 0,
+        [string]$Module = "CORE"
+    )
+    if (-not [WinUltix.ExpertConsole]::IsVisible) { return }
+    $ts = [DateTime]::Now.ToString("HH:mm:ss")
+    $modPad = " " * 15
+    $color = if ($ExitCode -eq 0) { "90" } else { "91" }
+    $cleanOut = if ([string]::IsNullOrWhiteSpace($OutputText)) { "OK (No stdout)" } else { $OutputText.Trim() }
+    # Exact 29-char prefix alignment matching command column
+    [WinUltix.ExpertConsole]::WriteLine("[$ts] $modPad|-> [EXIT: $ExitCode] $cleanOut", $color)
+}
+
+function Set-UltixRegValue {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [AllowEmptyString()][string]$Name = "",
+        [Parameter(Mandatory=$true)]$Value,
+        [string]$Type = "DWord",
+        [string]$Module = "CORE"
+    )
+    $isDefaultVal = ($Name -eq "" -or $Name -eq "(Default)")
+    $fmtVal = if ($Type -eq "Binary" -and $Value -is [byte[]]) {
+        $hexPreview = ($Value | Select-Object -First 4 | ForEach-Object { "0x{0:X2}" -f $_ }) -join ","
+        if ($Value.Length -gt 4) { "[byte[]]($hexPreview,..[$($Value.Length)B])" } else { "[byte[]]($hexPreview)" }
+    } elseif ($Type -eq "MultiString" -and $Value -is [array]) {
+        "@(" + (($Value | ForEach-Object { "'$_'" }) -join ",") + ")"
+    } elseif ($Type -in @("String", "ExpandString") -or $isDefaultVal) {
+        "'$(([string]$Value).Replace("'", "''"))'"
+    } else {
+        "$Value"
+    }
+
+    if ($isDefaultVal) {
+        Write-UltixExpertCommand -CommandText "Set-Item -LiteralPath '$Path' -Value $fmtVal -Force" -Module $Module
+    } else {
+        Write-UltixExpertCommand -CommandText "Set-ItemProperty -LiteralPath '$Path' -Name '$Name' -Value $fmtVal -Type $Type -Force" -Module $Module
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+        }
+
+        if ($isDefaultVal) {
+            Set-Item -LiteralPath $Path -Value ([string]$Value) -Force -ErrorAction Stop | Out-Null
+            Write-UltixExpertResult -OutputText "(Default) = '$Value'" -ExitCode 0 -Module $Module
+        } else {
+            $writeVal = $Value
+            if ($Type -eq "DWord" -and $writeVal -is [long] -and $writeVal -gt [int]::MaxValue) {
+                $writeVal = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$writeVal), 0)
+            }
+            Set-ItemProperty -LiteralPath $Path -Name $Name -Value $writeVal -Type $Type -Force -ErrorAction Stop | Out-Null
+            Write-UltixExpertResult -OutputText "$Name = $fmtVal ($Type)" -ExitCode 0 -Module $Module
+        }
+    } catch {
+        Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+        throw
+    }
+}
+
+function Remove-UltixRegItem {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [AllowEmptyString()][string]$Name = "",
+        [switch]$IgnoreMissing,
+        [string]$Module = "CORE"
+    )
+    $isKeyDelete = [string]::IsNullOrEmpty($Name)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        if ($IgnoreMissing.IsPresent) { return }
+    }
+
+    if ($isKeyDelete) {
+        Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$Path' -Recurse -Force" -Module $Module
+    } else {
+        Write-UltixExpertCommand -CommandText "Remove-ItemProperty -LiteralPath '$Path' -Name '$Name' -Force" -Module $Module
+    }
+
+    try {
+        if ($isKeyDelete) {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop | Out-Null
+            Write-UltixExpertResult -OutputText "Deleted key: $Path" -ExitCode 0 -Module $Module
+        } else {
+            Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop | Out-Null
+            Write-UltixExpertResult -OutputText "Deleted value: $Name" -ExitCode 0 -Module $Module
+        }
+    } catch [System.Management.Automation.PSArgumentException], [System.Management.Automation.ItemNotFoundException] {
+        if ($IgnoreMissing.IsPresent) {
+            Write-UltixExpertResult -OutputText "Already absent (No-op)" -ExitCode 0 -Module $Module
+            return
+        }
+        Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+        throw
+    } catch {
+        Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+        throw
+    }
+}
+
+function Invoke-UltixExe {
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$Module = "CORE"
+    )
+    $argLine = ($Arguments | ForEach-Object {
+        if ($_ -eq "") {
+            '""'
+        } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') {
+            $safeArg = $_ -replace '\\+$', '$0$0'
+            "`"$safeArg`""
+        } else {
+            $_
+        }
+    }) -join " "
+    Write-UltixExpertCommand -CommandText "$FilePath $argLine".Trim() -Module $Module
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = $argLine
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $proc = $null
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $proc.WaitForExit()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $ec = $proc.ExitCode
+
+        $rawMsg = if ($ec -ne 0 -and -not [string]::IsNullOrWhiteSpace($stderr)) {
+            $stderr
+        } elseif (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            $stdout
+        } else {
+            $stderr
+        }
+
+        $cleanOut = ($rawMsg -replace '\x00', '' -replace '\s+', ' ').Trim()
+        if ($cleanOut.Length -gt 180) { $cleanOut = $cleanOut.Substring(0, 177) + "..." }
+
+        Write-UltixExpertResult -OutputText $cleanOut -ExitCode $ec -Module $Module
+        return $ec
+    } finally {
+        if ($null -ne $proc) { $proc.Dispose() }
+    }
+}
+
+function Invoke-UltixStep {
+    param(
+        [Parameter(Mandatory=$true)][string]$Command,
+        [Parameter(Mandatory=$true)][scriptblock]$Action,
+        [string]$SuccessOutput = "Completed",
+        [string]$Module = "CORE"
+    )
+    Write-UltixExpertCommand -CommandText $Command -Module $Module
+    try {
+        $res = & $Action
+        $msg = if ($res -is [string] -and -not [string]::IsNullOrWhiteSpace($res)) { $res } else { $SuccessOutput }
+        Write-UltixExpertResult -OutputText $msg -ExitCode 0 -Module $Module
+        return $res
+    } catch {
+        Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+        throw
     }
 }
 
@@ -2326,73 +2998,97 @@ function Update-Progress {
     }
 }
 
+function Get-UltixActiveNetworkAdapters {
+    $adapters = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+        if ($nic.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
+
+        try {
+            $ipProps = $nic.GetIPProperties()
+            if ($null -eq $ipProps) { continue }
+            $validGw = @($ipProps.GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") })
+            if ($validGw.Count -eq 0) { continue }
+
+            $v4Props = $ipProps.GetIPv4Properties()
+            if ($null -eq $v4Props -or $v4Props.Index -le 0) { continue }
+
+            $v4Addrs = [System.Collections.Generic.List[string]]::new()
+            $v6Addrs = [System.Collections.Generic.List[string]]::new()
+            foreach ($dnsIp in $ipProps.DnsAddresses) {
+                if ($dnsIp.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                    $v4Addrs.Add($dnsIp.ToString())
+                } elseif ($dnsIp.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 -and -not $dnsIp.IsIPv6SiteLocal) {
+                    $v6Addrs.Add($dnsIp.ToString())
+                }
+            }
+
+            $ifGuid = [string]$nic.Id
+            $v4RegKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$ifGuid"
+            $staticNs = [string](Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
+            $primaryV4 = if ($v4Addrs.Count -gt 0) { $v4Addrs[0] } else { "" }
+
+            $providerName = if ([string]::IsNullOrWhiteSpace($staticNs)) {
+                "Default (DHCP)"
+            } else {
+                switch ($primaryV4) {
+                    "9.9.9.9"        { "Quad9 (9.9.9.9)" }
+                    "1.1.1.1"        { "Cloudflare (1.1.1.1)" }
+                    "94.140.14.14"   { "AdGuard (94.140.14.14)" }
+                    "8.8.8.8"        { "Google (8.8.8.8)" }
+                    "208.67.222.222" { "OpenDNS (208.67.222.222)" }
+                    default          { "Custom" }
+                }
+            }
+
+            $isDohActive = $false
+            if (-not [string]::IsNullOrWhiteSpace($ifGuid) -and -not [string]::IsNullOrWhiteSpace($primaryV4)) {
+                $dohKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$ifGuid\DohInterfaceSettings\Doh\$primaryV4"
+                $flags  = (Get-ItemProperty -LiteralPath $dohKey -Name "DohFlags" -ErrorAction SilentlyContinue).DohFlags
+                if ($null -ne $flags -and ($flags -band 1) -eq 1) { $isDohActive = $true }
+            }
+
+            $adapters.Add([PSCustomObject]@{
+                InterfaceIndex   = [int]$v4Props.Index
+                InterfaceGuid    = $ifGuid
+                InterfaceName    = [string]$nic.Description
+                InterfaceAlias   = [string]$nic.Name
+                DnsV4            = @($v4Addrs)
+                DnsV6            = @($v6Addrs)
+                PrimaryV4        = $primaryV4
+                StaticNameServer = $staticNs
+                ProviderName     = $providerName
+                IsDohActive      = $isDohActive
+            })
+        } catch { }
+    }
+    return @($adapters)
+}
+
 function Update-DNSLabel {
     if ($null -eq $global:lblCurrentDNS -or $global:lblCurrentDNS.IsDisposed) { return }
 
     try {
-        # Direct Win32 GetAdaptersAddresses via .NET NetworkInterface (~2ms, ignores 0.0.0.0 dummy gateways)
-        $activeNic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
-            $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
-            $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback -and
-            @($_.GetIPProperties().GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") }).Count -gt 0
-        } | Select-Object -First 1
-
+        $activeNic = @(Get-UltixActiveNetworkAdapters) | Select-Object -First 1
         if ($null -eq $activeNic) {
             $global:lblCurrentDNS.Text = "Current DNS: No active internet route"
             $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::DarkGray
             return
         }
 
-        $ipProps = $activeNic.GetIPProperties()
-        $v4Addrs = [System.Collections.Generic.List[string]]::new()
-        $v6Addrs = [System.Collections.Generic.List[string]]::new()
-
-        foreach ($dnsIp in $ipProps.DnsAddresses) {
-            if ($dnsIp.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
-                $v4Addrs.Add($dnsIp.ToString())
-            } elseif ($dnsIp.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 -and -not $dnsIp.IsIPv6SiteLocal) {
-                $v6Addrs.Add($dnsIp.ToString())
-            }
-        }
-
-        $ifGuid = $activeNic.Id
-        $v4RegKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$ifGuid"
-        $staticNameServer = (Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
-
-        if ([string]::IsNullOrWhiteSpace($staticNameServer) -and $v4Addrs.Count -gt 0) {
-            $global:lblCurrentDNS.Text = "Current DNS: Default provider (DHCP - $($v4Addrs[0]))"
+        if ([string]::IsNullOrWhiteSpace($activeNic.StaticNameServer)) {
+            $dhcpHint = if (-not [string]::IsNullOrWhiteSpace($activeNic.PrimaryV4)) { " (DHCP - $($activeNic.PrimaryV4))" } else { " (DHCP)" }
+            $global:lblCurrentDNS.Text = "Current DNS: Default provider$dhcpHint"
             $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
             return
         }
 
-        if ($v4Addrs.Count -eq 0 -and $v6Addrs.Count -eq 0) {
-            $global:lblCurrentDNS.Text = "Current DNS: Default provider (DHCP)"
-            $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
-            return
-        }
+        $shortProv  = ($activeNic.ProviderName -replace '\s*\([^)]*\)$', '')
+        $stackBadge = if ($activeNic.DnsV6.Count -gt 0) { "IPv4+v6" } else { "IPv4" }
+        $dohBadge   = if ($activeNic.IsDohActive) { " [DoH Encrypted]" } else { " [Plaintext]" }
 
-        $primaryV4 = if ($v4Addrs.Count -gt 0) { $v4Addrs[0] } else { "" }
-        $providerName = switch ($primaryV4) {
-            "9.9.9.9"        { "Quad9" }
-            "1.1.1.1"        { "Cloudflare" }
-            "94.140.14.14"   { "AdGuard" }
-            "8.8.8.8"        { "Google" }
-            "208.67.222.222" { "OpenDNS" }
-            default          { "Custom" }
-        }
-
-        $isDohActive = $false
-        if (-not [string]::IsNullOrWhiteSpace($ifGuid) -and -not [string]::IsNullOrWhiteSpace($primaryV4)) {
-            $dohKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$ifGuid\DohInterfaceSettings\Doh\$primaryV4"
-            $flags  = (Get-ItemProperty -LiteralPath $dohKey -Name "DohFlags" -ErrorAction SilentlyContinue).DohFlags
-            if ($null -ne $flags -and ($flags -band 1) -eq 1) { $isDohActive = $true }
-        }
-
-        $stackBadge = if ($v6Addrs.Count -gt 0) { "IPv4+v6" } else { "IPv4" }
-        $dohBadge   = if ($isDohActive) { " [DoH Encrypted]" } else { " [Plaintext]" }
-
-        $global:lblCurrentDNS.Text = "Current DNS: $providerName ($primaryV4 | $stackBadge)$dohBadge"
-        $global:lblCurrentDNS.ForeColor = if ($isDohActive) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::LightSkyBlue }
+        $global:lblCurrentDNS.Text = "Current DNS: $shortProv ($($activeNic.PrimaryV4) | $stackBadge)$dohBadge"
+        $global:lblCurrentDNS.ForeColor = if ($activeNic.IsDohActive) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::LightSkyBlue }
     } catch {
         $global:lblCurrentDNS.Text = "Current DNS: Unknown"
     }
@@ -2691,17 +3387,22 @@ function Invoke-AsyncTask {
         [Parameter(Mandatory=$true)][scriptblock]$ScriptBlock,
         [array]$Arguments = @(),
         [Parameter(Mandatory=$true)][scriptblock]$OnComplete,
+        [scriptblock]$OnError = $null,
         [System.Windows.Forms.Control[]]$ControlsToDisable = @(),
         [int]$PollIntervalMs = 150
     )
 
-    # Re-entrancy guard: if already executing inside a background Runspace, run synchronously on current worker thread
+    # Re-entrancy guard: if already executing inside a background Runspace, run synchronously without resetting outer progress
     if ($null -ne $UltixSync) {
-        $prevProg  = $UltixSync.Progress
-        $nestedOut = & $ScriptBlock @Arguments
-        if ($null -ne $OnComplete) { & $OnComplete $nestedOut }
-        if ($UltixSync.Progress -eq 0 -and $prevProg -gt 0) {
-            $UltixSync.Progress = $prevProg
+        $prevLock = $UltixSync.LockProgress
+        $prevProg = $UltixSync.Progress
+        $UltixSync.LockProgress = $true
+        try {
+            $nestedOut = & $ScriptBlock @Arguments
+            if ($null -ne $OnComplete) { & $OnComplete $nestedOut }
+        } finally {
+            $UltixSync.LockProgress = $prevLock
+            $UltixSync.Progress     = $prevProg
         }
         return
     }
@@ -2711,8 +3412,9 @@ function Invoke-AsyncTask {
     }
 
     $syncContext = [hashtable]::Synchronized(@{
-        Logs     = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-        Progress = -1
+        Logs         = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        Progress     = -1
+        LockProgress = $false
     })
 
     # Pre-hydrate toolkit functions into isolated Runspace InitialSessionState
@@ -2733,34 +3435,58 @@ function Invoke-AsyncTask {
 
     # Inject thread-safe UI shims so any helper calling Write-GUI / Update-Progress inside a Runspace routes through $UltixSync
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Write-GUI", 'param([AllowEmptyString()][string]$Message, [switch]$DeferUpdate) if ($null -ne $UltixSync -and -not [string]::IsNullOrWhiteSpace($Message)) { $UltixSync.Logs.Enqueue($Message) }'))
-    $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Update-Progress", 'param([int]$Percent) if ($null -ne $UltixSync) { $UltixSync.Progress = $Percent }'))
+    $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Update-Progress", 'param([int]$Percent) if ($null -ne $UltixSync -and -not $UltixSync.LockProgress) { $UltixSync.Progress = $Percent }'))
 
-    $runspace = [runspacefactory]::CreateRunspace($iss)
-    $runspace.ApartmentState = "STA"
-    $runspace.ThreadOptions  = "ReuseThread"
-    $runspace.Open()
-    $runspace.SessionStateProxy.SetVariable("UltixSync", $syncContext)
-    $runspace.SessionStateProxy.SetVariable("AppVersion", $Global:AppVersion)
-
-    $ps = [powershell]::Create()
-    $ps.Runspace = $runspace
-    [void]$ps.AddScript($ScriptBlock)
-    foreach ($arg in $Arguments) {
-        [void]$ps.AddArgument($arg)
+    if ($null -eq $global:UltixActiveTasks) {
+        $global:UltixActiveTasks = [System.Collections.Generic.List[hashtable]]::new()
     }
 
-    $asyncResult = $ps.BeginInvoke()
+    $runspace = $null
+    $ps       = $null
+    $timer    = $null
+    $taskEntry = $null
 
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = $PollIntervalMs
-    $timer.Tag = @{
-        PS           = $ps
-        Runspace     = $runspace
-        AsyncResult  = $asyncResult
-        Controls     = $ControlsToDisable
-        OnComplete   = $OnComplete
-        SyncContext  = $syncContext
-        LastProgress = -1
+    try {
+        $runspace = [runspacefactory]::CreateRunspace($iss)
+        $runspace.ApartmentState = "STA"
+        $runspace.ThreadOptions  = "ReuseThread"
+        $runspace.Open()
+        $runspace.SessionStateProxy.SetVariable("UltixSync", $syncContext)
+        $runspace.SessionStateProxy.SetVariable("AppVersion", $Global:AppVersion)
+        $runspace.SessionStateProxy.SetVariable("ScriptDir", $ScriptDir)
+
+        $ps = [powershell]::Create()
+        $ps.Runspace = $runspace
+        [void]$ps.AddScript($ScriptBlock)
+        foreach ($arg in $Arguments) {
+            [void]$ps.AddArgument($arg)
+        }
+
+        $asyncResult = $ps.BeginInvoke()
+
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = $PollIntervalMs
+        $taskEntry = @{
+            PS           = $ps
+            Runspace     = $runspace
+            AsyncResult  = $asyncResult
+            Controls     = $ControlsToDisable
+            OnComplete   = $OnComplete
+            OnError      = $OnError
+            SyncContext  = $syncContext
+            Timer        = $timer
+            LastProgress = -1
+        }
+        $timer.Tag = $taskEntry
+        [void]$global:UltixActiveTasks.Add($taskEntry)
+    } catch {
+        if ($null -ne $ps) { try { $ps.Dispose() } catch { } }
+        if ($null -ne $runspace) { try { $runspace.Close(); $runspace.Dispose() } catch { } }
+        foreach ($ctrl in $ControlsToDisable) {
+            if ($null -ne $ctrl -and -not $ctrl.IsDisposed) { $ctrl.Enabled = $true }
+        }
+        Write-GUI "  [ERROR] Failed to initialize background Runspace: $($_.Exception.Message)"
+        return
     }
 
     $timer.Add_Tick({
@@ -2803,6 +3529,9 @@ function Invoke-AsyncTask {
                 $global:infoBox.ScrollToCaret()
                 $global:infoBox.Update()
             }
+            if ($null -ne $global:UltixActiveTasks) {
+                [void]$global:UltixActiveTasks.Remove($state)
+            }
             $state.PS.Dispose()
             $state.Runspace.Close()
             $state.Runspace.Dispose()
@@ -2814,7 +3543,14 @@ function Invoke-AsyncTask {
 
         if ($null -ne $taskError) {
             Update-Progress 0
-            Write-GUI "  [ERROR] Background task failed: $($taskError.Exception.Message)"
+            $errDetail = $taskError.Exception.Message
+            if ($null -ne $taskError.Exception.InnerException -and -not [string]::IsNullOrWhiteSpace($taskError.Exception.InnerException.Message)) {
+                $errDetail = $taskError.Exception.InnerException.Message
+            }
+            Write-GUI "  [ERROR] Background task failed: $errDetail"
+            if ($null -ne $state.OnError) {
+                & $state.OnError $errDetail
+            }
             return
         }
 
@@ -3119,7 +3855,8 @@ function Show-ActionModal {
     $modal.CancelButton = $btnCancel
 
     try {
-        $result = $modal.ShowDialog($global:form)
+        $useOwner = ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired)
+        $result   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
         if ($hasValidItems -and ($result -eq "OK" -or $result -eq "Yes")) {
             $selectedItems = [System.Collections.Generic.List[object]]::new()
             foreach ($idx in $chkList.CheckedIndices) {
@@ -3493,7 +4230,8 @@ function Show-UltixGridModal {
     $modal.CancelButton = $btnCancel
 
     try {
-        $dlgRes = $modal.ShowDialog($global:form)
+        $useOwner = ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired)
+        $dlgRes   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
         if ($dlgRes -eq [System.Windows.Forms.DialogResult]::Yes -and $SecondaryAlwaysEnabled.IsPresent) {
             $selectedList = [System.Collections.Generic.List[object]]::new()
             foreach ($entry in $indexedData) {
@@ -3645,12 +4383,30 @@ function Export-WinUltixProfile {
             @{ AffinityLasso = @(); CPPCUnhidden = @(); TimerTweaks = @(); NVMeTweaks = @(); GlobalNetwork = @() }
         }
 
+        $isStartMenuClean = $false
+        if (Get-Command Get-StartMenuState -ErrorAction SilentlyContinue) {
+            $smState = @(Get-StartMenuState) | Select-Object -First 1
+            if ($null -ne $smState -and -not $smState.IsDetected) { $isStartMenuClean = $true }
+        }
+
+        $dnsProfile = $null
+        $primaryNic = @(Get-UltixActiveNetworkAdapters) | Select-Object -First 1
+        if ($null -ne $primaryNic -and $primaryNic.ProviderName -notin @("Default (DHCP)", "Custom")) {
+            $dnsProfile = [ordered]@{
+                Provider   = $primaryNic.ProviderName
+                EnableDoH  = [bool]$primaryNic.IsDohActive
+                EnableIPv6 = ($primaryNic.DnsV6.Count -gt 0)
+            }
+        }
+
         $snapshot = [ordered]@{
             SchemaVersion           = "WinUltix_Snapshot_v1"
             AppVersion              = $AppVersion
             ExportTimestamp         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             SourceMachine           = $env:COMPUTERNAME
             Win32PrioritySeparation = $exactQuantum
+            StartMenuClean          = $isStartMenuClean
+            DnsProfile              = $dnsProfile
             RegistryTweaks          = @($activeRegTweaks)
             PowerDisplayTweaks      = @($activePowerDisplay)
             UsbSecurityLocks        = @($activeUsbLayers)
@@ -3667,10 +4423,12 @@ function Export-WinUltixProfile {
             }
         }
 
-        $snapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 -Force -ErrorAction Stop
+        Invoke-UltixStep -Command "Export-WinUltixProfile -Path '$OutFile'" -Action {
+            $snapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 -Force -ErrorAction Stop
+        } -SuccessOutput "Snapshot written ($($activeRegTweaks.Count) Reg, $($activePowerDisplay.Count) Pwr, $($activeUsbLayers.Count) USB, $($activeServices.Count) Svc)" -Module "PROFILE"
         $UltixSync.Progress = 100
 
-        $hwCount = @($hwSnapshot.TimerTweaks).Count + @($hwSnapshot.NVMeTweaks).Count + @($hwSnapshot.CPPCUnhidden).Count
+        $hwCount = @($hwSnapshot.TimerTweaks).Count + @($hwSnapshot.NVMeTweaks).Count + @($hwSnapshot.CPPCUnhidden).Count + @($hwSnapshot.GlobalNetwork).Count
         return [PSCustomObject]@{
             FilePath  = $OutFile
             RegCount  = $activeRegTweaks.Count
@@ -3719,16 +4477,38 @@ function Import-WinUltixProfile {
     $pwrCount = if ($profileData.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0) { @($profileData.PowerDisplayTweaks).Count } else { 0 }
     $usbCount = if ($profileData.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0)   { @($profileData.UsbSecurityLocks).Count }   else { 0 }
     $svcCount = @($profileData.DisabledServices).Count
+    $tskCount = if ($profileData.PSObject.Properties.Match("DisabledTasks").Count -gt 0)      { @($profileData.DisabledTasks).Count }      else { 0 }
     $srpCount = @($profileData.ActiveSrpLocks).Count
     $affCount = @($profileData.AffinityLasso).Count
+
+    $hwCount = 0
+    if ($profileData.PSObject.Properties.Match("HardwareLocks").Count -gt 0 -and $null -ne $profileData.HardwareLocks) {
+        $hl = $profileData.HardwareLocks
+        $hwCount = @($hl.CPPCUnhidden).Count + @($hl.TimerTweaks).Count + @($hl.NVMeTweaks).Count + @($hl.GlobalNetwork).Count
+    }
+
+    $smLabel = if ($profileData.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $profileData.StartMenuClean -eq $true) {
+        "3-Icon Clean Layout"
+    } else {
+        "Unchanged"
+    }
+
+    $dnsLabel = if ($profileData.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $profileData.DnsProfile -and -not [string]::IsNullOrWhiteSpace($profileData.DnsProfile.Provider)) {
+        $dohTag = if ($profileData.DnsProfile.EnableDoH) { " [DoH]" } else { "" }
+        "$($profileData.DnsProfile.Provider)$dohTag"
+    } else {
+        "Unchanged"
+    }
 
     $confirmMsg = "Loaded snapshot from '$($profileData.SourceMachine)' ($($profileData.ExportTimestamp)):`n`n" +
                   " - Registry Tweaks: $regCount`n" +
                   " - Power & Display Optimizations: $pwrCount`n" +
                   " - USB Perimeter Locks: $usbCount`n" +
-                  " - Disabled Services: $svcCount`n" +
+                  " - Disabled Services / Tasks: $svcCount / $tskCount`n" +
                   " - SRP+IFEO Locks: $srpCount`n" +
-                  " - Affinity Lasso Roster: $affCount`n`n" +
+                  " - Affinity Lasso / Hardware Locks: $affCount / $hwCount`n" +
+                  " - Start Menu Layout: $smLabel`n" +
+                  " - DNS Profile: $dnsLabel`n`n" +
                   "Do you want to enforce this profile on the current machine?"
 
     $ans = [System.Windows.Forms.MessageBox]::Show($confirmMsg, "WinUltix - Import Profile", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
@@ -3749,9 +4529,8 @@ function Import-WinUltixProfile {
         # 1. Custom SRP Roster
         if ($null -ne $Snapshot.CustomSrpRoster) {
             $customSrpKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-            if (-not (Test-Path -LiteralPath $customSrpKey)) { New-Item -Path $customSrpKey -Force | Out-Null }
             foreach ($prop in $Snapshot.CustomSrpRoster.PSObject.Properties) {
-                Set-ItemProperty -LiteralPath $customSrpKey -Name $prop.Name -Value $prop.Value -Type String -Force
+                Set-UltixRegValue -Path $customSrpKey -Name $prop.Name -Value $prop.Value -Type String -Module "PROFILE"
             }
         }
 
@@ -3780,8 +4559,7 @@ function Import-WinUltixProfile {
         if ($Snapshot.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $Snapshot.Win32PrioritySeparation) {
             $savedQuantum = [int]$Snapshot.Win32PrioritySeparation
             $prioKey = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
-            if (-not (Test-Path -LiteralPath $prioKey)) { New-Item -Path $prioKey -Force | Out-Null }
-            Set-ItemProperty -LiteralPath $prioKey -Name "Win32PrioritySeparation" -Value $savedQuantum -Type DWord -Force
+            Set-UltixRegValue -Path $prioKey -Name "Win32PrioritySeparation" -Value $savedQuantum -Type DWord -Module "PROFILE"
             $UltixSync.Logs.Enqueue((" -> Restored Quantum Scheduler (Win32PrioritySeparation = 0x{0:X2} / {0} dec)." -f $savedQuantum))
         }
 
@@ -3865,14 +4643,25 @@ function Import-WinUltixProfile {
 
         $UltixSync.Progress = 90
 
-        # 8. Hardware & Affinity Snapshot
+        # 8. Start Menu 3-Icon Layout & Active DNS/DoH Profile
+        if ($Snapshot.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $Snapshot.StartMenuClean -eq $true -and (Get-Command Clear-StartMenu -ErrorAction SilentlyContinue)) {
+            $smCur = @(Get-StartMenuState) | Select-Object -First 1
+            if ($null -ne $smCur -and $smCur.IsDetected) {
+                Clear-StartMenu -Operation "Apply"
+            }
+        }
+
+        if ($Snapshot.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $Snapshot.DnsProfile -and -not [string]::IsNullOrWhiteSpace($Snapshot.DnsProfile.Provider) -and (Get-Command Set-CustomDNS -ErrorAction SilentlyContinue)) {
+            Set-CustomDNS -Provider ([string]$Snapshot.DnsProfile.Provider) -EnableDoH ([bool]$Snapshot.DnsProfile.EnableDoH) -EnableIPv6 ([bool]$Snapshot.DnsProfile.EnableIPv6)
+        }
+
+        # 9. Hardware & Affinity Snapshot
         if (Get-Command Import-UltixHardwareSnapshot -ErrorAction SilentlyContinue) {
             Import-UltixHardwareSnapshot -ProfileData $Snapshot
         } elseif (@($Snapshot.AffinityLasso).Count -gt 0) {
             $affPath = "HKCU:\Software\WinUltix\AffinityLasso"
-            if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force | Out-Null }
             foreach ($exe in $Snapshot.AffinityLasso) {
-                Set-ItemProperty -LiteralPath $affPath -Name $exe -Value 1 -Type DWord -Force
+                Set-UltixRegValue -Path $affPath -Name $exe -Value 1 -Type DWord -Module "PROFILE"
             }
             $UltixSync.Logs.Enqueue(" -> Restored $(@($Snapshot.AffinityLasso).Count) process(es) to Affinity Lasso roster.")
         }
@@ -3882,9 +4671,7 @@ function Import-WinUltixProfile {
     } -OnComplete ({
         param($modReg)
         Update-Progress 0
-        if ($null -ne $modReg -and @($modReg).Count -gt 0) {
-            Update-ShellEnvironment -ModifiedItems @($modReg)
-        }
+        Update-DNSLabel
         Write-GUI "=== PROFILE IMPORT COMPLETED ===`n"
     }.GetNewClosure())
 }

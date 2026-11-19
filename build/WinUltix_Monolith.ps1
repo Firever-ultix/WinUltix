@@ -1,4 +1,4 @@
-# WINULTIX v3.14 - ZERO-WMI MONOLITH (https://github.com/Firever-ultix/WinUltix)
+# WINULTIX v3.19 - ZERO-WMI MONOLITH (https://github.com/Firever-ultix/WinUltix)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
 if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -and (Test-Path -LiteralPath $PSCommandPath)) {
@@ -8,7 +8,7 @@ Write-Warning "WinUltix requires Administrator privileges. Please launch PowerSh
 }
 return
 }
-$Global:AppVersion = "v3.14"
+$Global:AppVersion = "v3.19"
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($script:MyInvocation.MyCommand.Path) { Split-Path $script:MyInvocation.MyCommand.Path } else { [System.AppDomain]::CurrentDomain.BaseDirectory.TrimEnd("\") }
 $baselineFunctions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($fn in (Get-ChildItem -Path Function:\)) {
@@ -18,1317 +18,1914 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Type) {
 Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -TypeDefinition @"
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Drawing;
-using System.Globalization;
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Windows.Forms;
-namespace WinUltix {
-public static class NativeMethods {
-private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-private struct MEMORYSTATUSEX {
-public uint dwLength;
-public uint dwMemoryLoad;
-public ulong ullTotalPhys;
-public ulong ullAvailPhys;
-public ulong ullTotalPageFile;
-public ulong ullAvailPageFile;
-public ulong ullTotalVirtual;
-public ulong ullAvailVirtual;
-public ulong ullAvailExtendedVirtual;
-}
-[DllImport("dwmapi.dll", PreserveSig = true)]
-private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
-[DllImport("user32.dll", SetLastError = true)]
-private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
-[DllImport("shell32.dll", SetLastError = true)]
-private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
-[DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-private static extern uint PrivateExtractIconsW(
-string szFileName, int nIconIndex, int cxIcon, int cyIcon,
-IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
-[DllImport("user32.dll", SetLastError = true)]
-public static extern bool DestroyIcon(IntPtr hIcon);
-[DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-[return: MarshalAs(UnmanagedType.Bool)]
-private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
-[DllImport("kernel32.dll", SetLastError = true)]
-private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
-[DllImport("kernel32.dll", SetLastError = true)]
-private static extern bool CloseHandle(IntPtr hObject);
-[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-private static extern bool SystemParametersInfoW(uint uiAction, uint uiParam, int[] pvParam, uint fWinIni);
-private const uint SPI_SETMOUSE = 0x0004;
-private const uint SPIF_UPDATEINIFILE = 0x01;
-private const uint SPIF_SENDCHANGE = 0x02;
-public static bool ApplyLiveMouseParams(int threshold1, int threshold2, int speed) {
-int[] mouseParams = new int[3] { threshold1, threshold2, speed };
-return SystemParametersInfoW(SPI_SETMOUSE, 0, mouseParams, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-}
-public static void EnableDarkTitleBar(IntPtr handle) {
-if (handle == IntPtr.Zero) return;
-int useDark = 1;
-if (DwmSetWindowAttribute(handle, 20, ref useDark, sizeof(int)) != 0) {
-DwmSetWindowAttribute(handle, 19, ref useDark, sizeof(int));
-}
-}
-public static void EnableGdiDpiScaling() {
-try { SetCurrentProcessExplicitAppUserModelID("Firever.WinUltix"); } catch { }
-try { SetProcessDpiAwarenessContext(new IntPtr(-5)); } catch { }
-}
-public static Bitmap ExtractHighResExeIcon(string exePath, int size) {
-IntPtr[] hIcons = new IntPtr[1];
-uint[] ids = new uint[1];
-uint count = PrivateExtractIconsW(exePath, 0, size, size, hIcons, ids, 1, 0);
-if (count > 0 && hIcons[0] != IntPtr.Zero) {
-try {
-using (Icon ico = Icon.FromHandle(hIcons[0])) {
-return ico.ToBitmap();
-}
-} catch {
-try { return Bitmap.FromHicon(hIcons[0]); } catch { }
-} finally {
-DestroyIcon(hIcons[0]);
-}
-}
-return null;
-}
-public static int GetTotalPhysicalMemoryKB() {
-MEMORYSTATUSEX mem = new MEMORYSTATUSEX();
-mem.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
-if (GlobalMemoryStatusEx(ref mem) && mem.ullTotalPhys > 0) {
-ulong kb = mem.ullTotalPhys / 1024UL;
-return (kb > (ulong)int.MaxValue) ? int.MaxValue : (int)kb;
-}
-return 16777216;
-}
-public static string GetProcessExecutablePath(int pid) {
-if (pid <= 4) return "";
-IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-if (hProc == IntPtr.Zero) return "";
-try {
-uint capacity = 1024;
-StringBuilder sb = new StringBuilder((int)capacity);
-if (QueryFullProcessImageNameW(hProc, 0, sb, ref capacity)) {
-return sb.ToString();
-}
-} finally {
-CloseHandle(hProc);
-}
-return "";
-}
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern IntPtr CreateFileW(
-string lpFileName, uint dwDesiredAccess, uint dwShareMode,
-IntPtr lpSecurityAttributes, uint dwCreationDisposition,
-uint dwFlagsAndAttributes, IntPtr hTemplateFile);
-[DllImport("kernel32.dll", SetLastError = true)]
-private static extern bool DeviceIoControl(
-IntPtr hDevice, uint dwIoControlCode,
-IntPtr lpInBuffer, uint nInBufferSize,
-out uint lpOutBuffer, uint nOutBufferSize,
-out uint lpBytesReturned, IntPtr lpOverlapped);
-private const uint FSCTL_IS_VOLUME_DIRTY = 0x00090078;
-public static int IsVolumeDirty(string driveName) {
-if (string.IsNullOrWhiteSpace(driveName)) return -1;
-string cleanDrive = driveName.Trim().TrimEnd('\\');
-if (!cleanDrive.EndsWith(":", StringComparison.Ordinal)) cleanDrive += ":";
-IntPtr hVol = CreateFileW(@"\\.\" + cleanDrive, 0x80000000U, 3U, IntPtr.Zero, 3U, 0U, IntPtr.Zero);
-if (hVol == IntPtr.Zero || hVol == new IntPtr(-1)) return -1;
-try {
-uint flags = 0, ret = 0;
-if (DeviceIoControl(hVol, FSCTL_IS_VOLUME_DIRTY, IntPtr.Zero, 0U, out flags, 4U, out ret, IntPtr.Zero)) {
-return ((flags & 1U) != 0U) ? 1 : 0;
-}
-} finally {
-CloseHandle(hVol);
-}
-return -1;
-}
-}
-public static class ShellInterop {
-private static readonly IntPtr HWND_BROADCAST = new IntPtr(0xFFFF);
-private const uint WM_SETTINGCHANGE = 0x001A;
-private const uint SMTO_ABORTIFHUNG = 0x0002;
-private const int SHCNE_ASSOCCHANGED = 0x08000000;
-private const uint SHCNF_IDLIST = 0x0000;
-private const uint SHCNF_FLUSHNOWAIT = 0x2000;
-[DllImport("shell32.dll")]
-public static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
-[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-public static extern IntPtr SendMessageTimeout(
-IntPtr hWnd, uint Msg, IntPtr wParam, string lParam,
-uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
-public static void BroadcastShellRefresh() {
-IntPtr result;
-SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, IntPtr.Zero, IntPtr.Zero);
-SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "TraySettings", SMTO_ABORTIFHUNG, 100, out result);
-SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "ShellState", SMTO_ABORTIFHUNG, 100, out result);
-SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "Policy", SMTO_ABORTIFHUNG, 100, out result);
-SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "Environment", SMTO_ABORTIFHUNG, 100, out result);
-}
-}
-public static class PrivilegeEnabler {
-private const uint SC_MANAGER_CONNECT = 0x0001;
-private const uint SERVICE_CHANGE_CONFIG = 0x0002;
-private const uint SERVICE_START = 0x0010;
-private const uint SERVICE_STOP = 0x0020;
-private const uint SERVICE_CONTROL_STOP = 0x00000001;
-private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF;
-[DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-private static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
-[DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-private static extern bool OpenProcessToken(IntPtr h, uint acc, ref IntPtr phtok);
-[DllImport("advapi32.dll", SetLastError = true)]
-private static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint dwAccess);
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern IntPtr OpenServiceW(IntPtr hSCManager, string lpServiceName, uint dwDesiredAccess);
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern bool ChangeServiceConfigW(
-IntPtr hService, uint dwServiceType, uint dwStartType, uint dwErrorControl,
-string lpBinaryPathName, string lpLoadOrderGroup, IntPtr lpdwTagId,
-string lpDependencies, string lpServiceStartName, string lpPassword, string lpDisplayName);
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern bool StartServiceW(IntPtr hService, uint dwNumServiceArgs, IntPtr lpServiceArgVectors);
-[DllImport("advapi32.dll", SetLastError = true)]
-private static extern bool ControlService(IntPtr hService, uint dwControl, out SERVICE_STATUS lpServiceStatus);
-[DllImport("advapi32.dll", SetLastError = true)]
-private static extern bool CloseServiceHandle(IntPtr hSCObject);
-[DllImport("kernel32.dll", ExactSpelling = true)]
-private static extern IntPtr GetCurrentProcess();
-[DllImport("kernel32.dll", SetLastError = true)]
-private static extern bool CloseHandle(IntPtr hObject);
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-private struct TokPriv1Luid {
-public int Count;
-public long Luid;
-public int Attr;
-}
-[StructLayout(LayoutKind.Sequential)]
-private struct SERVICE_STATUS {
-public uint dwServiceType;
-public uint dwCurrentState;
-public uint dwControlsAccepted;
-public uint dwWin32ExitCode;
-public uint dwServiceSpecificExitCode;
-public uint dwCheckPoint;
-public uint dwWaitHint;
-}
-public static void EnablePrivilege(string privilege) {
-IntPtr htok = IntPtr.Zero;
-if (!OpenProcessToken(GetCurrentProcess(), 0x00000028U, ref htok)) return;
-try {
-TokPriv1Luid tp = new TokPriv1Luid { Count = 1, Luid = 0, Attr = 0x00000002 };
-if (LookupPrivilegeValue(null, privilege, ref tp.Luid)) {
-AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
-}
-} finally {
-if (htok != IntPtr.Zero) CloseHandle(htok);
-}
-}
-public static bool SetServiceConfigLive(string serviceName, int startType, bool startNow) {
-if (string.IsNullOrWhiteSpace(serviceName)) return false;
-bool changeConfig = (startType >= 0 && startType <= 4);
-uint access = (changeConfig ? SERVICE_CHANGE_CONFIG : 0U) | (startNow ? SERVICE_START : 0U);
-if (access == 0U) return false;
-IntPtr hScm = IntPtr.Zero;
-IntPtr hSvc = IntPtr.Zero;
-try {
-hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
-if (hScm == IntPtr.Zero) return false;
-hSvc = OpenServiceW(hScm, serviceName, access);
-if (hSvc == IntPtr.Zero) return false;
-bool ok = true;
-if (changeConfig) {
-ok = ChangeServiceConfigW(
-hSvc, SERVICE_NO_CHANGE, (uint)startType, SERVICE_NO_CHANGE,
-null, null, IntPtr.Zero, null, null, null, null);
-}
-if (startNow && startType != 4) {
-StartServiceW(hSvc, 0, IntPtr.Zero);
-}
-return ok;
-} finally {
-if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
-if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
-}
-}
-public static bool StopServiceLive(string serviceName) {
-if (string.IsNullOrWhiteSpace(serviceName)) return false;
-IntPtr hScm = IntPtr.Zero;
-IntPtr hSvc = IntPtr.Zero;
-try {
-hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
-if (hScm == IntPtr.Zero) return false;
-hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
-if (hSvc == IntPtr.Zero) return false;
-SERVICE_STATUS status;
-return ControlService(hSvc, SERVICE_CONTROL_STOP, out status);
-} finally {
-if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
-if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
-}
-}
-}
-[ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IApplicationActivationManager {
-IntPtr ActivateApplication([In] String appUserModelId, [In] String arguments, [In] UInt32 options, [Out] out UInt32 processId);
-}
-[ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
-public class AppActivator : IApplicationActivationManager {
-[MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
-public extern IntPtr ActivateApplication([In] String appUserModelId, [In] String arguments, [In] UInt32 options, [Out] out UInt32 processId);
-}
-public class ListViewColumnSorter : IComparer {
-public int ColumnToSort = 0;
-public SortOrder OrderOfSort = SortOrder.None;
-private CaseInsensitiveComparer ObjectCompare = new CaseInsensitiveComparer();
-private static bool TryParseSortableNumber(string s, out double val) {
-val = 0;
-if (string.IsNullOrWhiteSpace(s)) return false;
-string clean = s.Trim();
-if (clean.Length > 7 && clean.StartsWith("oem", StringComparison.OrdinalIgnoreCase) && clean.EndsWith(".inf", StringComparison.OrdinalIgnoreCase)) {
-string numPart = clean.Substring(3, clean.Length - 7);
-if (double.TryParse(numPart, NumberStyles.Integer, CultureInfo.InvariantCulture, out val)) return true;
-}
-if (clean.StartsWith("Max:", StringComparison.OrdinalIgnoreCase)) {
-clean = clean.Substring(4).Trim();
-}
-int usIdx = clean.IndexOf(" \u00B5s", StringComparison.OrdinalIgnoreCase);
-if (usIdx < 0) usIdx = clean.IndexOf(" us", StringComparison.OrdinalIgnoreCase);
-if (usIdx > 0) {
-clean = clean.Substring(0, usIdx).Trim();
-}
-int parenIdx = clean.IndexOf(" (Core ", StringComparison.OrdinalIgnoreCase);
-if (parenIdx > 0) {
-clean = clean.Substring(0, parenIdx).Trim();
-} else if (clean.EndsWith(" MB", StringComparison.OrdinalIgnoreCase) ||
-clean.EndsWith(" KB", StringComparison.OrdinalIgnoreCase) ||
-clean.EndsWith(" GB", StringComparison.OrdinalIgnoreCase)) {
-clean = clean.Substring(0, clean.Length - 3).Trim();
-} else if (clean.EndsWith("%", StringComparison.Ordinal)) {
-clean = clean.Substring(0, clean.Length - 1).Trim();
-}
-clean = clean.Replace("\u00A0", "").Replace(" ", "").Replace(',', '.');
-return double.TryParse(clean, NumberStyles.Float, CultureInfo.InvariantCulture, out val);
-}
-public int Compare(object x, object y) {
-if (OrderOfSort == SortOrder.None) return 0;
-ListViewItem listviewX = (ListViewItem)x;
-ListViewItem listviewY = (ListViewItem)y;
-string textX, textY;
-if (ColumnToSort == -1) {
-textX = (listviewX.SubItems.Count > 4) ? listviewX.SubItems[4].Text : "";
-textY = (listviewY.SubItems.Count > 4) ? listviewY.SubItems[4].Text : "";
-int idxX = textX.IndexOf("1s:", StringComparison.OrdinalIgnoreCase);
-int idxY = textY.IndexOf("1s:", StringComparison.OrdinalIgnoreCase);
-if (idxX >= 0) textX = textX.Substring(idxX + 3).TrimEnd(')', ' ');
-if (idxY >= 0) textY = textY.Substring(idxY + 3).TrimEnd(')', ' ');
-} else {
-textX = (ColumnToSort >= 0 && ColumnToSort < listviewX.SubItems.Count) ? listviewX.SubItems[ColumnToSort].Text : "";
-textY = (ColumnToSort >= 0 && ColumnToSort < listviewY.SubItems.Count) ? listviewY.SubItems[ColumnToSort].Text : "";
-}
-int compareResult;
-double numX, numY;
-if (TryParseSortableNumber(textX, out numX) && TryParseSortableNumber(textY, out numY)) {
-compareResult = numX.CompareTo(numY);
-} else {
-compareResult = ObjectCompare.Compare(textX, textY);
-}
-if (OrderOfSort == SortOrder.Descending) compareResult = -compareResult;
-if (compareResult == 0 && listviewX.SubItems.Count > 1 && listviewY.SubItems.Count > 1) {
-compareResult = ObjectCompare.Compare(listviewX.SubItems[1].Text, listviewY.SubItems[1].Text);
-}
-return compareResult;
-}
-}
-public class CoreRecord {
-public byte Flags;
-public byte EfficiencyClass;
-public long Mask;
-}
-public class L3CacheRecord {
-public uint SizeBytes;
-public long Mask;
-}
-public static class SmbiosRamInfo {
-[DllImport("kernel32.dll", SetLastError = true)]
-private static extern uint GetSystemFirmwareTable(uint FirmwareTableProviderSignature, uint FirmwareTableID, IntPtr pFirmwareTableBuffer, uint BufferSize);
-private const uint RSMB = 0x52534D42; // 'RSMB' in ASCII
-private static string GetSmbiosString(byte[] data, int structEnd, int strEnd, byte index) {
-if (index == 0) return "";
-int curIdx = 1;
-int pos = structEnd;
-while (pos < strEnd && data[pos] != 0) {
-int start = pos;
-while (pos < strEnd && data[pos] != 0) pos++;
-if (curIdx == index) {
-return Encoding.ASCII.GetString(data, start, pos - start).Trim();
-}
-curIdx++;
-pos++;
-}
-return "";
-}
-public static string GetRamSummary(ulong fallbackTotalKB) {
-double fallbackGB = Math.Round(fallbackTotalKB / 1048576.0, 1);
-uint size = GetSystemFirmwareTable(RSMB, 0, IntPtr.Zero, 0);
-if (size <= 8 || size > 65536) return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
-IntPtr buf = Marshal.AllocHGlobal((int)size);
-try {
-if (GetSystemFirmwareTable(RSMB, 0, buf, size) != size) {
-return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
-}
-byte[] raw = new byte[size];
-Marshal.Copy(buf, raw, 0, (int)size);
-int totalSlots = 0;
-int usedSlots  = 0;
-ulong totalMB  = 0;
-var stickSizesMB = new List<ulong>();
-uint bestSpeed = 0;
-byte memType   = 0;
-string partNum = "";
-string vendor  = "";
-int pos = 8; // Skip 8-byte RawSMBIOSData header
-while (pos + 4 <= raw.Length) {
-byte type = raw[pos];
-byte len  = raw[pos + 1];
-if (len < 4 || pos + len > raw.Length) break;
-int strEnd = pos + len;
-while (strEnd + 1 < raw.Length && !(raw[strEnd] == 0 && raw[strEnd + 1] == 0)) {
-strEnd++;
-}
-int nextPos = Math.Min(raw.Length, strEnd + 2);
-if (type == 17 && len >= 0x15) {
-ushort rawSize = BitConverter.ToUInt16(raw, pos + 0x0C);
-if (rawSize != 0xFFFF) {
-totalSlots++;
-ulong moduleMB = 0;
-if (rawSize == 0x7FFF && len >= 0x20) {
-uint extSize = BitConverter.ToUInt32(raw, pos + 0x1C);
-moduleMB = (ulong)(extSize & 0x7FFFFFFFU);
-} else if (rawSize > 0) {
-moduleMB = ((rawSize & 0x8000) != 0) ? ((ulong)(rawSize & 0x7FFF) / 1024UL) : (ulong)rawSize;
-}
-if (moduleMB > 0) {
-usedSlots++;
-totalMB += moduleMB;
-stickSizesMB.Add(moduleMB);
-if (len > 0x12 && raw[pos + 0x12] > 0 && memType == 0) {
-memType = raw[pos + 0x12];
-}
-uint spd = BitConverter.ToUInt16(raw, pos + 0x15);
-if (len >= 0x22) {
-ushort cfgSpd = BitConverter.ToUInt16(raw, pos + 0x20);
-if (cfgSpd > 0 && cfgSpd != 0xFFFF) spd = cfgSpd;
-else if (cfgSpd == 0xFFFF && len >= 0x60) {
-uint extSpd = BitConverter.ToUInt32(raw, pos + 0x5C);
-if (extSpd > 0) spd = extSpd;
-}
-}
-if (spd > bestSpeed && spd <= 16000) bestSpeed = spd;
-if (string.IsNullOrEmpty(vendor) && len > 0x17) {
-string v = GetSmbiosString(raw, pos + len, strEnd, raw[pos + 0x17]);
-if (!string.IsNullOrWhiteSpace(v) && !v.StartsWith("Unknown", StringComparison.OrdinalIgnoreCase) && !v.StartsWith("0000", StringComparison.Ordinal)) {
-vendor = v;
-}
-}
-if (string.IsNullOrEmpty(partNum) && len > 0x1A) {
-string p = GetSmbiosString(raw, pos + len, strEnd, raw[pos + 0x1A]);
-if (!string.IsNullOrWhiteSpace(p) && !p.StartsWith("Unknown", StringComparison.OrdinalIgnoreCase) && !p.StartsWith("None", StringComparison.OrdinalIgnoreCase)) {
-partNum = p;
-}
-}
-}
-}
-}
-if (type == 127) break;
-pos = nextPos;
-}
-if (usedSlots == 0 || totalMB == 0) {
-return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
-}
-string ddrStr = "RAM";
-switch (memType) {
-case 0x18: ddrStr = "DDR3"; break;
-case 0x1A: ddrStr = "DDR4"; break;
-case 0x1E: ddrStr = "LPDDR4"; break;
-case 0x22: ddrStr = "DDR5"; break;
-case 0x23: ddrStr = "LPDDR5"; break;
-}
-ulong totalGB = totalMB / 1024UL;
-string speedPart = (bestSpeed > 0) ? string.Format(" @ {0} MT/s", bestSpeed) : "";
-ulong firstStickGB = stickSizesMB[0] / 1024UL;
-bool uniformSticks = (firstStickGB > 0);
-for (int i = 1; i < stickSizesMB.Count; i++) {
-if ((stickSizesMB[i] / 1024UL) != firstStickGB) { uniformSticks = false; break; }
-}
-string layoutPart = uniformSticks
-? string.Format("{0}x {1} GB", usedSlots, firstStickGB)
-: string.Format("{0} Modules", usedSlots);
-string slotsPart = (totalSlots >= usedSlots && totalSlots <= 16)
-? string.Format(" | {0}/{1} Slots", usedSlots, totalSlots)
-: "";
-string modelPart = "";
-if (!string.IsNullOrEmpty(partNum)) {
-modelPart = " | " + partNum;
-} else if (!string.IsNullOrEmpty(vendor)) {
-modelPart = " | " + vendor;
-}
-return string.Format(CultureInfo.InvariantCulture, "{0} GB {1}{2} ({3}{4}{5})",
-totalGB, ddrStr, speedPart, layoutPart, slotsPart, modelPart);
-} catch {
-return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
-} finally {
-Marshal.FreeHGlobal(buf);
-}
-}
-}
-public static class CpuTopology {
-[DllImport("kernel32.dll", SetLastError = true)]
-private static extern bool GetLogicalProcessorInformationEx(
-int RelationshipType,
-IntPtr Buffer,
-ref uint ReturnedLength);
-private const int RelationProcessorCore = 0;
-private const int RelationCache = 2;
-public static List<CoreRecord> GetProcessorCores() {
-var list = new List<CoreRecord>();
-uint len = 0;
-GetLogicalProcessorInformationEx(RelationProcessorCore, IntPtr.Zero, ref len);
-if (len == 0) return list;
-IntPtr buf = Marshal.AllocHGlobal((int)len);
-try {
-if (GetLogicalProcessorInformationEx(RelationProcessorCore, buf, ref len)) {
-int offset = 0;
-while (offset < (int)len) {
-IntPtr cur = IntPtr.Add(buf, offset);
-int rel = Marshal.ReadInt32(cur, 0);
-int size = Marshal.ReadInt32(cur, 4);
-if (rel == RelationProcessorCore && size >= 40) {
-byte flags = Marshal.ReadByte(cur, 8);
-byte eff   = Marshal.ReadByte(cur, 9);
-long mask  = Marshal.ReadIntPtr(cur, 32).ToInt64();
-list.Add(new CoreRecord { Flags = flags, EfficiencyClass = eff, Mask = mask });
-}
-if (size <= 0) break;
-offset += size;
-}
-}
-} finally {
-Marshal.FreeHGlobal(buf);
-}
-return list;
-}
-public static List<L3CacheRecord> GetL3Caches() {
-var list = new List<L3CacheRecord>();
-uint len = 0;
-GetLogicalProcessorInformationEx(RelationCache, IntPtr.Zero, ref len);
-if (len == 0) return list;
-IntPtr buf = Marshal.AllocHGlobal((int)len);
-try {
-if (GetLogicalProcessorInformationEx(RelationCache, buf, ref len)) {
-int offset = 0;
-while (offset < (int)len) {
-IntPtr cur = IntPtr.Add(buf, offset);
-int rel = Marshal.ReadInt32(cur, 0);
-int size = Marshal.ReadInt32(cur, 4);
-if (rel == RelationCache && size >= 48) {
-byte level = Marshal.ReadByte(cur, 8);
-if (level == 3) {
-uint cacheSize = (uint)Marshal.ReadInt32(cur, 12);
-long mask      = Marshal.ReadIntPtr(cur, 40).ToInt64();
-list.Add(new L3CacheRecord { SizeBytes = cacheSize, Mask = mask });
-}
-}
-if (size <= 0) break;
-offset += size;
-}
-}
-} finally {
-Marshal.FreeHGlobal(buf);
-}
-return list;
-}
-public static long GetTailThreadsMask(long domainMask, int threadCount) {
-var bitIndices = new List<int>();
-for (int b = 0; b < 64; b++) {
-if ((domainMask & (1L << b)) != 0) bitIndices.Add(b);
-}
-if (bitIndices.Count <= threadCount) return domainMask;
-long result = 0;
-for (int i = bitIndices.Count - threadCount; i < bitIndices.Count; i++) {
-result |= (1L << bitIndices[i]);
-}
-return result;
-}
-}
-public static class NtDll {
-[DllImport("ntdll.dll")]
-private static extern int NtQueryTimerResolution(out uint MaximumTime, out uint MinimumTime, out uint CurrentTime);
-[DllImport("ntdll.dll", SetLastError = true)]
-private static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution);
-[DllImport("ntdll.dll")]
-private static extern int NtQuerySystemInformation(int SystemInformationClass, IntPtr SystemInformation, uint SystemInformationLength, out uint ReturnLength);
-private const int SystemInterruptInformation = 23; // 0x17 (24 bytes per logical processor)
-public static uint[] GetTimerData() {
-uint max, min, cur;
-NtQueryTimerResolution(out max, out min, out cur);
-return new uint[] { max, min, cur };
-}
-public static uint SetTimerResolution(uint desired100Ns, bool enable) {
-uint cur = 0;
-NtSetTimerResolution(desired100Ns, enable, out cur);
-return cur;
-}
-public static uint[] GetProcessorDpcCounts() {
-int lpCount = Environment.ProcessorCount;
-int structSize = 24;
-uint bufLen = (uint)(lpCount * structSize);
-IntPtr buf = Marshal.AllocHGlobal((int)bufLen);
-try {
-uint retLen = 0;
-int status = NtQuerySystemInformation(SystemInterruptInformation, buf, bufLen, out retLen);
-if (status != 0) return new uint[0];
-int validCount = Math.Min(lpCount, (int)(retLen / structSize));
-uint[] dpcCounts = new uint[validCount];
-for (int i = 0; i < validCount; i++) {
-dpcCounts[i] = (uint)Marshal.ReadInt32(buf, (i * structSize) + 4);
-}
-return dpcCounts;
-} finally {
-Marshal.FreeHGlobal(buf);
-}
-}
-}
-public class DriverLoadRecord {
-public string DriverName;
-public string ServiceKey;
-public double UsPerSec;
-public double AvgUsPerSec;
-public double MaxPeakUs;
-public long CallsPerSec;
-public long TotalCalls;
-public int ElapsedSec;
-}
-public static class DpcDriverProfiler {
-[DllImport("ntdll.dll")]
-private static extern int NtQuerySystemInformation(int SystemInformationClass, IntPtr SystemInformation, uint SystemInformationLength, out uint ReturnLength);
-[DllImport("kernel32.dll")]
-private static extern bool QueryPerformanceFrequency(out long lpFrequency);
-[DllImport("kernel32.dll")]
-private static extern bool QueryPerformanceCounter(out long lpPerformanceCount);
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
-private static extern uint StartTraceW(out ulong SessionHandle, string SessionName, IntPtr Properties);
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
-private static extern uint ControlTraceW(ulong SessionHandle, string SessionName, IntPtr Properties, uint ControlCode);
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern ulong OpenTraceW(IntPtr Logfile);
-[DllImport("advapi32.dll")]
-private static extern uint ProcessTrace(ulong[] HandleArray, uint HandleCount, IntPtr StartTime, IntPtr EndTime);
-[DllImport("advapi32.dll")]
-private static extern uint CloseTrace(ulong TraceHandle);
-[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-private delegate void EventRecordCallback(IntPtr pEventRecord);
-private struct KernelModuleRange : IComparable<KernelModuleRange> {
-public ulong BaseAddress;
-public ulong EndAddress;
-public string DriverName;
-public string ServiceKey;
-public int CompareTo(KernelModuleRange other) {
-return this.BaseAddress.CompareTo(other.BaseAddress);
-}
-}
-private const int SystemModuleInformation = 11;
-private const uint EVENT_TRACE_CONTROL_STOP = 1;
-private const uint EVENT_TRACE_FLAG_INTERRUPT = 0x00000040;
-private const uint EVENT_TRACE_FLAG_DPC = 0x00000020;
-private const uint EVENT_TRACE_REAL_TIME_MODE = 0x00000100;
-private const uint EVENT_TRACE_SYSTEM_LOGGER_MODE = 0x02000000;
-private const uint WNODE_FLAG_TRACED_GUID = 0x00020000;
-private const uint PROCESS_TRACE_MODE_REAL_TIME = 0x00000100;
-private const uint PROCESS_TRACE_MODE_RAW_TIMESTAMP = 0x00001000;
-private const uint PROCESS_TRACE_MODE_EVENT_RECORD = 0x10000000;
-private const int PERFINFO_GUID_DATA1 = unchecked((int)0xce1dbfb4);
-private static readonly Guid SystemTraceControlGuid = new Guid("9e814aad-3204-11d2-9a82-006008a86939");
-private static readonly EventRecordCallback _callbackDelegate = new EventRecordCallback(OnEventRecord);
-private static volatile bool _running = false;
-private static string _activeSessionName = "WinUltix_DpcProfiler";
-private static ulong _sessionHandle = 0;
-private static ulong _traceHandle = 0;
-private static System.Threading.Thread _workerThread = null;
-private static KernelModuleRange[] _modules = new KernelModuleRange[0];
-private static long[] _windowTicks = new long[0];
-private static long[] _windowCounts = new long[0];
-private static long[] _totalTicks = new long[0];
-private static long[] _totalCounts = new long[0];
-private static long[] _sessionPeakTicks = new long[0];
-private static long _sessionStartQpc = 0;
-private static long _qpcFreq = 10000000L;
-private static long _maxSaneTicks = 5000000L;
-public static bool IsRunning { get { return _running; } }
-private static void LoadKernelModules() {
-PrivilegeEnabler.EnablePrivilege("SeSystemProfilePrivilege");
-uint retLen = 0;
-NtQuerySystemInformation(SystemModuleInformation, IntPtr.Zero, 0, out retLen);
-if (retLen == 0) retLen = 262144;
-uint bufLen = retLen + 65536;
-IntPtr buf = Marshal.AllocHGlobal((int)bufLen);
-try {
-int status = NtQuerySystemInformation(SystemModuleInformation, buf, bufLen, out retLen);
-if (status != 0) return;
-int count = Marshal.ReadInt32(buf, 0);
-int headOffset = IntPtr.Size;
-int entrySize = (IntPtr.Size == 8) ? 296 : 284;
-var list = new List<KernelModuleRange>(Math.Max(16, count));
-for (int i = 0; i < count; i++) {
-IntPtr item = IntPtr.Add(buf, headOffset + (i * entrySize));
-ulong imgBase = unchecked((ulong)Marshal.ReadIntPtr(item, IntPtr.Size * 2).ToInt64());
-uint imgSize  = unchecked((uint)Marshal.ReadInt32(item, IntPtr.Size * 3));
-if (imgBase == 0 || imgSize == 0) continue;
-ushort fnOffset = (ushort)Marshal.ReadInt16(item, (IntPtr.Size * 3) + 14);
-if (fnOffset >= 256) fnOffset = 0;
-IntPtr pathPtr = IntPtr.Add(item, (IntPtr.Size * 3) + 16 + fnOffset);
-string drvFile = Marshal.PtrToStringAnsi(pathPtr);
-if (string.IsNullOrWhiteSpace(drvFile)) drvFile = "Unknown.sys";
-int slashIdx = drvFile.LastIndexOf('\\');
-if (slashIdx >= 0 && slashIdx + 1 < drvFile.Length) {
-drvFile = drvFile.Substring(slashIdx + 1);
-}
-string svcKey = drvFile;
-if (svcKey.EndsWith(".sys", StringComparison.OrdinalIgnoreCase) ||
-svcKey.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
-svcKey.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) {
-svcKey = svcKey.Substring(0, svcKey.Length - 4);
-}
-list.Add(new KernelModuleRange {
-BaseAddress = imgBase,
-EndAddress  = imgBase + (ulong)imgSize,
-DriverName  = drvFile,
-ServiceKey  = svcKey.ToLowerInvariant()
-});
-}
-list.Sort();
-_modules          = list.ToArray();
-_windowTicks      = new long[_modules.Length];
-_windowCounts     = new long[_modules.Length];
-_totalTicks       = new long[_modules.Length];
-_totalCounts      = new long[_modules.Length];
-_sessionPeakTicks = new long[_modules.Length];
-QueryPerformanceCounter(out _sessionStartQpc);
-} finally {
-Marshal.FreeHGlobal(buf);
-}
-}
-public static void ResetStats() {
-long now;
-QueryPerformanceCounter(out now);
-System.Threading.Interlocked.Exchange(ref _sessionStartQpc, now);
-for (int i = 0; i < _modules.Length; i++) {
-System.Threading.Interlocked.Exchange(ref _windowTicks[i], 0);
-System.Threading.Interlocked.Exchange(ref _windowCounts[i], 0);
-System.Threading.Interlocked.Exchange(ref _totalTicks[i], 0);
-System.Threading.Interlocked.Exchange(ref _totalCounts[i], 0);
-System.Threading.Interlocked.Exchange(ref _sessionPeakTicks[i], 0);
-}
-}
-private static int FindModuleIndex(ulong routineAddr) {
-KernelModuleRange[] mods = _modules;
-int lo = 0;
-int hi = mods.Length - 1;
-while (lo <= hi) {
-int mid = (lo + hi) >> 1;
-ulong start = mods[mid].BaseAddress;
-if (routineAddr < start) {
-hi = mid - 1;
-} else if (routineAddr >= mods[mid].EndAddress) {
-lo = mid + 1;
-} else {
-return mid;
-}
-}
-return -1;
-}
-private static void OnEventRecord(IntPtr pEventRecord) {
-if (!_running || pEventRecord == IntPtr.Zero) return;
-byte opcode = Marshal.ReadByte(pEventRecord, 45);
-if (opcode != 68 && opcode != 67 && opcode != 69 && opcode != 66 && opcode != 50) return;
-if (Marshal.ReadInt32(pEventRecord, 24) != PERFINFO_GUID_DATA1) return;
-ushort userDataLen = (ushort)Marshal.ReadInt16(pEventRecord, (IntPtr.Size == 8) ? 86 : 82);
-if (userDataLen < 16) return;
-IntPtr userData = Marshal.ReadIntPtr(pEventRecord, (IntPtr.Size == 8) ? 96 : 88);
-if (userData == IntPtr.Zero) return;
-long exitTs = Marshal.ReadInt64(pEventRecord, 16);
-long initTs = Marshal.ReadInt64(userData, 0);
-ulong routine = unchecked((ulong)Marshal.ReadInt64(userData, 8));
-if (routine < 0xFFFF000000000000UL) return;
-int idx = FindModuleIndex(routine);
-if (idx < 0) return;
-long delta = exitTs - initTs;
-if (delta < 0 || delta > _maxSaneTicks) delta = 0;
-System.Threading.Interlocked.Add(ref _windowTicks[idx], delta);
-System.Threading.Interlocked.Increment(ref _windowCounts[idx]);
-System.Threading.Interlocked.Add(ref _totalTicks[idx], delta);
-System.Threading.Interlocked.Increment(ref _totalCounts[idx]);
-long curPeak = System.Threading.Interlocked.Read(ref _sessionPeakTicks[idx]);
-if (delta > curPeak) {
-System.Threading.Interlocked.Exchange(ref _sessionPeakTicks[idx], delta);
-}
-}
-private static IntPtr AllocTraceProperties(string sessionName, Guid sessionGuid, uint logFileMode) {
-int totalSize = 120 + 512;
-IntPtr ptr = Marshal.AllocHGlobal(totalSize);
-for (int i = 0; i < totalSize; i++) Marshal.WriteByte(ptr, i, 0);
-Marshal.WriteInt32(ptr, 0, totalSize);
-byte[] guidBytes = sessionGuid.ToByteArray();
-Marshal.Copy(guidBytes, 0, IntPtr.Add(ptr, 24), 16);
-Marshal.WriteInt32(ptr, 40, 1);
-Marshal.WriteInt32(ptr, 44, unchecked((int)WNODE_FLAG_TRACED_GUID));
-Marshal.WriteInt32(ptr, 48, 64);
-Marshal.WriteInt32(ptr, 52, 4);
-Marshal.WriteInt32(ptr, 56, 16);
-Marshal.WriteInt32(ptr, 64, unchecked((int)logFileMode));
-Marshal.WriteInt32(ptr, 68, 1);
-Marshal.WriteInt32(ptr, 72, unchecked((int)(EVENT_TRACE_FLAG_DPC | EVENT_TRACE_FLAG_INTERRUPT)));
-Marshal.WriteInt32(ptr, 116, 120);
-byte[] nameBytes = Encoding.Unicode.GetBytes(sessionName + "\0");
-Marshal.Copy(nameBytes, 0, IntPtr.Add(ptr, 120), nameBytes.Length);
-return ptr;
-}
-public static bool Start() {
-if (_running) return true;
-if (IntPtr.Size != 8) return false;
-long freq;
-if (QueryPerformanceFrequency(out freq) && freq > 0) {
-_qpcFreq = freq;
-_maxSaneTicks = freq / 2;
-}
-LoadKernelModules();
-if (_modules.Length == 0) return false;
-_activeSessionName = "WinUltix_DpcProfiler";
-Guid privGuid = Guid.NewGuid();
-uint privMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
-IntPtr props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
-uint status = 0;
-try {
-ControlTraceW(0, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP);
-Marshal.FreeHGlobal(props);
-props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
-status = StartTraceW(out _sessionHandle, _activeSessionName, props);
-if (status != 0) {
-Marshal.FreeHGlobal(props);
-_activeSessionName = "NT Kernel Logger";
-props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
-ControlTraceW(0, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP);
-Marshal.FreeHGlobal(props);
-props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
-status = StartTraceW(out _sessionHandle, _activeSessionName, props);
-}
-} finally {
-Marshal.FreeHGlobal(props);
-}
-if (status != 0) return false;
-IntPtr logfile = Marshal.AllocHGlobal(448);
-IntPtr loggerNamePtr = Marshal.StringToHGlobalUni(_activeSessionName);
-try {
-for (int i = 0; i < 448; i++) Marshal.WriteByte(logfile, i, 0);
-Marshal.WriteIntPtr(logfile, 8, loggerNamePtr);
-uint traceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
-Marshal.WriteInt32(logfile, 28, unchecked((int)traceMode));
-IntPtr cbPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
-Marshal.WriteIntPtr(logfile, 424, cbPtr);
-_traceHandle = OpenTraceW(logfile);
-} finally {
-Marshal.FreeHGlobal(loggerNamePtr);
-Marshal.FreeHGlobal(logfile);
-}
-if (_traceHandle == 0 || _traceHandle == unchecked((ulong)-1L)) {
-Stop();
-return false;
-}
-QueryPerformanceCounter(out _sessionStartQpc);
-_running = true;
-ulong hTraceCopy = _traceHandle;
-_workerThread = new System.Threading.Thread(delegate() {
-try {
-ProcessTrace(new ulong[] { hTraceCopy }, 1, IntPtr.Zero, IntPtr.Zero);
-} catch { }
-});
-_workerThread.IsBackground = true;
-_workerThread.Name = "WinUltix_EtwDpcWorker";
-_workerThread.Start();
-return true;
-}
-public static void Stop() {
-_running = false;
-if (_traceHandle != 0 && _traceHandle != unchecked((ulong)-1L)) {
-try { CloseTrace(_traceHandle); } catch { }
-_traceHandle = 0;
-}
-if (_sessionHandle != 0 || !string.IsNullOrEmpty(_activeSessionName)) {
-IntPtr props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
-try { ControlTraceW(_sessionHandle, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP); } catch { }
-finally { Marshal.FreeHGlobal(props); }
-_sessionHandle = 0;
-}
-if (_workerThread != null && _workerThread.IsAlive) {
-try { _workerThread.Join(400); } catch { }
-_workerThread = null;
-}
-}
-public static List<DriverLoadRecord> SampleDriverLoads() {
-var results = new List<DriverLoadRecord>();
-if (!_running || _modules.Length == 0) return results;
-long nowQpc;
-QueryPerformanceCounter(out nowQpc);
-long startQpc = System.Threading.Interlocked.Read(ref _sessionStartQpc);
-double elapsedSec = Math.Max(1.0, (double)(nowQpc - startQpc) / (double)_qpcFreq);
-int elapsedInt = Math.Max(1, (int)Math.Round(elapsedSec));
-double tickToUs = 1000000.0 / (double)_qpcFreq;
-for (int i = 0; i < _modules.Length; i++) {
-long winTicks  = System.Threading.Interlocked.Exchange(ref _windowTicks[i], 0);
-long winCounts = System.Threading.Interlocked.Exchange(ref _windowCounts[i], 0);
-long totTicks  = System.Threading.Interlocked.Read(ref _totalTicks[i]);
-long totCounts = System.Threading.Interlocked.Read(ref _totalCounts[i]);
-long peakTicks = System.Threading.Interlocked.Read(ref _sessionPeakTicks[i]);
-if (totCounts > 0 || winCounts > 0 || peakTicks > 0) {
-results.Add(new DriverLoadRecord {
-DriverName  = _modules[i].DriverName,
-ServiceKey  = _modules[i].ServiceKey,
-UsPerSec    = Math.Round(winTicks * tickToUs, 1),
-AvgUsPerSec = Math.Round((totTicks * tickToUs) / elapsedSec, 1),
-MaxPeakUs   = Math.Round(peakTicks * tickToUs, 1),
-CallsPerSec = winCounts,
-TotalCalls  = totCounts,
-ElapsedSec  = elapsedInt
-});
-}
-}
-return results;
-}
-}
-public static class PnpTree {
-private const uint DN_HAS_PROBLEM = 0x00000400;
-private const uint CM_PROB_DISABLED = 22;
-[DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
-[DllImport("cfgmgr32.dll")]
-private static extern int CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
-[DllImport("cfgmgr32.dll")]
-private static extern int CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
-[DllImport("cfgmgr32.dll")]
-private static extern int CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
-[DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-private static extern int CM_Get_Device_IDW(uint dnDevInst, StringBuilder Buffer, int BufferLen, uint ulFlags);
-[DllImport("cfgmgr32.dll")]
-private static extern int CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
-public static string GetDeviceId(uint devInst) {
-var sb = new StringBuilder(512);
-if (CM_Get_Device_IDW(devInst, sb, sb.Capacity, 0) == 0) return sb.ToString();
-return "";
-}
-public static int GetDeviceConfigStatus(string instanceId) {
-if (string.IsNullOrEmpty(instanceId)) return -1;
-uint devInst;
-if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return -1;
-uint status, problem;
-if (CM_Get_DevNode_Status(out status, out problem, devInst, 0) != 0) return -1;
-if ((status & DN_HAS_PROBLEM) != 0) return (int)problem;
-return 0;
-}
-public static bool IsDeviceDisabled(string instanceId) {
-return GetDeviceConfigStatus(instanceId) == (int)CM_PROB_DISABLED;
-}
-public static List<string> GetParentChain(string instanceId) {
-var chain = new List<string>();
-uint cur;
-if (CM_Locate_DevNodeW(out cur, instanceId, 0) != 0) return chain;
-uint parent;
-int guard = 0;
-while (guard++ < 32 && CM_Get_Parent(out parent, cur, 0) == 0) {
-string pid = GetDeviceId(parent);
-if (string.IsNullOrEmpty(pid)) break;
-chain.Add(pid);
-cur = parent;
-}
-return chain;
-}
-private static void CollectDescendants(uint devInst, int depth, List<string> output) {
-if (depth > 16) return;
-uint child;
-if (CM_Get_Child(out child, devInst, 0) != 0) return;
-uint cur = child;
-int guard = 0;
-while (guard++ < 256) {
-string id = GetDeviceId(cur);
-if (!string.IsNullOrEmpty(id)) {
-output.Add(depth.ToString() + "|" + id);
-CollectDescendants(cur, depth + 1, output);
-}
-uint sibling;
-if (CM_Get_Sibling(out sibling, cur, 0) != 0) break;
-cur = sibling;
-}
-}
-public static List<string> GetDescendants(string instanceId) {
-var list = new List<string>();
-uint root;
-if (CM_Locate_DevNodeW(out root, instanceId, 0) != 0) return list;
-CollectDescendants(root, 1, list);
-return list;
-}
-[StructLayout(LayoutKind.Sequential)]
-private struct DEVPROPKEY {
-public Guid fmtid;
-public uint pid;
-}
-[DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-private static extern int CM_Get_DevNode_PropertyW(
-uint dnDevInst,
-ref DEVPROPKEY PropertyKey,
-out uint PropertyType,
-IntPtr PropertyBuffer,
-ref uint PropertyBufferSize,
-uint ulFlags);
-private static readonly Guid GUID_PCI_DEVICE = new Guid("3ab22e31-8264-4b4e-9af5-a8d2d8e33e62");
-private static int ReadPciDevPropInt(uint devInst, uint pid) {
-DEVPROPKEY key = new DEVPROPKEY { fmtid = GUID_PCI_DEVICE, pid = pid };
-uint propType = 0;
-uint bufSize  = 8;
-IntPtr buf = Marshal.AllocHGlobal(8);
-try {
-Marshal.WriteInt64(buf, 0, 0L);
-if (CM_Get_DevNode_PropertyW(devInst, ref key, out propType, buf, ref bufSize, 0) == 0 && bufSize > 0) {
-if (bufSize == 1) return Marshal.ReadByte(buf, 0);
-if (bufSize == 2) return Marshal.ReadInt16(buf, 0);
-return Marshal.ReadInt32(buf, 0);
-}
-} finally {
-Marshal.FreeHGlobal(buf);
-}
-return 0;
-}
-public static string GetPcieLinkInfo(string instanceId) {
-if (string.IsNullOrEmpty(instanceId)) return "";
-uint devInst;
-if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return "";
-int curSpeed = ReadPciDevPropInt(devInst, 9);
-int curWidth = ReadPciDevPropInt(devInst, 10);
-int maxSpeed = ReadPciDevPropInt(devInst, 11);
-int maxWidth = ReadPciDevPropInt(devInst, 12);
-int effSpeed = Math.Max(curSpeed, maxSpeed);
-int effWidth = (curWidth > 0) ? curWidth : maxWidth;
-if (effSpeed <= 0 && effWidth <= 0) return "";
-string genStr = "";
-switch (effSpeed) {
-case 1: genStr = "1.0"; break;
-case 2: genStr = "2.0"; break;
-case 3: genStr = "3.0"; break;
-case 4: genStr = "4.0"; break;
-case 5: genStr = "5.0"; break;
-case 6: genStr = "6.0"; break;
-}
-string prefix = string.IsNullOrEmpty(genStr) ? "PCIe" : ("PCIe " + genStr);
-if (curWidth > 0 && maxWidth > 0 && curWidth < maxWidth) {
-return string.Format("{0} x{1} (Max: x{2})", prefix, curWidth, maxWidth);
-}
-if (effWidth > 0) {
-return string.Format("{0} x{1}", prefix, effWidth);
-}
-return prefix;
-}
-}
-public class HubProbeResult {
-public int TotalPorts;
-public int Usb2Ports;
-public int Usb3Ports;
-public int SsPlusPorts;
-public int ActivePorts;
-public Dictionary<int, string> PortSpeeds = new Dictionary<int, string>();
-}
-public static class UsbProberV2 {
-[StructLayout(LayoutKind.Sequential)]
-private struct DEVPROPKEY {
-public Guid fmtid;
-public uint pid;
-}
-[DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
-[DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-private static extern int CM_Get_DevNode_PropertyW(
-uint dnDevInst,
-ref DEVPROPKEY PropertyKey,
-out uint PropertyType,
-IntPtr PropertyBuffer,
-ref uint PropertyBufferSize,
-uint ulFlags);
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-private static extern IntPtr CreateFileW(
-string lpFileName, uint dwDesiredAccess, uint dwShareMode,
-IntPtr lpSecurityAttributes, uint dwCreationDisposition,
-uint dwFlagsAndAttributes, IntPtr hTemplateFile);
-[DllImport("kernel32.dll", SetLastError = true)]
-private static extern bool DeviceIoControl(
-IntPtr hDevice, uint dwIoControlCode,
-IntPtr lpInBuffer, uint nInBufferSize,
-IntPtr lpOutBuffer, uint nOutBufferSize,
-out uint lpBytesReturned, IntPtr lpOverlapped);
-[DllImport("kernel32.dll")]
-private static extern bool CloseHandle(IntPtr hObject);
-private const uint GENERIC_WRITE = 0x40000000;
-private const uint FILE_SHARE_READ = 0x00000001;
-private const uint FILE_SHARE_WRITE = 0x00000002;
-private const uint OPEN_EXISTING = 3;
-private const uint IOCTL_USB_GET_NODE_INFORMATION = 0x00220408;
-private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX = 0x00220448;
-private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2 = 0x0022045C;
-private static DEVPROPKEY KEY_BUS_REPORTED_DESC = new DEVPROPKEY {
-fmtid = new Guid("540b947e-8b40-45bc-a8a2-6a0b894cbda2"),
-pid = 4
-};
-public static string GetBusReportedDesc(string instanceId) {
-uint devInst;
-if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return "";
-uint propType = 0;
-uint bufSize = 512;
-IntPtr buf = Marshal.AllocHGlobal((int)bufSize);
-try {
-int cr = CM_Get_DevNode_PropertyW(devInst, ref KEY_BUS_REPORTED_DESC, out propType, buf, ref bufSize, 0);
-if (cr == 0 && propType == 18 && bufSize > 2) {
-string val = Marshal.PtrToStringUni(buf);
-return (val != null) ? val.Trim() : "";
-}
-} finally {
-Marshal.FreeHGlobal(buf);
-}
-return "";
-}
-public static HubProbeResult ProbeHub(string hubInstanceId) {
-var res = new HubProbeResult();
-if (string.IsNullOrEmpty(hubInstanceId)) return res;
-string symPath = @"\\?\" + hubInstanceId.Replace('\\', '#') + "#{f18a0e88-c30c-11d0-8815-00a0c906bed8}";
-IntPtr hHub = CreateFileW(symPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) {
-hHub = CreateFileW(symPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-}
-if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) return res;
-IntPtr bufNode = Marshal.AllocHGlobal(128);
-IntPtr bufV2   = Marshal.AllocHGlobal(32);
-IntPtr bufEx   = Marshal.AllocHGlobal(64);
-try {
-for (int i = 0; i < 128; i++) Marshal.WriteByte(bufNode, i, 0);
-uint ret = 0;
-if (!DeviceIoControl(hHub, IOCTL_USB_GET_NODE_INFORMATION, bufNode, 76, bufNode, 76, out ret, IntPtr.Zero)) {
-return res;
-}
-int numPorts = Marshal.ReadByte(bufNode, 6);
-res.TotalPorts = numPorts;
-for (int p = 1; p <= numPorts; p++) {
-for (int i = 0; i < 16; i++) Marshal.WriteByte(bufV2, i, 0);
-Marshal.WriteInt32(bufV2, 0, p);
-Marshal.WriteInt32(bufV2, 4, 16);
-Marshal.WriteInt32(bufV2, 8, 7);
-uint protocols = 0;
-uint v2Flags   = 0;
-if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, bufV2, 16, bufV2, 16, out ret, IntPtr.Zero)) {
-protocols = (uint)Marshal.ReadInt32(bufV2, 8);
-v2Flags   = (uint)Marshal.ReadInt32(bufV2, 12);
-if ((protocols & 0x04) != 0) {
-res.Usb3Ports++;
-if ((v2Flags & 0x08) != 0 || (v2Flags & 0x04) != 0) res.SsPlusPorts++;
-} else if ((protocols & 0x02) != 0) {
-res.Usb2Ports++;
-}
-}
-for (int i = 0; i < 64; i++) Marshal.WriteByte(bufEx, i, 0);
-Marshal.WriteInt32(bufEx, 0, p);
-if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, bufEx, 35, bufEx, 35, out ret, IntPtr.Zero)) {
-ushort bcdUsb   = (ushort)Marshal.ReadInt16(bufEx, 6);
-byte speed      = Marshal.ReadByte(bufEx, 23);
-uint connStatus = (uint)Marshal.ReadInt32(bufEx, 31);
-if (connStatus == 1) {
-res.ActivePorts++;
-bool isDedicatedSsPort = ((protocols & 0x04) != 0 && (protocols & 0x02) == 0);
-bool isOperatingSsPlus = ((v2Flags & 0x04) != 0);
-bool isOperatingSs     = ((v2Flags & 0x01) != 0) || (speed >= 3) || isDedicatedSsPort || (bcdUsb >= 0x0300);
-bool isSsCapableDevice = ((v2Flags & 0x02) != 0) || ((v2Flags & 0x08) != 0);
-string speedStr = "USB";
-if (isOperatingSsPlus || (isOperatingSs && bcdUsb >= 0x0320)) {
-speedStr = (bcdUsb >= 0x0320) ? "20 Gbps SS+" : "10 Gbps SS+";
-} else if (isOperatingSs && bcdUsb >= 0x0310) {
-speedStr = ((v2Flags & 0x08) != 0 || isDedicatedSsPort) ? "10 Gbps SS+" : "5 Gbps SS";
-} else if (isOperatingSs) {
-speedStr = "5 Gbps SS";
-} else if (speed == 2) {
-speedStr = isSsCapableDevice ? "480 Mbps HS [Throttled USB 3.x!]" : "480 Mbps HS";
-} else if (speed == 1) {
-speedStr = "12 Mbps FS";
-} else if (speed == 0) {
-speedStr = "1.5 Mbps LS";
-}
-res.PortSpeeds[p] = speedStr;
-}
-}
-}
-} finally {
-Marshal.FreeHGlobal(bufNode);
-Marshal.FreeHGlobal(bufV2);
-Marshal.FreeHGlobal(bufEx);
-CloseHandle(hHub);
-}
-return res;
-}
-}
-public class DarkTabControl : TabControl {
-[StructLayout(LayoutKind.Sequential)]
-private struct RECT {
-public int Left, Top, Right, Bottom;
-}
-private const int TCM_ADJUSTRECT = 0x1328;
-private int _hoverIndex = -1;
-public DarkTabControl() {
-this.SetStyle(
-ControlStyles.UserPaint |
-ControlStyles.ResizeRedraw |
-ControlStyles.AllPaintingInWmPaint |
-ControlStyles.OptimizedDoubleBuffer,
-true);
-this.DoubleBuffered = true;
-this.SizeMode = TabSizeMode.Fixed;
-this.ItemSize = new Size(57, 22);
-}
-protected override void WndProc(ref Message m) {
-if (m.Msg == TCM_ADJUSTRECT && !this.DesignMode) {
-RECT rc = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
-rc.Left   -= 3;
-rc.Right  += 3;
-rc.Top    -= 1;
-rc.Bottom += 3;
-Marshal.StructureToPtr(rc, m.LParam, true);
-}
-base.WndProc(ref m);
-}
-protected override void OnMouseMove(MouseEventArgs e) {
-base.OnMouseMove(e);
-int newHover = -1;
-for (int i = 0; i < this.TabCount; i++) {
-if (this.GetTabRect(i).Contains(e.Location)) {
-newHover = i;
-break;
-}
-}
-if (newHover != _hoverIndex) {
-_hoverIndex = newHover;
-this.Invalidate();
-}
-}
-protected override void OnMouseLeave(EventArgs e) {
-base.OnMouseLeave(e);
-if (_hoverIndex != -1) {
-_hoverIndex = -1;
-this.Invalidate();
-}
-}
-protected override void OnPaint(PaintEventArgs e) {
-Graphics g = e.Graphics;
-g.Clear(Color.FromArgb(30, 30, 30));
-if (this.TabCount <= 0) return;
-Rectangle bodyRect   = this.DisplayRectangle;
-Rectangle borderRect = new Rectangle(bodyRect.X - 1, bodyRect.Y - 1, bodyRect.Width + 1, bodyRect.Height + 1);
-using (Pen borderPen = new Pen(Color.FromArgb(65, 65, 65), 1)) {
-g.DrawRectangle(borderPen, borderRect);
-}
-for (int i = 0; i < this.TabCount; i++) {
-Rectangle tabRect = this.GetTabRect(i);
-bool isSelected = (i == this.SelectedIndex);
-bool isHovered  = (i == _hoverIndex);
-Color backColor = isSelected
-? Color.FromArgb(40, 40, 42)
-: (isHovered ? Color.FromArgb(34, 34, 36) : Color.FromArgb(22, 22, 22));
-using (SolidBrush bgBrush = new SolidBrush(backColor)) {
-g.FillRectangle(bgBrush, tabRect);
-}
-using (Pen tabPen = new Pen(Color.FromArgb(60, 60, 60), 1)) {
-g.DrawRectangle(tabPen, tabRect.X, tabRect.Y, tabRect.Width - 1, tabRect.Height - 1);
-}
-if (isSelected) {
-using (SolidBrush accentBrush = new SolidBrush(Color.FromArgb(80, 180, 255))) {
-g.FillRectangle(accentBrush, tabRect.X + 1, tabRect.Y + 1, tabRect.Width - 2, 3);
-}
-}
-Color textColor = isSelected
-? Color.White
-: (isHovered ? Color.LightSkyBlue : Color.Silver);
-Rectangle textRect = new Rectangle(tabRect.X, tabRect.Y + 1, tabRect.Width, tabRect.Height - 1);
-TextRenderer.DrawText(
-g,
-this.TabPages[i].Text,
-this.Font,
-textRect,
-textColor,
-TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
-}
-}
-}
-public class DarkProgressBar : ProgressBar {
-private static readonly Font StatusFont = new Font("Consolas", 9.0f, FontStyle.Bold);
-public DarkProgressBar() {
-this.SetStyle(
-ControlStyles.UserPaint |
-ControlStyles.ResizeRedraw |
-ControlStyles.AllPaintingInWmPaint |
-ControlStyles.OptimizedDoubleBuffer,
-true);
-this.DoubleBuffered = true;
-}
-protected override void OnPaint(PaintEventArgs e) {
-Graphics g = e.Graphics;
-Rectangle rect = this.ClientRectangle;
-using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(20, 20, 20))) {
-g.FillRectangle(bgBrush, rect);
-}
-double range = Math.Max(1, this.Maximum - this.Minimum);
-double pct   = Math.Max(0.0, Math.Min(1.0, (double)(this.Value - this.Minimum) / range));
-if (this.Value > 0 && rect.Width > 2 && rect.Height > 2) {
-int fillWidth = (int)Math.Round((rect.Width - 2) * pct);
-if (fillWidth > 0) {
-Rectangle fillRect = new Rectangle(1, 1, fillWidth, rect.Height - 2);
-using (SolidBrush fillBrush = new SolidBrush(Color.FromArgb(45, 105, 165))) {
-g.FillRectangle(fillBrush, fillRect);
-}
-if (rect.Height > 4) {
-using (SolidBrush topGlow = new SolidBrush(Color.FromArgb(75, 145, 210))) {
-g.FillRectangle(topGlow, 1, 1, fillWidth, 2);
-}
-}
-}
-}
-using (Pen borderPen = new Pen(Color.FromArgb(65, 65, 65), 1)) {
-g.DrawRectangle(borderPen, 0, 0, rect.Width - 1, rect.Height - 1);
-}
-string statusText = (this.Value > 0)
-? string.Format("{0}%", (int)Math.Round(pct * 100.0))
-: "READY";
-Color textColor = (this.Value > 0) ? Color.White : Color.FromArgb(115, 115, 115);
-TextRenderer.DrawText(
-g,
-statusText,
-StatusFont,
-rect,
-textColor,
-TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
-}
-}
-}
+    using System;
+    using System.Collections;
+    using System.Collections.Generic;
+    using System.Drawing;
+    using System.Globalization;
+    using System.Runtime.CompilerServices;
+    using System.Runtime.InteropServices;
+    using System.Text;
+    using System.Windows.Forms;
+
+    namespace WinUltix {
+        // DWM Dark Title Bar, High-DPI GDI Scaling, Icon Extractor & Fast Kernel32 Queries
+        public static class NativeMethods {
+            private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+            private struct MEMORYSTATUSEX {
+                public uint dwLength;
+                public uint dwMemoryLoad;
+                public ulong ullTotalPhys;
+                public ulong ullAvailPhys;
+                public ulong ullTotalPageFile;
+                public ulong ullAvailPageFile;
+                public ulong ullTotalVirtual;
+                public ulong ullAvailVirtual;
+                public ulong ullAvailExtendedVirtual;
+            }
+
+            [DllImport("dwmapi.dll", PreserveSig = true)]
+            private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+            [DllImport("shell32.dll", SetLastError = true)]
+            private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+
+            [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+            private static extern uint PrivateExtractIconsW(
+                string szFileName, int nIconIndex, int cxIcon, int cyIcon,
+                IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool DestroyIcon(IntPtr hIcon);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool CloseHandle(IntPtr hObject);
+
+            [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+            private static extern bool SystemParametersInfoW(uint uiAction, uint uiParam, int[] pvParam, uint fWinIni);
+
+            private const uint SPI_SETMOUSE = 0x0004;
+            private const uint SPIF_UPDATEINIFILE = 0x01;
+            private const uint SPIF_SENDCHANGE = 0x02;
+
+            public static bool ApplyLiveMouseParams(int threshold1, int threshold2, int speed) {
+                int[] mouseParams = new int[3] { threshold1, threshold2, speed };
+                return SystemParametersInfoW(SPI_SETMOUSE, 0, mouseParams, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+            }
+
+            public static void EnableDarkTitleBar(IntPtr handle) {
+                if (handle == IntPtr.Zero) return;
+                int useDark = 1;
+                if (DwmSetWindowAttribute(handle, 20, ref useDark, sizeof(int)) != 0) {
+                    DwmSetWindowAttribute(handle, 19, ref useDark, sizeof(int));
+                }
+            }
+
+            public static void EnableGdiDpiScaling() {
+                try { SetCurrentProcessExplicitAppUserModelID("Firever.WinUltix"); } catch { }
+                try { SetProcessDpiAwarenessContext(new IntPtr(-5)); } catch { }
+            }
+
+            public static Bitmap ExtractHighResExeIcon(string exePath, int size) {
+                IntPtr[] hIcons = new IntPtr[1];
+                uint[] ids = new uint[1];
+                uint count = PrivateExtractIconsW(exePath, 0, size, size, hIcons, ids, 1, 0);
+                if (count > 0 && hIcons[0] != IntPtr.Zero) {
+                    try {
+                        using (Icon ico = Icon.FromHandle(hIcons[0])) {
+                            return ico.ToBitmap();
+                        }
+                    } catch {
+                        try { return Bitmap.FromHicon(hIcons[0]); } catch { }
+                    } finally {
+                        DestroyIcon(hIcons[0]);
+                    }
+                }
+                return null;
+            }
+
+            public static int GetTotalPhysicalMemoryKB() {
+                MEMORYSTATUSEX mem = new MEMORYSTATUSEX();
+                mem.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+                if (GlobalMemoryStatusEx(ref mem) && mem.ullTotalPhys > 0) {
+                    ulong kb = mem.ullTotalPhys / 1024UL;
+                    return (kb > (ulong)int.MaxValue) ? int.MaxValue : (int)kb;
+                }
+                return 16777216;
+            }
+
+            public static string GetProcessExecutablePath(int pid) {
+                if (pid <= 4) return "";
+                IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (hProc == IntPtr.Zero) return "";
+                try {
+                    uint capacity = 1024;
+                    StringBuilder sb = new StringBuilder((int)capacity);
+                    if (QueryFullProcessImageNameW(hProc, 0, sb, ref capacity)) {
+                        return sb.ToString();
+                    }
+                } finally {
+                    CloseHandle(hProc);
+                }
+                return "";
+            }
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr CreateFileW(
+                string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+                IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+                uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool DeviceIoControl(
+                IntPtr hDevice, uint dwIoControlCode,
+                IntPtr lpInBuffer, uint nInBufferSize,
+                out uint lpOutBuffer, uint nOutBufferSize,
+                out uint lpBytesReturned, IntPtr lpOverlapped);
+
+            private const uint FSCTL_IS_VOLUME_DIRTY = 0x00090078;
+
+            public static int IsVolumeDirty(string driveName) {
+                if (string.IsNullOrWhiteSpace(driveName)) return -1;
+                string cleanDrive = driveName.Trim().TrimEnd('\\');
+                if (!cleanDrive.EndsWith(":", StringComparison.Ordinal)) cleanDrive += ":";
+                IntPtr hVol = CreateFileW(@"\\.\" + cleanDrive, 0x80000000U, 3U, IntPtr.Zero, 3U, 0U, IntPtr.Zero);
+                if (hVol == IntPtr.Zero || hVol == new IntPtr(-1)) return -1;
+                try {
+                    uint flags = 0, ret = 0;
+                    if (DeviceIoControl(hVol, FSCTL_IS_VOLUME_DIRTY, IntPtr.Zero, 0U, out flags, 4U, out ret, IntPtr.Zero)) {
+                        return ((flags & 1U) != 0U) ? 1 : 0;
+                    }
+                } finally {
+                    CloseHandle(hVol);
+                }
+                return -1;
+            }
+        }
+
+        // Non-Invasive Shell & Taskbar Broadcast Interop
+        public static class ShellInterop {
+            private static readonly IntPtr HWND_BROADCAST = new IntPtr(0xFFFF);
+            private const uint WM_SETTINGCHANGE = 0x001A;
+            private const uint SMTO_ABORTIFHUNG = 0x0002;
+            private const int SHCNE_ASSOCCHANGED = 0x08000000;
+            private const uint SHCNF_IDLIST = 0x0000;
+            private const uint SHCNF_FLUSHNOWAIT = 0x2000;
+
+            [DllImport("shell32.dll")]
+            public static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+
+            [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+            public static extern IntPtr SendMessageTimeout(
+                IntPtr hWnd, uint Msg, IntPtr wParam, string lParam,
+                uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+            public static void BroadcastShellRefresh() {
+                IntPtr result;
+                SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, IntPtr.Zero, IntPtr.Zero);
+                SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "TraySettings", SMTO_ABORTIFHUNG, 100, out result);
+                SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "ShellState", SMTO_ABORTIFHUNG, 100, out result);
+                SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "Policy", SMTO_ABORTIFHUNG, 100, out result);
+                SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "Environment", SMTO_ABORTIFHUNG, 100, out result);
+            }
+        }
+
+        // Token Privilege Escalation & Live SCM Service Configurator
+        public static class PrivilegeEnabler {
+            private const uint SC_MANAGER_CONNECT = 0x0001;
+            private const uint SERVICE_CHANGE_CONFIG = 0x0002;
+            private const uint SERVICE_START = 0x0010;
+            private const uint SERVICE_STOP = 0x0020;
+            private const uint SERVICE_CONTROL_STOP = 0x00000001;
+            private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF;
+
+            [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+            private static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
+
+            [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+            private static extern bool OpenProcessToken(IntPtr h, uint acc, ref IntPtr phtok);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint dwAccess);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr OpenServiceW(IntPtr hSCManager, string lpServiceName, uint dwDesiredAccess);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool ChangeServiceConfigW(
+                IntPtr hService, uint dwServiceType, uint dwStartType, uint dwErrorControl,
+                string lpBinaryPathName, string lpLoadOrderGroup, IntPtr lpdwTagId,
+                string lpDependencies, string lpServiceStartName, string lpPassword, string lpDisplayName);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool StartServiceW(IntPtr hService, uint dwNumServiceArgs, IntPtr lpServiceArgVectors);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool ControlService(IntPtr hService, uint dwControl, out SERVICE_STATUS lpServiceStatus);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool QueryServiceObjectSecurity(
+                IntPtr hService, uint dwSecurityInformation, byte[] lpSecurityDescriptor,
+                uint cbBufSize, out uint pcbBytesNeeded);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool SetServiceObjectSecurity(
+                IntPtr hService, uint dwSecurityInformation, byte[] lpSecurityDescriptor);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern bool CloseServiceHandle(IntPtr hSCObject);
+
+            [DllImport("kernel32.dll", ExactSpelling = true)]
+            private static extern IntPtr GetCurrentProcess();
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool CloseHandle(IntPtr hObject);
+
+            private const uint READ_CONTROL = 0x00020000;
+            private const uint WRITE_DAC = 0x00040000;
+            private const uint WRITE_OWNER = 0x00080000;
+            private const int SERVICE_ALL_ACCESS = 0x000F01FF;
+            private const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+            private const uint DACL_SECURITY_INFORMATION = 0x00000004;
+
+            [StructLayout(LayoutKind.Sequential, Pack = 1)]
+            private struct TokPriv1Luid {
+                public int Count;
+                public long Luid;
+                public int Attr;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct SERVICE_STATUS {
+                public uint dwServiceType;
+                public uint dwCurrentState;
+                public uint dwControlsAccepted;
+                public uint dwWin32ExitCode;
+                public uint dwServiceSpecificExitCode;
+                public uint dwCheckPoint;
+                public uint dwWaitHint;
+            }
+
+            public static void EnablePrivilege(string privilege) {
+                IntPtr htok = IntPtr.Zero;
+                if (!OpenProcessToken(GetCurrentProcess(), 0x00000028U, ref htok)) return;
+                try {
+                    TokPriv1Luid tp = new TokPriv1Luid { Count = 1, Luid = 0, Attr = 0x00000002 };
+                    if (LookupPrivilegeValue(null, privilege, ref tp.Luid)) {
+                        AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+                    }
+                } finally {
+                    if (htok != IntPtr.Zero) CloseHandle(htok);
+                }
+            }
+
+            private static bool GrantAdminServiceAccess(IntPtr hScm, string serviceName) {
+                var adminSid = new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null);
+
+                IntPtr hSvcDac = OpenServiceW(hScm, serviceName, READ_CONTROL | WRITE_DAC);
+                if (hSvcDac == IntPtr.Zero) {
+                    EnablePrivilege("SeTakeOwnershipPrivilege");
+                    IntPtr hSvcOwn = OpenServiceW(hScm, serviceName, WRITE_OWNER);
+                    if (hSvcOwn != IntPtr.Zero) {
+                        try {
+                            var ownerSd = new System.Security.AccessControl.RawSecurityDescriptor(
+                                System.Security.AccessControl.ControlFlags.None, adminSid, null, null, null);
+                            byte[] ownerBytes = new byte[ownerSd.BinaryLength];
+                            ownerSd.GetBinaryForm(ownerBytes, 0);
+                            SetServiceObjectSecurity(hSvcOwn, OWNER_SECURITY_INFORMATION, ownerBytes);
+                        } finally {
+                            CloseServiceHandle(hSvcOwn);
+                        }
+                        hSvcDac = OpenServiceW(hScm, serviceName, READ_CONTROL | WRITE_DAC);
+                    }
+                }
+
+                if (hSvcDac == IntPtr.Zero) return false;
+                try {
+                    uint needed = 0;
+                    QueryServiceObjectSecurity(hSvcDac, DACL_SECURITY_INFORMATION, null, 0, out needed);
+                    if (needed == 0) return false;
+
+                    byte[] sdBuf = new byte[needed];
+                    if (!QueryServiceObjectSecurity(hSvcDac, DACL_SECURITY_INFORMATION, sdBuf, needed, out needed)) {
+                        return false;
+                    }
+
+                    var rsd = new System.Security.AccessControl.RawSecurityDescriptor(sdBuf, 0);
+                    if (rsd.DiscretionaryAcl == null) {
+                        rsd.DiscretionaryAcl = new System.Security.AccessControl.RawAcl(2, 1);
+                    }
+                    rsd.DiscretionaryAcl.InsertAce(0, new System.Security.AccessControl.CommonAce(
+                        System.Security.AccessControl.AceFlags.None,
+                        System.Security.AccessControl.AceQualifier.AccessAllowed,
+                        SERVICE_ALL_ACCESS,
+                        adminSid,
+                        false,
+                        null));
+
+                    byte[] newSd = new byte[rsd.BinaryLength];
+                    rsd.GetBinaryForm(newSd, 0);
+                    return SetServiceObjectSecurity(hSvcDac, DACL_SECURITY_INFORMATION, newSd);
+                } catch {
+                    return false;
+                } finally {
+                    CloseServiceHandle(hSvcDac);
+                }
+            }
+
+            public static bool SetServiceConfigLive(string serviceName, int startType, bool startNow) {
+                if (string.IsNullOrWhiteSpace(serviceName)) return false;
+                bool changeConfig = (startType >= 0 && startType <= 4);
+                uint access = (changeConfig ? SERVICE_CHANGE_CONFIG : 0U) | (startNow ? SERVICE_START : 0U);
+                if (access == 0U) return false;
+
+                IntPtr hScm = IntPtr.Zero;
+                IntPtr hSvc = IntPtr.Zero;
+
+                try {
+                    hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                    if (hScm == IntPtr.Zero) return false;
+                    hSvc = OpenServiceW(hScm, serviceName, access);
+                    if (hSvc == IntPtr.Zero && GrantAdminServiceAccess(hScm, serviceName)) {
+                        hSvc = OpenServiceW(hScm, serviceName, access);
+                    }
+                    if (hSvc == IntPtr.Zero) return false;
+
+                    bool ok = true;
+                    if (changeConfig) {
+                        ok = ChangeServiceConfigW(
+                            hSvc, SERVICE_NO_CHANGE, (uint)startType, SERVICE_NO_CHANGE,
+                            null, null, IntPtr.Zero, null, null, null, null);
+                    }
+
+                    if (startNow && startType != 4) {
+                        StartServiceW(hSvc, 0, IntPtr.Zero);
+                    }
+                    return ok;
+                } finally {
+                    if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
+                    if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
+                }
+            }
+
+            public static bool StopServiceLive(string serviceName) {
+                if (string.IsNullOrWhiteSpace(serviceName)) return false;
+                IntPtr hScm = IntPtr.Zero;
+                IntPtr hSvc = IntPtr.Zero;
+
+                try {
+                    hScm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                    if (hScm == IntPtr.Zero) return false;
+                    hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+                    if (hSvc == IntPtr.Zero && GrantAdminServiceAccess(hScm, serviceName)) {
+                        hSvc = OpenServiceW(hScm, serviceName, SERVICE_STOP);
+                    }
+                    if (hSvc == IntPtr.Zero) return false;
+
+                    SERVICE_STATUS status;
+                    return ControlService(hSvc, SERVICE_CONTROL_STOP, out status);
+                } finally {
+                    if (hSvc != IntPtr.Zero) CloseServiceHandle(hSvc);
+                    if (hScm != IntPtr.Zero) CloseServiceHandle(hScm);
+                }
+            }
+        }
+
+        // COM IApplicationActivationManager for Native Start Menu Compilation
+        [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        public interface IApplicationActivationManager {
+            IntPtr ActivateApplication([In] String appUserModelId, [In] String arguments, [In] UInt32 options, [Out] out UInt32 processId);
+        }
+
+        [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+        public class AppActivator : IApplicationActivationManager {
+            [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+            public extern IntPtr ActivateApplication([In] String appUserModelId, [In] String arguments, [In] UInt32 options, [Out] out UInt32 processId);
+        }
+
+        // Fast Numeric-Aware, Tie-Safe & Multi-Mode Column Sorter for WinForms ListViews
+        public class ListViewColumnSorter : IComparer {
+            public int ColumnToSort = 0;
+            public SortOrder OrderOfSort = SortOrder.None;
+            private CaseInsensitiveComparer ObjectCompare = new CaseInsensitiveComparer();
+
+            private static bool TryParseSortableNumber(string s, out double val) {
+                val = 0;
+                if (string.IsNullOrWhiteSpace(s)) return false;
+                string clean = s.Trim();
+
+                // Natural numeric sort for DriverStore oemXX.inf packages
+                if (clean.Length > 7 && clean.StartsWith("oem", StringComparison.OrdinalIgnoreCase) && clean.EndsWith(".inf", StringComparison.OrdinalIgnoreCase)) {
+                    string numPart = clean.Substring(3, clean.Length - 7);
+                    if (double.TryParse(numPart, NumberStyles.Integer, CultureInfo.InvariantCulture, out val)) return true;
+                }
+
+                // Strip leading "Max: " prefix if sorting by Peak column
+                if (clean.StartsWith("Max:", StringComparison.OrdinalIgnoreCase)) {
+                    clean = clean.Substring(4).Trim();
+                }
+
+                // Strip live driver overhead suffix: "142.5 \u00B5s/s", "85.0 \u00B5s (1s: ...)" -> leading float
+                int usIdx = clean.IndexOf(" \u00B5s", StringComparison.OrdinalIgnoreCase);
+                if (usIdx < 0) usIdx = clean.IndexOf(" us", StringComparison.OrdinalIgnoreCase);
+                if (usIdx > 0) {
+                    clean = clean.Substring(0, usIdx).Trim();
+                }
+
+                // Strip trailing unit or core annotation: " MB", " KB", " GB", "%", or " (Core X)"
+                int parenIdx = clean.IndexOf(" (Core ", StringComparison.OrdinalIgnoreCase);
+                if (parenIdx > 0) {
+                    clean = clean.Substring(0, parenIdx).Trim();
+                } else if (clean.EndsWith(" MB", StringComparison.OrdinalIgnoreCase) ||
+                           clean.EndsWith(" KB", StringComparison.OrdinalIgnoreCase) ||
+                           clean.EndsWith(" GB", StringComparison.OrdinalIgnoreCase)) {
+                    clean = clean.Substring(0, clean.Length - 3).Trim();
+                } else if (clean.EndsWith("%", StringComparison.Ordinal)) {
+                    clean = clean.Substring(0, clean.Length - 1).Trim();
+                }
+
+                clean = clean.Replace("\u00A0", "").Replace(" ", "").Replace(',', '.');
+                return double.TryParse(clean, NumberStyles.Float, CultureInfo.InvariantCulture, out val);
+            }
+
+            public int Compare(object x, object y) {
+                if (OrderOfSort == SortOrder.None) return 0;
+                ListViewItem listviewX = (ListViewItem)x;
+                ListViewItem listviewY = (ListViewItem)y;
+
+                // ColumnToSort == -1: Special sort by SubItems[4] 1s instantaneous load "(1s: XX.X)"
+                string textX, textY;
+                if (ColumnToSort == -1) {
+                    textX = (listviewX.SubItems.Count > 4) ? listviewX.SubItems[4].Text : "";
+                    textY = (listviewY.SubItems.Count > 4) ? listviewY.SubItems[4].Text : "";
+                    int idxX = textX.IndexOf("1s:", StringComparison.OrdinalIgnoreCase);
+                    int idxY = textY.IndexOf("1s:", StringComparison.OrdinalIgnoreCase);
+                    if (idxX >= 0) textX = textX.Substring(idxX + 3).TrimEnd(')', ' ');
+                    if (idxY >= 0) textY = textY.Substring(idxY + 3).TrimEnd(')', ' ');
+                } else {
+                    textX = (ColumnToSort >= 0 && ColumnToSort < listviewX.SubItems.Count) ? listviewX.SubItems[ColumnToSort].Text : "";
+                    textY = (ColumnToSort >= 0 && ColumnToSort < listviewY.SubItems.Count) ? listviewY.SubItems[ColumnToSort].Text : "";
+                }
+
+                int compareResult;
+                double numX, numY;
+                if (TryParseSortableNumber(textX, out numX) && TryParseSortableNumber(textY, out numY)) {
+                    compareResult = numX.CompareTo(numY);
+                } else {
+                    compareResult = ObjectCompare.Compare(textX, textY);
+                }
+
+                if (OrderOfSort == SortOrder.Descending) compareResult = -compareResult;
+
+                // Deterministic tie-breaker by SubItem[1] (Device Name) to prevent unstable QuickSort row jitter on 0.0 ties
+                if (compareResult == 0 && listviewX.SubItems.Count > 1 && listviewY.SubItems.Count > 1) {
+                    compareResult = ObjectCompare.Compare(listviewX.SubItems[1].Text, listviewY.SubItems[1].Text);
+                }
+                return compareResult;
+            }
+        }
+
+        // Native CPU Core & L3 Cache Topology Inspector (3D V-Cache & Hybrid P/E Detection)
+        public class CoreRecord {
+            public byte Flags;
+            public byte EfficiencyClass;
+            public long Mask;
+        }
+
+        public class L3CacheRecord {
+            public uint SizeBytes;
+            public long Mask;
+        }
+
+        // Native Zero-WMI SMBIOS Type 17 (Memory Device) Parser via kernel32!GetSystemFirmwareTable (<0.1ms)
+        public static class SmbiosRamInfo {
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern uint GetSystemFirmwareTable(uint FirmwareTableProviderSignature, uint FirmwareTableID, IntPtr pFirmwareTableBuffer, uint BufferSize);
+
+            private const uint RSMB = 0x52534D42; // 'RSMB' in ASCII
+
+            private static string GetSmbiosString(byte[] data, int structEnd, int strEnd, byte index) {
+                if (index == 0) return "";
+                int curIdx = 1;
+                int pos = structEnd;
+                while (pos < strEnd && data[pos] != 0) {
+                    int start = pos;
+                    while (pos < strEnd && data[pos] != 0) pos++;
+                    if (curIdx == index) {
+                        return Encoding.ASCII.GetString(data, start, pos - start).Trim();
+                    }
+                    curIdx++;
+                    pos++;
+                }
+                return "";
+            }
+
+            public static string GetRamSummary(ulong fallbackTotalKB) {
+                double fallbackGB = Math.Round(fallbackTotalKB / 1048576.0, 1);
+                uint size = GetSystemFirmwareTable(RSMB, 0, IntPtr.Zero, 0);
+                if (size <= 8 || size > 65536) return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
+
+                IntPtr buf = Marshal.AllocHGlobal((int)size);
+                try {
+                    if (GetSystemFirmwareTable(RSMB, 0, buf, size) != size) {
+                        return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
+                    }
+                    byte[] raw = new byte[size];
+                    Marshal.Copy(buf, raw, 0, (int)size);
+
+                    int totalSlots = 0;
+                    int usedSlots  = 0;
+                    ulong totalMB  = 0;
+                    var stickSizesMB = new List<ulong>();
+                    uint bestSpeed = 0;
+                    byte memType   = 0;
+                    string partNum = "";
+                    string vendor  = "";
+
+                    int pos = 8; // Skip 8-byte RawSMBIOSData header
+                    while (pos + 4 <= raw.Length) {
+                        byte type = raw[pos];
+                        byte len  = raw[pos + 1];
+                        if (len < 4 || pos + len > raw.Length) break;
+
+                        int strEnd = pos + len;
+                        while (strEnd + 1 < raw.Length && !(raw[strEnd] == 0 && raw[strEnd + 1] == 0)) {
+                            strEnd++;
+                        }
+                        int nextPos = Math.Min(raw.Length, strEnd + 2);
+
+                        // SMBIOS Type 17: Memory Device
+                        if (type == 17 && len >= 0x15) {
+                            ushort rawSize = BitConverter.ToUInt16(raw, pos + 0x0C);
+                            if (rawSize != 0xFFFF) {
+                                totalSlots++;
+                                ulong moduleMB = 0;
+                                if (rawSize == 0x7FFF && len >= 0x20) {
+                                    uint extSize = BitConverter.ToUInt32(raw, pos + 0x1C);
+                                    moduleMB = (ulong)(extSize & 0x7FFFFFFFU);
+                                } else if (rawSize > 0) {
+                                    moduleMB = ((rawSize & 0x8000) != 0) ? ((ulong)(rawSize & 0x7FFF) / 1024UL) : (ulong)rawSize;
+                                }
+
+                                if (moduleMB > 0) {
+                                    usedSlots++;
+                                    totalMB += moduleMB;
+                                    stickSizesMB.Add(moduleMB);
+
+                                    if (len > 0x12 && raw[pos + 0x12] > 0 && memType == 0) {
+                                        memType = raw[pos + 0x12];
+                                    }
+
+                                    uint spd = BitConverter.ToUInt16(raw, pos + 0x15);
+                                    if (len >= 0x22) {
+                                        ushort cfgSpd = BitConverter.ToUInt16(raw, pos + 0x20);
+                                        if (cfgSpd > 0 && cfgSpd != 0xFFFF) spd = cfgSpd;
+                                        else if (cfgSpd == 0xFFFF && len >= 0x60) {
+                                            uint extSpd = BitConverter.ToUInt32(raw, pos + 0x5C);
+                                            if (extSpd > 0) spd = extSpd;
+                                        }
+                                    }
+                                    if (spd > bestSpeed && spd <= 16000) bestSpeed = spd;
+
+                                    if (string.IsNullOrEmpty(vendor) && len > 0x17) {
+                                        string v = GetSmbiosString(raw, pos + len, strEnd, raw[pos + 0x17]);
+                                        if (!string.IsNullOrWhiteSpace(v) && !v.StartsWith("Unknown", StringComparison.OrdinalIgnoreCase) && !v.StartsWith("0000", StringComparison.Ordinal)) {
+                                            vendor = v;
+                                        }
+                                    }
+                                    if (string.IsNullOrEmpty(partNum) && len > 0x1A) {
+                                        string p = GetSmbiosString(raw, pos + len, strEnd, raw[pos + 0x1A]);
+                                        if (!string.IsNullOrWhiteSpace(p) && !p.StartsWith("Unknown", StringComparison.OrdinalIgnoreCase) && !p.StartsWith("None", StringComparison.OrdinalIgnoreCase)) {
+                                            partNum = p;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (type == 127) break;
+                        pos = nextPos;
+                    }
+
+                    if (usedSlots == 0 || totalMB == 0) {
+                        return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
+                    }
+
+                    string ddrStr = "RAM";
+                    switch (memType) {
+                        case 0x18: ddrStr = "DDR3"; break;
+                        case 0x1A: ddrStr = "DDR4"; break;
+                        case 0x1E: ddrStr = "LPDDR4"; break;
+                        case 0x22: ddrStr = "DDR5"; break;
+                        case 0x23: ddrStr = "LPDDR5"; break;
+                    }
+
+                    ulong totalGB = totalMB / 1024UL;
+                    string speedPart = (bestSpeed > 0) ? string.Format(" @ {0} MT/s", bestSpeed) : "";
+
+                    ulong firstStickGB = stickSizesMB[0] / 1024UL;
+                    bool uniformSticks = (firstStickGB > 0);
+                    for (int i = 1; i < stickSizesMB.Count; i++) {
+                        if ((stickSizesMB[i] / 1024UL) != firstStickGB) { uniformSticks = false; break; }
+                    }
+
+                    string layoutPart = uniformSticks
+                        ? string.Format("{0}x {1} GB", usedSlots, firstStickGB)
+                        : string.Format("{0} Modules", usedSlots);
+
+                    string slotsPart = (totalSlots >= usedSlots && totalSlots <= 16)
+                        ? string.Format(" | {0}/{1} Slots", usedSlots, totalSlots)
+                        : "";
+
+                    string modelPart = "";
+                    if (!string.IsNullOrEmpty(partNum)) {
+                        modelPart = " | " + partNum;
+                    } else if (!string.IsNullOrEmpty(vendor)) {
+                        modelPart = " | " + vendor;
+                    }
+
+                    return string.Format(CultureInfo.InvariantCulture, "{0} GB {1}{2} ({3}{4}{5})",
+                        totalGB, ddrStr, speedPart, layoutPart, slotsPart, modelPart);
+                } catch {
+                    return string.Format(CultureInfo.InvariantCulture, "{0} GB", fallbackGB);
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+            }
+        }
+
+        public static class CpuTopology {
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetLogicalProcessorInformationEx(
+                int RelationshipType,
+                IntPtr Buffer,
+                ref uint ReturnedLength);
+
+            private const int RelationProcessorCore = 0;
+            private const int RelationCache = 2;
+
+            public static List<CoreRecord> GetProcessorCores() {
+                var list = new List<CoreRecord>();
+                uint len = 0;
+                GetLogicalProcessorInformationEx(RelationProcessorCore, IntPtr.Zero, ref len);
+                if (len == 0) return list;
+
+                IntPtr buf = Marshal.AllocHGlobal((int)len);
+                try {
+                    if (GetLogicalProcessorInformationEx(RelationProcessorCore, buf, ref len)) {
+                        int offset = 0;
+                        while (offset < (int)len) {
+                            IntPtr cur = IntPtr.Add(buf, offset);
+                            int rel = Marshal.ReadInt32(cur, 0);
+                            int size = Marshal.ReadInt32(cur, 4);
+                            if (rel == RelationProcessorCore && size >= 40) {
+                                byte flags = Marshal.ReadByte(cur, 8);
+                                byte eff   = Marshal.ReadByte(cur, 9);
+                                long mask  = Marshal.ReadIntPtr(cur, 32).ToInt64();
+                                list.Add(new CoreRecord { Flags = flags, EfficiencyClass = eff, Mask = mask });
+                            }
+                            if (size <= 0) break;
+                            offset += size;
+                        }
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+                return list;
+            }
+
+            public static List<L3CacheRecord> GetL3Caches() {
+                var list = new List<L3CacheRecord>();
+                uint len = 0;
+                GetLogicalProcessorInformationEx(RelationCache, IntPtr.Zero, ref len);
+                if (len == 0) return list;
+
+                IntPtr buf = Marshal.AllocHGlobal((int)len);
+                try {
+                    if (GetLogicalProcessorInformationEx(RelationCache, buf, ref len)) {
+                        int offset = 0;
+                        while (offset < (int)len) {
+                            IntPtr cur = IntPtr.Add(buf, offset);
+                            int rel = Marshal.ReadInt32(cur, 0);
+                            int size = Marshal.ReadInt32(cur, 4);
+                            if (rel == RelationCache && size >= 48) {
+                                byte level = Marshal.ReadByte(cur, 8);
+                                if (level == 3) {
+                                    uint cacheSize = (uint)Marshal.ReadInt32(cur, 12);
+                                    long mask      = Marshal.ReadIntPtr(cur, 40).ToInt64();
+                                    list.Add(new L3CacheRecord { SizeBytes = cacheSize, Mask = mask });
+                                }
+                            }
+                            if (size <= 0) break;
+                            offset += size;
+                        }
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+                return list;
+            }
+
+            public static long GetTailThreadsMask(long domainMask, int threadCount) {
+                var bitIndices = new List<int>();
+                for (int b = 0; b < 64; b++) {
+                    if ((domainMask & (1L << b)) != 0) bitIndices.Add(b);
+                }
+                if (bitIndices.Count <= threadCount) return domainMask;
+                long result = 0;
+                for (int i = bitIndices.Count - threadCount; i < bitIndices.Count; i++) {
+                    result |= (1L << bitIndices[i]);
+                }
+                return result;
+            }
+        }
+
+        // Native Kernel Timer Resolution & Per-CPU Interrupt/DPC Telemetry
+        public static class NtDll {
+            [DllImport("ntdll.dll")]
+            private static extern int NtQueryTimerResolution(out uint MaximumTime, out uint MinimumTime, out uint CurrentTime);
+
+            [DllImport("ntdll.dll", SetLastError = true)]
+            private static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution);
+
+            [DllImport("ntdll.dll")]
+            private static extern int NtQuerySystemInformation(int SystemInformationClass, IntPtr SystemInformation, uint SystemInformationLength, out uint ReturnLength);
+
+            private const int SystemInterruptInformation = 23; // 0x17 (24 bytes per logical processor)
+
+            public static uint[] GetTimerData() {
+                uint max, min, cur;
+                NtQueryTimerResolution(out max, out min, out cur);
+                return new uint[] { max, min, cur };
+            }
+
+            public static uint SetTimerResolution(uint desired100Ns, bool enable) {
+                uint cur = 0;
+                NtSetTimerResolution(desired100Ns, enable, out cur);
+                return cur;
+            }
+
+            public static uint[] GetProcessorDpcCounts() {
+                int lpCount = Environment.ProcessorCount;
+                int structSize = 24;
+                uint bufLen = (uint)(lpCount * structSize);
+                IntPtr buf = Marshal.AllocHGlobal((int)bufLen);
+                try {
+                    uint retLen = 0;
+                    int status = NtQuerySystemInformation(SystemInterruptInformation, buf, bufLen, out retLen);
+                    if (status != 0) return new uint[0];
+
+                    int validCount = Math.Min(lpCount, (int)(retLen / structSize));
+                    uint[] dpcCounts = new uint[validCount];
+                    for (int i = 0; i < validCount; i++) {
+                        // Offset 4 inside SYSTEM_INTERRUPT_INFORMATION is DpcCount (uint)
+                        dpcCounts[i] = (uint)Marshal.ReadInt32(buf, (i * structSize) + 4);
+                    }
+                    return dpcCounts;
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+            }
+        }
+
+        // Lock-Free Real-Time Kernel ETW ISR/DPC Per-Driver Profiler (With Session Average & Peak Tracking)
+        public class DriverLoadRecord {
+            public string DriverName;
+            public string ServiceKey;
+            public double UsPerSec;
+            public double AvgUsPerSec;
+            public double MaxPeakUs;
+            public long CallsPerSec;
+            public long TotalCalls;
+            public int ElapsedSec;
+        }
+
+        public static class DpcDriverProfiler {
+            [DllImport("ntdll.dll")]
+            private static extern int NtQuerySystemInformation(int SystemInformationClass, IntPtr SystemInformation, uint SystemInformationLength, out uint ReturnLength);
+
+            [DllImport("kernel32.dll")]
+            private static extern bool QueryPerformanceFrequency(out long lpFrequency);
+
+            [DllImport("kernel32.dll")]
+            private static extern bool QueryPerformanceCounter(out long lpPerformanceCount);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+            private static extern uint StartTraceW(out ulong SessionHandle, string SessionName, IntPtr Properties);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+            private static extern uint ControlTraceW(ulong SessionHandle, string SessionName, IntPtr Properties, uint ControlCode);
+
+            [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern ulong OpenTraceW(IntPtr Logfile);
+
+            [DllImport("advapi32.dll")]
+            private static extern uint ProcessTrace(ulong[] HandleArray, uint HandleCount, IntPtr StartTime, IntPtr EndTime);
+
+            [DllImport("advapi32.dll")]
+            private static extern uint CloseTrace(ulong TraceHandle);
+
+            [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+            private delegate void EventRecordCallback(IntPtr pEventRecord);
+
+            private struct KernelModuleRange : IComparable<KernelModuleRange> {
+                public ulong BaseAddress;
+                public ulong EndAddress;
+                public string DriverName;
+                public string ServiceKey;
+
+                public int CompareTo(KernelModuleRange other) {
+                    return this.BaseAddress.CompareTo(other.BaseAddress);
+                }
+            }
+
+            private const int SystemModuleInformation = 11;
+            private const uint EVENT_TRACE_CONTROL_STOP = 1;
+            private const uint EVENT_TRACE_FLAG_INTERRUPT = 0x00000040;
+            private const uint EVENT_TRACE_FLAG_DPC = 0x00000020;
+            private const uint EVENT_TRACE_REAL_TIME_MODE = 0x00000100;
+            private const uint EVENT_TRACE_SYSTEM_LOGGER_MODE = 0x02000000;
+            private const uint WNODE_FLAG_TRACED_GUID = 0x00020000;
+            private const uint PROCESS_TRACE_MODE_REAL_TIME = 0x00000100;
+            private const uint PROCESS_TRACE_MODE_RAW_TIMESTAMP = 0x00001000;
+            private const uint PROCESS_TRACE_MODE_EVENT_RECORD = 0x10000000;
+            private const int PERFINFO_GUID_DATA1 = unchecked((int)0xce1dbfb4);
+
+            private static readonly Guid SystemTraceControlGuid = new Guid("9e814aad-3204-11d2-9a82-006008a86939");
+            private static readonly EventRecordCallback _callbackDelegate = new EventRecordCallback(OnEventRecord);
+
+            private sealed class ProfilerSessionState {
+                public readonly KernelModuleRange[] Modules;
+                public readonly long[] WindowTicks;
+                public readonly long[] WindowCounts;
+                public readonly long[] TotalTicks;
+                public readonly long[] TotalCounts;
+                public readonly long[] SessionPeakTicks;
+                public long SessionStartQpc;
+
+                public ProfilerSessionState(KernelModuleRange[] modules, long startQpc) {
+                    Modules          = modules;
+                    WindowTicks      = new long[modules.Length];
+                    WindowCounts     = new long[modules.Length];
+                    TotalTicks       = new long[modules.Length];
+                    TotalCounts      = new long[modules.Length];
+                    SessionPeakTicks = new long[modules.Length];
+                    SessionStartQpc  = startQpc;
+                }
+            }
+
+            private static readonly object _lifecycleLock = new object();
+            private static volatile bool _running = false;
+            private static string _activeSessionName = "WinUltix_DpcProfiler";
+            private static ulong _sessionHandle = 0;
+            private static ulong _traceHandle = 0;
+            private static System.Threading.Thread _workerThread = null;
+            private static ProfilerSessionState _sessionState = new ProfilerSessionState(new KernelModuleRange[0], 0);
+            private static long _qpcFreq = 10000000L;
+            private static long _maxSaneTicks = 5000000L;
+
+            public static bool IsRunning { get { return _running; } }
+
+            private static void LoadKernelModules() {
+                PrivilegeEnabler.EnablePrivilege("SeSystemProfilePrivilege");
+
+                uint retLen = 0;
+                NtQuerySystemInformation(SystemModuleInformation, IntPtr.Zero, 0, out retLen);
+                if (retLen == 0) retLen = 262144;
+                uint bufLen = retLen + 65536;
+
+                IntPtr buf = Marshal.AllocHGlobal((int)bufLen);
+                try {
+                    int status = NtQuerySystemInformation(SystemModuleInformation, buf, bufLen, out retLen);
+                    if (status != 0) return;
+
+                    int count = Marshal.ReadInt32(buf, 0);
+                    int headOffset = IntPtr.Size;
+                    int entrySize = (IntPtr.Size == 8) ? 296 : 284;
+                    var list = new List<KernelModuleRange>(Math.Max(16, count));
+
+                    for (int i = 0; i < count; i++) {
+                        IntPtr item = IntPtr.Add(buf, headOffset + (i * entrySize));
+                        ulong imgBase = unchecked((ulong)Marshal.ReadIntPtr(item, IntPtr.Size * 2).ToInt64());
+                        uint imgSize  = unchecked((uint)Marshal.ReadInt32(item, IntPtr.Size * 3));
+                        if (imgBase == 0 || imgSize == 0) continue;
+
+                        ushort fnOffset = (ushort)Marshal.ReadInt16(item, (IntPtr.Size * 3) + 14);
+                        if (fnOffset >= 256) fnOffset = 0;
+
+                        IntPtr pathPtr = IntPtr.Add(item, (IntPtr.Size * 3) + 16 + fnOffset);
+                        string drvFile = Marshal.PtrToStringAnsi(pathPtr);
+                        if (string.IsNullOrWhiteSpace(drvFile)) drvFile = "Unknown.sys";
+
+                        int slashIdx = drvFile.LastIndexOf('\\');
+                        if (slashIdx >= 0 && slashIdx + 1 < drvFile.Length) {
+                            drvFile = drvFile.Substring(slashIdx + 1);
+                        }
+
+                        string svcKey = drvFile;
+                        if (svcKey.EndsWith(".sys", StringComparison.OrdinalIgnoreCase) ||
+                            svcKey.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                            svcKey.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) {
+                            svcKey = svcKey.Substring(0, svcKey.Length - 4);
+                        }
+
+                        list.Add(new KernelModuleRange {
+                            BaseAddress = imgBase,
+                            EndAddress  = imgBase + (ulong)imgSize,
+                            DriverName  = drvFile,
+                            ServiceKey  = svcKey.ToLowerInvariant()
+                        });
+                    }
+
+                    list.Sort();
+                    long nowQpc;
+                    QueryPerformanceCounter(out nowQpc);
+                    System.Threading.Volatile.Write(ref _sessionState, new ProfilerSessionState(list.ToArray(), nowQpc));
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+            }
+
+            public static void ResetStats() {
+                ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                if (st == null) return;
+                long now;
+                QueryPerformanceCounter(out now);
+                System.Threading.Interlocked.Exchange(ref st.SessionStartQpc, now);
+                for (int i = 0; i < st.Modules.Length; i++) {
+                    System.Threading.Interlocked.Exchange(ref st.WindowTicks[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.WindowCounts[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.TotalTicks[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.TotalCounts[i], 0);
+                    System.Threading.Interlocked.Exchange(ref st.SessionPeakTicks[i], 0);
+                }
+            }
+
+            private static int FindModuleIndex(KernelModuleRange[] mods, ulong routineAddr) {
+                int lo = 0;
+                int hi = mods.Length - 1;
+                while (lo <= hi) {
+                    int mid = (lo + hi) >> 1;
+                    ulong start = mods[mid].BaseAddress;
+                    if (routineAddr < start) {
+                        hi = mid - 1;
+                    } else if (routineAddr >= mods[mid].EndAddress) {
+                        lo = mid + 1;
+                    } else {
+                        return mid;
+                    }
+                }
+                return -1;
+            }
+
+            private static void OnEventRecord(IntPtr pEventRecord) {
+                if (!_running || pEventRecord == IntPtr.Zero) return;
+
+                ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                if (st == null || st.Modules.Length == 0) return;
+
+                byte opcode = Marshal.ReadByte(pEventRecord, 45);
+                if (opcode != 68 && opcode != 67 && opcode != 69 && opcode != 66 && opcode != 50) return;
+
+                if (Marshal.ReadInt32(pEventRecord, 24) != PERFINFO_GUID_DATA1) return;
+
+                ushort userDataLen = (ushort)Marshal.ReadInt16(pEventRecord, (IntPtr.Size == 8) ? 86 : 82);
+                if (userDataLen < 16) return;
+
+                IntPtr userData = Marshal.ReadIntPtr(pEventRecord, (IntPtr.Size == 8) ? 96 : 88);
+                if (userData == IntPtr.Zero) return;
+
+                long exitTs = Marshal.ReadInt64(pEventRecord, 16);
+                long initTs = Marshal.ReadInt64(userData, 0);
+                ulong routine = unchecked((ulong)Marshal.ReadInt64(userData, 8));
+                if (routine < 0xFFFF000000000000UL) return;
+
+                int idx = FindModuleIndex(st.Modules, routine);
+                if (idx < 0) return;
+
+                long delta = exitTs - initTs;
+                if (delta < 0 || delta > _maxSaneTicks) delta = 0;
+
+                System.Threading.Interlocked.Add(ref st.WindowTicks[idx], delta);
+                System.Threading.Interlocked.Increment(ref st.WindowCounts[idx]);
+                System.Threading.Interlocked.Add(ref st.TotalTicks[idx], delta);
+                System.Threading.Interlocked.Increment(ref st.TotalCounts[idx]);
+
+                long curPeak = System.Threading.Interlocked.Read(ref st.SessionPeakTicks[idx]);
+                if (delta > curPeak) {
+                    System.Threading.Interlocked.Exchange(ref st.SessionPeakTicks[idx], delta);
+                }
+            }
+
+            private static IntPtr AllocTraceProperties(string sessionName, Guid sessionGuid, uint logFileMode) {
+                int totalSize = 120 + 512;
+                IntPtr ptr = Marshal.AllocHGlobal(totalSize);
+                for (int i = 0; i < totalSize; i++) Marshal.WriteByte(ptr, i, 0);
+
+                Marshal.WriteInt32(ptr, 0, totalSize);
+                byte[] guidBytes = sessionGuid.ToByteArray();
+                Marshal.Copy(guidBytes, 0, IntPtr.Add(ptr, 24), 16);
+                Marshal.WriteInt32(ptr, 40, 1);
+                Marshal.WriteInt32(ptr, 44, unchecked((int)WNODE_FLAG_TRACED_GUID));
+                Marshal.WriteInt32(ptr, 48, 64);
+                Marshal.WriteInt32(ptr, 52, 4);
+                Marshal.WriteInt32(ptr, 56, 16);
+                Marshal.WriteInt32(ptr, 64, unchecked((int)logFileMode));
+                Marshal.WriteInt32(ptr, 68, 1);
+                Marshal.WriteInt32(ptr, 72, unchecked((int)(EVENT_TRACE_FLAG_DPC | EVENT_TRACE_FLAG_INTERRUPT)));
+                Marshal.WriteInt32(ptr, 116, 120);
+
+                byte[] nameBytes = Encoding.Unicode.GetBytes(sessionName + "\0");
+                Marshal.Copy(nameBytes, 0, IntPtr.Add(ptr, 120), nameBytes.Length);
+                return ptr;
+            }
+
+            public static bool Start() {
+                lock (_lifecycleLock) {
+                    if (_running) return true;
+                    if (IntPtr.Size != 8) return false;
+
+                    long freq;
+                    if (QueryPerformanceFrequency(out freq) && freq > 0) {
+                        _qpcFreq = freq;
+                        _maxSaneTicks = freq / 2;
+                    }
+
+                    LoadKernelModules();
+                    ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                    if (st == null || st.Modules.Length == 0) return false;
+
+                    _activeSessionName = "WinUltix_DpcProfiler";
+                    Guid privGuid = Guid.NewGuid();
+                    uint privMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
+                    IntPtr props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
+                    uint status = 0;
+
+                    try {
+                        ControlTraceW(0, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP);
+                        Marshal.FreeHGlobal(props);
+                        props = AllocTraceProperties(_activeSessionName, privGuid, privMode);
+                        status = StartTraceW(out _sessionHandle, _activeSessionName, props);
+
+                        if (status != 0) {
+                            Marshal.FreeHGlobal(props);
+                            _activeSessionName = "NT Kernel Logger";
+                            props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                            ControlTraceW(0, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP);
+                            Marshal.FreeHGlobal(props);
+                            props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                            status = StartTraceW(out _sessionHandle, _activeSessionName, props);
+                        }
+                    } finally {
+                        Marshal.FreeHGlobal(props);
+                    }
+
+                    if (status != 0) return false;
+
+                    IntPtr logfile = IntPtr.Zero;
+                    IntPtr loggerNamePtr = IntPtr.Zero;
+                    try {
+                        logfile = Marshal.AllocHGlobal(448);
+                        loggerNamePtr = Marshal.StringToHGlobalUni(_activeSessionName);
+                        for (int i = 0; i < 448; i++) Marshal.WriteByte(logfile, i, 0);
+                        Marshal.WriteIntPtr(logfile, 8, loggerNamePtr);
+                        uint traceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
+                        Marshal.WriteInt32(logfile, 28, unchecked((int)traceMode));
+                        IntPtr cbPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
+                        Marshal.WriteIntPtr(logfile, 424, cbPtr);
+
+                        _traceHandle = OpenTraceW(logfile);
+                    } finally {
+                        if (loggerNamePtr != IntPtr.Zero) Marshal.FreeHGlobal(loggerNamePtr);
+                        if (logfile != IntPtr.Zero) Marshal.FreeHGlobal(logfile);
+                    }
+
+                    if (_traceHandle == 0 || _traceHandle == unchecked((ulong)-1L)) {
+                        Stop();
+                        return false;
+                    }
+
+                    long nowStart;
+                    QueryPerformanceCounter(out nowStart);
+                    System.Threading.Interlocked.Exchange(ref st.SessionStartQpc, nowStart);
+
+                    _running = true;
+                    ulong hTraceCopy = _traceHandle;
+                    _workerThread = new System.Threading.Thread(delegate() {
+                        try {
+                            ProcessTrace(new ulong[] { hTraceCopy }, 1, IntPtr.Zero, IntPtr.Zero);
+                        } catch { }
+                    });
+                    _workerThread.IsBackground = true;
+                    _workerThread.Name = "WinUltix_EtwDpcWorker";
+                    _workerThread.Start();
+                    return true;
+                }
+            }
+
+            public static void Stop() {
+                lock (_lifecycleLock) {
+                    _running = false;
+                    if (_sessionHandle != 0 || !string.IsNullOrEmpty(_activeSessionName)) {
+                        IntPtr props = AllocTraceProperties(_activeSessionName, SystemTraceControlGuid, EVENT_TRACE_REAL_TIME_MODE);
+                        try { ControlTraceW(_sessionHandle, _activeSessionName, props, EVENT_TRACE_CONTROL_STOP); } catch { }
+                        finally { Marshal.FreeHGlobal(props); }
+                        _sessionHandle = 0;
+                    }
+                    if (_traceHandle != 0 && _traceHandle != unchecked((ulong)-1L)) {
+                        try { CloseTrace(_traceHandle); } catch { }
+                        _traceHandle = 0;
+                    }
+                    if (_workerThread != null && _workerThread.IsAlive) {
+                        try { _workerThread.Join(1500); } catch { }
+                        _workerThread = null;
+                    }
+                }
+            }
+
+            public static List<DriverLoadRecord> SampleDriverLoads() {
+                var results = new List<DriverLoadRecord>();
+                ProfilerSessionState st = System.Threading.Volatile.Read(ref _sessionState);
+                if (!_running || st == null || st.Modules.Length == 0) return results;
+
+                long nowQpc;
+                QueryPerformanceCounter(out nowQpc);
+                long startQpc = System.Threading.Interlocked.Read(ref st.SessionStartQpc);
+                double elapsedSec = Math.Max(1.0, (double)(nowQpc - startQpc) / (double)_qpcFreq);
+                int elapsedInt = Math.Max(1, (int)Math.Round(elapsedSec));
+
+                double tickToUs = 1000000.0 / (double)_qpcFreq;
+                for (int i = 0; i < st.Modules.Length; i++) {
+                    long winTicks  = System.Threading.Interlocked.Exchange(ref st.WindowTicks[i], 0);
+                    long winCounts = System.Threading.Interlocked.Exchange(ref st.WindowCounts[i], 0);
+                    long totTicks  = System.Threading.Interlocked.Read(ref st.TotalTicks[i]);
+                    long totCounts = System.Threading.Interlocked.Read(ref st.TotalCounts[i]);
+                    long peakTicks = System.Threading.Interlocked.Read(ref st.SessionPeakTicks[i]);
+
+                    if (totCounts > 0 || winCounts > 0 || peakTicks > 0) {
+                        results.Add(new DriverLoadRecord {
+                            DriverName  = st.Modules[i].DriverName,
+                            ServiceKey  = st.Modules[i].ServiceKey,
+                            UsPerSec    = Math.Round(winTicks * tickToUs, 1),
+                            AvgUsPerSec = Math.Round((totTicks * tickToUs) / elapsedSec, 1),
+                            MaxPeakUs   = Math.Round(peakTicks * tickToUs, 1),
+                            CallsPerSec = winCounts,
+                            TotalCalls  = totCounts,
+                            ElapsedSec  = elapsedInt
+                        });
+                    }
+                }
+                return results;
+            }
+        }
+
+        // Native CfgMgr32 PnP Device Tree Walker & Node Status Inspector (<5ms)
+        public static class PnpTree {
+            private const uint DN_HAS_PROBLEM = 0x00000400;
+            private const uint CM_PROB_DISABLED = 22;
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Get_Device_IDW(uint dnDevInst, StringBuilder Buffer, int BufferLen, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll")]
+            private static extern int CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
+
+            public static string GetDeviceId(uint devInst) {
+                var sb = new StringBuilder(512);
+                if (CM_Get_Device_IDW(devInst, sb, sb.Capacity, 0) == 0) return sb.ToString();
+                return "";
+            }
+
+            // Returns -1 if node does not exist, 0 if active/healthy, or CM_PROB_* code (e.g., 22 = Disabled)
+            public static int GetDeviceConfigStatus(string instanceId) {
+                if (string.IsNullOrEmpty(instanceId)) return -1;
+                uint devInst;
+                if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return -1;
+                uint status, problem;
+                if (CM_Get_DevNode_Status(out status, out problem, devInst, 0) != 0) return -1;
+                if ((status & DN_HAS_PROBLEM) != 0) return (int)problem;
+                return 0;
+            }
+
+            public static bool IsDeviceDisabled(string instanceId) {
+                return GetDeviceConfigStatus(instanceId) == (int)CM_PROB_DISABLED;
+            }
+
+            public static List<string> GetParentChain(string instanceId) {
+                var chain = new List<string>();
+                uint cur;
+                if (CM_Locate_DevNodeW(out cur, instanceId, 0) != 0) return chain;
+                uint parent;
+                int guard = 0;
+                while (guard++ < 32 && CM_Get_Parent(out parent, cur, 0) == 0) {
+                    string pid = GetDeviceId(parent);
+                    if (string.IsNullOrEmpty(pid)) break;
+                    chain.Add(pid);
+                    cur = parent;
+                }
+                return chain;
+            }
+
+            private static void CollectDescendants(uint devInst, int depth, List<string> output) {
+                if (depth > 16) return;
+                uint child;
+                if (CM_Get_Child(out child, devInst, 0) != 0) return;
+
+                uint cur = child;
+                int guard = 0;
+                while (guard++ < 256) {
+                    string id = GetDeviceId(cur);
+                    if (!string.IsNullOrEmpty(id)) {
+                        output.Add(depth.ToString() + "|" + id);
+                        CollectDescendants(cur, depth + 1, output);
+                    }
+                    uint sibling;
+                    if (CM_Get_Sibling(out sibling, cur, 0) != 0) break;
+                    cur = sibling;
+                }
+            }
+
+            public static List<string> GetDescendants(string instanceId) {
+                var list = new List<string>();
+                uint root;
+                if (CM_Locate_DevNodeW(out root, instanceId, 0) != 0) return list;
+                CollectDescendants(root, 1, list);
+                return list;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct DEVPROPKEY {
+                public Guid fmtid;
+                public uint pid;
+            }
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Get_DevNode_PropertyW(
+                uint dnDevInst,
+                ref DEVPROPKEY PropertyKey,
+                out uint PropertyType,
+                IntPtr PropertyBuffer,
+                ref uint PropertyBufferSize,
+                uint ulFlags);
+
+            private static readonly Guid GUID_PCI_DEVICE = new Guid("3ab22e31-8264-4b4e-9af5-a8d2d8e33e62");
+
+            private static int ReadPciDevPropInt(uint devInst, uint pid) {
+                DEVPROPKEY key = new DEVPROPKEY { fmtid = GUID_PCI_DEVICE, pid = pid };
+                uint propType = 0;
+                uint bufSize  = 8;
+                IntPtr buf = Marshal.AllocHGlobal(8);
+                try {
+                    Marshal.WriteInt64(buf, 0, 0L);
+                    if (CM_Get_DevNode_PropertyW(devInst, ref key, out propType, buf, ref bufSize, 0) == 0 && bufSize > 0) {
+                        if (bufSize == 1) return Marshal.ReadByte(buf, 0);
+                        if (bufSize == 2) return Marshal.ReadInt16(buf, 0);
+                        return Marshal.ReadInt32(buf, 0);
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+                return 0;
+            }
+
+            public static string GetPcieLinkInfo(string instanceId) {
+                if (string.IsNullOrEmpty(instanceId)) return "";
+                uint devInst;
+                if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return "";
+
+                // DEVPKEY_PciDevice: 9=CurrentLinkSpeed, 10=CurrentLinkWidth, 11=MaxLinkSpeed, 12=MaxLinkWidth
+                int curSpeed = ReadPciDevPropInt(devInst, 9);
+                int curWidth = ReadPciDevPropInt(devInst, 10);
+                int maxSpeed = ReadPciDevPropInt(devInst, 11);
+                int maxWidth = ReadPciDevPropInt(devInst, 12);
+
+                int effSpeed = Math.Max(curSpeed, maxSpeed);
+                int effWidth = (curWidth > 0) ? curWidth : maxWidth;
+                if (effSpeed <= 0 && effWidth <= 0) return "";
+
+                string genStr = "";
+                switch (effSpeed) {
+                    case 1: genStr = "1.0"; break;
+                    case 2: genStr = "2.0"; break;
+                    case 3: genStr = "3.0"; break;
+                    case 4: genStr = "4.0"; break;
+                    case 5: genStr = "5.0"; break;
+                    case 6: genStr = "6.0"; break;
+                }
+
+                string prefix = string.IsNullOrEmpty(genStr) ? "PCIe" : ("PCIe " + genStr);
+                if (curWidth > 0 && maxWidth > 0 && curWidth < maxWidth) {
+                    return string.Format("{0} x{1} (Max: x{2})", prefix, curWidth, maxWidth);
+                }
+                if (effWidth > 0) {
+                    return string.Format("{0} x{1}", prefix, effWidth);
+                }
+                return prefix;
+            }
+        }
+
+        // Native USBHUB3 IOCTL & BusReportedDeviceDesc Prober
+        public class HubProbeResult {
+            public int TotalPorts;
+            public int Usb2Ports;
+            public int Usb3Ports;
+            public int SsPlusPorts;
+            public int ActivePorts;
+            public Dictionary<int, string> PortSpeeds = new Dictionary<int, string>();
+        }
+
+        public static class UsbProberV2 {
+            [StructLayout(LayoutKind.Sequential)]
+            private struct DEVPROPKEY {
+                public Guid fmtid;
+                public uint pid;
+            }
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+            [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+            private static extern int CM_Get_DevNode_PropertyW(
+                uint dnDevInst,
+                ref DEVPROPKEY PropertyKey,
+                out uint PropertyType,
+                IntPtr PropertyBuffer,
+                ref uint PropertyBufferSize,
+                uint ulFlags);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr CreateFileW(
+                string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+                IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+                uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool DeviceIoControl(
+                IntPtr hDevice, uint dwIoControlCode,
+                IntPtr lpInBuffer, uint nInBufferSize,
+                IntPtr lpOutBuffer, uint nOutBufferSize,
+                out uint lpBytesReturned, IntPtr lpOverlapped);
+
+            [DllImport("kernel32.dll")]
+            private static extern bool CloseHandle(IntPtr hObject);
+
+            private const uint GENERIC_WRITE = 0x40000000;
+            private const uint FILE_SHARE_READ = 0x00000001;
+            private const uint FILE_SHARE_WRITE = 0x00000002;
+            private const uint OPEN_EXISTING = 3;
+
+            private const uint IOCTL_USB_GET_NODE_INFORMATION = 0x00220408;
+            private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX = 0x00220448;
+            private const uint IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2 = 0x0022045C;
+
+            // DEVPKEY_Device_BusReportedDeviceDesc ({540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4)
+            private static DEVPROPKEY KEY_BUS_REPORTED_DESC = new DEVPROPKEY {
+                fmtid = new Guid("540b947e-8b40-45bc-a8a2-6a0b894cbda2"),
+                pid = 4
+            };
+
+            public static string GetBusReportedDesc(string instanceId) {
+                uint devInst;
+                if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return "";
+
+                uint propType = 0;
+                uint bufSize = 512;
+                IntPtr buf = Marshal.AllocHGlobal((int)bufSize);
+                try {
+                    int cr = CM_Get_DevNode_PropertyW(devInst, ref KEY_BUS_REPORTED_DESC, out propType, buf, ref bufSize, 0);
+                    if (cr == 0 && propType == 18 && bufSize > 2) {
+                        string val = Marshal.PtrToStringUni(buf);
+                        return (val != null) ? val.Trim() : "";
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(buf);
+                }
+                return "";
+            }
+
+            public static HubProbeResult ProbeHub(string hubInstanceId) {
+                if (string.IsNullOrEmpty(hubInstanceId)) return new HubProbeResult();
+                if (PnpTree.GetDeviceConfigStatus(hubInstanceId) != 0) return new HubProbeResult();
+
+                HubProbeResult result = new HubProbeResult();
+                System.Threading.Thread worker = new System.Threading.Thread(delegate() {
+                    result = ProbeHubCore(hubInstanceId);
+                });
+                worker.IsBackground = true;
+                worker.Name = "WinUltix_UsbHubProbe";
+                worker.Start();
+
+                if (!worker.Join(350)) {
+                    return new HubProbeResult();
+                }
+                return result;
+            }
+
+            private static HubProbeResult ProbeHubCore(string hubInstanceId) {
+                var res = new HubProbeResult();
+                string symPath = @"\\?\" + hubInstanceId.Replace('\\', '#') + "#{f18a0e88-c30c-11d0-8815-00a0c906bed8}";
+                IntPtr hHub = CreateFileW(symPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) {
+                    hHub = CreateFileW(symPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                }
+                if (hHub == IntPtr.Zero || hHub == new IntPtr(-1)) return res;
+
+                IntPtr bufNode = IntPtr.Zero;
+                IntPtr bufV2   = IntPtr.Zero;
+                IntPtr bufEx   = IntPtr.Zero;
+
+                try {
+                    bufNode = Marshal.AllocHGlobal(128);
+                    bufV2   = Marshal.AllocHGlobal(32);
+                    bufEx   = Marshal.AllocHGlobal(64);
+
+                    for (int i = 0; i < 128; i++) Marshal.WriteByte(bufNode, i, 0);
+                    uint ret = 0;
+                    if (!DeviceIoControl(hHub, IOCTL_USB_GET_NODE_INFORMATION, bufNode, 76, bufNode, 76, out ret, IntPtr.Zero)) {
+                        return res;
+                    }
+
+                    int numPorts = Marshal.ReadByte(bufNode, 6);
+                    if (numPorts <= 0 || numPorts > 127) return res;
+                    res.TotalPorts = numPorts;
+
+                    for (int p = 1; p <= numPorts; p++) {
+                        for (int i = 0; i < 16; i++) Marshal.WriteByte(bufV2, i, 0);
+                        Marshal.WriteInt32(bufV2, 0, p);
+                        Marshal.WriteInt32(bufV2, 4, 16);
+                        Marshal.WriteInt32(bufV2, 8, 7);
+
+                        uint protocols = 0;
+                        uint v2Flags   = 0;
+                        if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, bufV2, 16, bufV2, 16, out ret, IntPtr.Zero)) {
+                            protocols = (uint)Marshal.ReadInt32(bufV2, 8);
+                            v2Flags   = (uint)Marshal.ReadInt32(bufV2, 12);
+                            if ((protocols & 0x04) != 0) {
+                                res.Usb3Ports++;
+                                if ((v2Flags & 0x08) != 0 || (v2Flags & 0x04) != 0) res.SsPlusPorts++;
+                            } else if ((protocols & 0x02) != 0) {
+                                res.Usb2Ports++;
+                            }
+                        }
+
+                        for (int i = 0; i < 64; i++) Marshal.WriteByte(bufEx, i, 0);
+                        Marshal.WriteInt32(bufEx, 0, p);
+                        if (DeviceIoControl(hHub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, bufEx, 35, bufEx, 35, out ret, IntPtr.Zero)) {
+                            ushort bcdUsb   = (ushort)Marshal.ReadInt16(bufEx, 6);
+                            byte speed      = Marshal.ReadByte(bufEx, 23);
+                            uint connStatus = (uint)Marshal.ReadInt32(bufEx, 31);
+                            if (connStatus == 1) {
+                                res.ActivePorts++;
+
+                                bool isDedicatedSsPort = ((protocols & 0x04) != 0 && (protocols & 0x02) == 0);
+                                bool isOperatingSsPlus = ((v2Flags & 0x04) != 0) || (speed >= 4);
+                                bool isOperatingSs     = ((v2Flags & 0x01) != 0) || (speed >= 3) || isDedicatedSsPort || (bcdUsb >= 0x0300);
+                                bool isSsCapableDevice = ((v2Flags & 0x02) != 0) || ((v2Flags & 0x08) != 0);
+
+                                string speedStr = "USB";
+                                if (isOperatingSsPlus || (isOperatingSs && bcdUsb >= 0x0320)) {
+                                    speedStr = (bcdUsb >= 0x0320) ? "20 Gbps SS+" : "10 Gbps SS+";
+                                } else if (isOperatingSs && bcdUsb >= 0x0310) {
+                                    speedStr = ((v2Flags & 0x08) != 0 || isDedicatedSsPort) ? "10 Gbps SS+" : "5 Gbps SS";
+                                } else if (isOperatingSs) {
+                                    speedStr = "5 Gbps SS";
+                                } else if (speed == 2) {
+                                    speedStr = isSsCapableDevice ? "480 Mbps HS [Throttled USB 3.x!]" : "480 Mbps HS";
+                                } else if (speed == 1) {
+                                    speedStr = "12 Mbps FS";
+                                } else if (speed == 0) {
+                                    speedStr = "1.5 Mbps LS";
+                                }
+                                res.PortSpeeds[p] = speedStr;
+                            }
+                        }
+                    }
+                } catch { } finally {
+                    if (bufNode != IntPtr.Zero) Marshal.FreeHGlobal(bufNode);
+                    if (bufV2 != IntPtr.Zero) Marshal.FreeHGlobal(bufV2);
+                    if (bufEx != IntPtr.Zero) Marshal.FreeHGlobal(bufEx);
+                    CloseHandle(hHub);
+                }
+                return res;
+            }
+        }
+
+        // Owner-Drawn Dark TabControl (Eliminates Win32 white 3D borders & gray headers)
+        public class DarkTabControl : TabControl {
+            [StructLayout(LayoutKind.Sequential)]
+            private struct RECT {
+                public int Left, Top, Right, Bottom;
+            }
+
+            private const int TCM_ADJUSTRECT = 0x1328;
+            private int _hoverIndex = -1;
+
+            public DarkTabControl() {
+                this.SetStyle(
+                    ControlStyles.UserPaint |
+                    ControlStyles.ResizeRedraw |
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.OptimizedDoubleBuffer,
+                    true);
+                this.DoubleBuffered = true;
+                this.SizeMode = TabSizeMode.Fixed;
+                this.ItemSize = new Size(57, 22);
+            }
+
+            protected override void WndProc(ref Message m) {
+                if (m.Msg == TCM_ADJUSTRECT && !this.DesignMode) {
+                    RECT rc = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
+                    rc.Left   -= 3;
+                    rc.Right  += 3;
+                    rc.Top    -= 1;
+                    rc.Bottom += 3;
+                    Marshal.StructureToPtr(rc, m.LParam, true);
+                }
+                base.WndProc(ref m);
+            }
+
+            protected override void OnMouseMove(MouseEventArgs e) {
+                base.OnMouseMove(e);
+                int newHover = -1;
+                for (int i = 0; i < this.TabCount; i++) {
+                    if (this.GetTabRect(i).Contains(e.Location)) {
+                        newHover = i;
+                        break;
+                    }
+                }
+                if (newHover != _hoverIndex) {
+                    _hoverIndex = newHover;
+                    this.Invalidate();
+                }
+            }
+
+            protected override void OnMouseLeave(EventArgs e) {
+                base.OnMouseLeave(e);
+                if (_hoverIndex != -1) {
+                    _hoverIndex = -1;
+                    this.Invalidate();
+                }
+            }
+
+            protected override void OnPaint(PaintEventArgs e) {
+                Graphics g = e.Graphics;
+                g.Clear(Color.FromArgb(30, 30, 30));
+
+                if (this.TabCount <= 0) return;
+
+                Rectangle bodyRect   = this.DisplayRectangle;
+                Rectangle borderRect = new Rectangle(bodyRect.X - 1, bodyRect.Y - 1, bodyRect.Width + 1, bodyRect.Height + 1);
+                using (Pen borderPen = new Pen(Color.FromArgb(65, 65, 65), 1)) {
+                    g.DrawRectangle(borderPen, borderRect);
+                }
+
+                for (int i = 0; i < this.TabCount; i++) {
+                    Rectangle tabRect = this.GetTabRect(i);
+                    bool isSelected = (i == this.SelectedIndex);
+                    bool isHovered  = (i == _hoverIndex);
+
+                    Color backColor = isSelected
+                        ? Color.FromArgb(40, 40, 42)
+                        : (isHovered ? Color.FromArgb(34, 34, 36) : Color.FromArgb(22, 22, 22));
+
+                    using (SolidBrush bgBrush = new SolidBrush(backColor)) {
+                        g.FillRectangle(bgBrush, tabRect);
+                    }
+
+                    using (Pen tabPen = new Pen(Color.FromArgb(60, 60, 60), 1)) {
+                        g.DrawRectangle(tabPen, tabRect.X, tabRect.Y, tabRect.Width - 1, tabRect.Height - 1);
+                    }
+
+                    if (isSelected) {
+                        using (SolidBrush accentBrush = new SolidBrush(Color.FromArgb(80, 180, 255))) {
+                            g.FillRectangle(accentBrush, tabRect.X + 1, tabRect.Y + 1, tabRect.Width - 2, 3);
+                        }
+                    }
+
+                    Color textColor = isSelected
+                        ? Color.White
+                        : (isHovered ? Color.LightSkyBlue : Color.Silver);
+
+                    Rectangle textRect = new Rectangle(tabRect.X, tabRect.Y + 1, tabRect.Width, tabRect.Height - 1);
+                    TextRenderer.DrawText(
+                        g,
+                        this.TabPages[i].Text,
+                        this.Font,
+                        textRect,
+                        textColor,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                }
+            }
+        }
+
+        // Custom GDI+ Flat Dark ProgressBar with Cached Font & Centered Percentage Readout
+        public class DarkProgressBar : ProgressBar {
+            private static readonly Font StatusFont = new Font("Consolas", 9.0f, FontStyle.Bold);
+
+            public DarkProgressBar() {
+                this.SetStyle(
+                    ControlStyles.UserPaint |
+                    ControlStyles.ResizeRedraw |
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.OptimizedDoubleBuffer,
+                    true);
+                this.DoubleBuffered = true;
+            }
+
+            protected override void OnPaint(PaintEventArgs e) {
+                Graphics g = e.Graphics;
+                Rectangle rect = this.ClientRectangle;
+
+                using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(20, 20, 20))) {
+                    g.FillRectangle(bgBrush, rect);
+                }
+
+                double range = Math.Max(1, this.Maximum - this.Minimum);
+                double pct   = Math.Max(0.0, Math.Min(1.0, (double)(this.Value - this.Minimum) / range));
+
+                if (this.Value > 0 && rect.Width > 2 && rect.Height > 2) {
+                    int fillWidth = (int)Math.Round((rect.Width - 2) * pct);
+                    if (fillWidth > 0) {
+                        Rectangle fillRect = new Rectangle(1, 1, fillWidth, rect.Height - 2);
+                        using (SolidBrush fillBrush = new SolidBrush(Color.FromArgb(45, 105, 165))) {
+                            g.FillRectangle(fillBrush, fillRect);
+                        }
+                        if (rect.Height > 4) {
+                            using (SolidBrush topGlow = new SolidBrush(Color.FromArgb(75, 145, 210))) {
+                                g.FillRectangle(topGlow, 1, 1, fillWidth, 2);
+                            }
+                        }
+                    }
+                }
+
+                using (Pen borderPen = new Pen(Color.FromArgb(65, 65, 65), 1)) {
+                    g.DrawRectangle(borderPen, 0, 0, rect.Width - 1, rect.Height - 1);
+                }
+
+                string statusText = (this.Value > 0)
+                    ? string.Format("{0}%", (int)Math.Round(pct * 100.0))
+                    : "READY";
+                Color textColor = (this.Value > 0) ? Color.White : Color.FromArgb(115, 115, 115);
+
+                TextRenderer.DrawText(
+                    g,
+                    statusText,
+                    StatusFont,
+                    rect,
+                    textColor,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            }
+        }
+
+        // Thread-Safe Win32 Live Expert Command & Output Console (AllocConsole + Unified Dark Theme & Geometry)
+        public static class ExpertConsole {
+            [StructLayout(LayoutKind.Sequential)]
+            private struct COORD {
+                public short X;
+                public short Y;
+                public COORD(short x, short y) { X = x; Y = y; }
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct SMALL_RECT {
+                public short Left;
+                public short Top;
+                public short Right;
+                public short Bottom;
+                public SMALL_RECT(short l, short t, short r, short b) { Left = l; Top = t; Right = r; Bottom = b; }
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct CONSOLE_SCREEN_BUFFER_INFO_EX {
+                public uint cbSize;
+                public COORD dwSize;
+                public COORD dwCursorPosition;
+                public ushort wAttributes;
+                public SMALL_RECT srWindow;
+                public COORD dwMaximumWindowSize;
+                public ushort wPopupAttributes;
+                public bool bFullscreenSupported;
+                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+                public uint[] ColorTable;
+            }
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool AllocConsole();
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr GetConsoleWindow();
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr GetStdHandle(int nStdHandle);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool SetConsoleTitleW(string lpConsoleTitle);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool WriteConsoleW(IntPtr hConsoleOutput, string lpBuffer, uint nNumberOfCharsToWrite, out uint lpNumberOfCharsWritten, IntPtr lpReserved);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetConsoleScreenBufferInfoEx(IntPtr hConsoleOutput, ref CONSOLE_SCREEN_BUFFER_INFO_EX lpConsoleScreenBufferInfoEx);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleScreenBufferInfoEx(IntPtr hConsoleOutput, ref CONSOLE_SCREEN_BUFFER_INFO_EX lpConsoleScreenBufferInfoEx);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleTextAttribute(IntPtr hConsoleOutput, ushort wAttributes);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool FillConsoleOutputAttribute(IntPtr hConsoleOutput, ushort wAttribute, uint nLength, COORD dwWriteCoord, out uint lpNumberOfAttrsWritten);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleScreenBufferSize(IntPtr hConsoleOutput, COORD dwSize);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleWindowInfo(IntPtr hConsoleOutput, bool bAbsolute, ref SMALL_RECT lpConsoleWindow);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern COORD GetLargestConsoleWindowSize(IntPtr hConsoleOutput);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern bool DeleteMenu(IntPtr hMenu, uint uPosition, uint uFlags);
+
+            private delegate bool ConsoleCtrlDelegate(uint ctrlType);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleCtrlHandler(ConsoleCtrlDelegate handler, bool add);
+
+            private const int STD_INPUT_HANDLE = -10;
+            private const int STD_OUTPUT_HANDLE = -11;
+            private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+            private const uint ENABLE_MOUSE_INPUT = 0x0010;
+            private const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+            private const uint ENABLE_EXTENDED_FLAGS = 0x0080;
+            private const int SW_HIDE = 0;
+            private const int SW_SHOW = 5;
+            private const uint SC_CLOSE = 0xF060;
+            private const uint MF_BYCOMMAND = 0x00000000;
+
+            private static volatile bool _visible = false;
+            private static bool _initialized = false;
+            private static readonly object _stateLock = new object();
+            private static readonly object _writeLock = new object();
+            private static readonly ConsoleCtrlDelegate _ctrlHandler = new ConsoleCtrlDelegate(OnConsoleCtrl);
+
+            private static bool OnConsoleCtrl(uint ctrlType) {
+                if (ctrlType == 2) {
+                    SetVisible(false);
+                    return true;
+                }
+                return false;
+            }
+
+            private static void ApplyDarkThemeAndGeometry(IntPtr hOut) {
+                if (hOut == IntPtr.Zero || hOut == new IntPtr(-1)) return;
+
+                COORD maxWin = GetLargestConsoleWindowSize(hOut);
+                short cols = (maxWin.X > 20) ? (short)Math.Min(136, maxWin.X - 2) : (short)120;
+                short rows = (maxWin.Y > 12) ? (short)Math.Min(34, maxWin.Y - 2) : (short)30;
+                short bufRows = 3000;
+
+                CONSOLE_SCREEN_BUFFER_INFO_EX csbi = new CONSOLE_SCREEN_BUFFER_INFO_EX();
+                csbi.cbSize = (uint)Marshal.SizeOf(typeof(CONSOLE_SCREEN_BUFFER_INFO_EX));
+                if (GetConsoleScreenBufferInfoEx(hOut, ref csbi)) {
+                    if (csbi.ColorTable == null || csbi.ColorTable.Length < 16) {
+                        csbi.ColorTable = new uint[16];
+                    }
+                    // COLORREF format: 0x00BBGGRR -- override slots 0, 1 (Blue) & 5 (PowerShell #012456 bg)
+                    csbi.ColorTable[0]  = 0x00121212; // Background: #121212
+                    csbi.ColorTable[1]  = 0x00121212; // Standard Dark Blue -> #121212
+                    csbi.ColorTable[5]  = 0x00121212; // PowerShell Default Bg Slot 5 -> #121212
+                    csbi.ColorTable[7]  = 0x00E0E0E0; // Default Foreground: #E0E0E0
+                    csbi.ColorTable[8]  = 0x00857D78; // ANSI 90 (Bright Black / Gray)
+                    csbi.ColorTable[12] = 0x005555FF; // ANSI 91 (Bright Red)
+                    csbi.ColorTable[14] = 0x0055E6FF; // ANSI 93 (Bright Yellow/Amber)
+                    csbi.wAttributes    = 0x0007;
+                    csbi.dwSize         = new COORD(cols, bufRows);
+                    csbi.srWindow       = new SMALL_RECT(0, 0, cols, rows);
+                    SetConsoleScreenBufferInfoEx(hOut, ref csbi);
+                }
+
+                SMALL_RECT tinyRect = new SMALL_RECT(0, 0, 1, 1);
+                SMALL_RECT winRect  = new SMALL_RECT(0, 0, (short)(cols - 1), (short)(rows - 1));
+                SetConsoleWindowInfo(hOut, true, ref tinyRect);
+                SetConsoleScreenBufferSize(hOut, new COORD(cols, bufRows));
+                SetConsoleWindowInfo(hOut, true, ref winRect);
+
+                // Update active text attribute & VT default reset target, then repaint all existing buffer cells
+                SetConsoleTextAttribute(hOut, 0x0007);
+                uint written;
+                FillConsoleOutputAttribute(hOut, 0x0007, (uint)(cols * bufRows), new COORD(0, 0), out written);
+            }
+
+            public static bool IsVisible {
+                get { return _visible; }
+            }
+
+            public static bool Toggle() {
+                SetVisible(!_visible);
+                return _visible;
+            }
+
+            public static void SetVisible(bool show) {
+                lock (_stateLock) {
+                    IntPtr hWnd = GetConsoleWindow();
+                    if (show) {
+                        if (hWnd == IntPtr.Zero) {
+                            AllocConsole();
+                            hWnd = GetConsoleWindow();
+                        }
+                        if (hWnd != IntPtr.Zero && !_initialized) {
+                            SetConsoleTitleW("WinUltix - Live Expert Command & Output Stream");
+                            SetConsoleCtrlHandler(_ctrlHandler, true);
+                            IntPtr hMenu = GetSystemMenu(hWnd, false);
+                            if (hMenu != IntPtr.Zero) {
+                                DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+                            }
+                            IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                            uint outMode;
+                            if (hOut != IntPtr.Zero && GetConsoleMode(hOut, out outMode)) {
+                                SetConsoleMode(hOut, outMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                            }
+                            ApplyDarkThemeAndGeometry(hOut);
+
+                            IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
+                            uint inMode;
+                            if (hIn != IntPtr.Zero && GetConsoleMode(hIn, out inMode)) {
+                                uint cleanIn = (inMode & ~(ENABLE_QUICK_EDIT_MODE | ENABLE_MOUSE_INPUT)) | ENABLE_EXTENDED_FLAGS;
+                                SetConsoleMode(hIn, cleanIn);
+                            }
+                            _initialized = true;
+                        }
+                        if (hWnd != IntPtr.Zero) {
+                            ShowWindow(hWnd, SW_SHOW);
+                        }
+                        _visible = true;
+                    } else {
+                        if (hWnd != IntPtr.Zero) {
+                            ShowWindow(hWnd, SW_HIDE);
+                        }
+                        _visible = false;
+                    }
+                }
+            }
+
+            public static void WriteLine(string text, string ansiColor) {
+                if (!_visible || string.IsNullOrEmpty(text)) return;
+                lock (_writeLock) {
+                    IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                    if (hOut == IntPtr.Zero || hOut == new IntPtr(-1)) return;
+                    // Reset only foreground (SGR 39) so background remains locked to attribute 0 (#121212)
+                    string payload = "\x1b[" + ansiColor + "m" + text + "\x1b[39m\r\n";
+                    uint written;
+                    WriteConsoleW(hOut, payload, (uint)payload.Length, out written, IntPtr.Zero);
+                }
+            }
+        }
+    }
 "@ -ErrorAction SilentlyContinue
 }
 function Read-HighResBitmapFromIco {
@@ -1534,22 +2131,34 @@ $dirStack.Push($subDir)
 }
 return $totalBytes
 }
-function Set-ProtectedServiceStart {
-param(
-[Parameter(Mandatory=$true)][string]$ServiceName,
-[Parameter(Mandatory=$true)][int]$StartValue,
-[switch]$StartService
-)
-$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
-if (-not (Test-Path -LiteralPath $regPath)) { return }
+function Grant-UltixRegistryKeyAccess {
+param([Parameter(Mandatory=$true)][string]$RegistryPath)
+if ([string]::IsNullOrWhiteSpace($RegistryPath)) { return }
+$baseHive   = $null
+$subKeyPath = ""
+if ($RegistryPath -match '^(?i)(HKLM:\\|Registry::HKEY_LOCAL_MACHINE\\)(.+)$') {
+$baseHive   = [Microsoft.Win32.Registry]::LocalMachine
+$subKeyPath = $matches[2]
+} elseif ($RegistryPath -match '^(?i)(HKCU:\\|Registry::HKEY_CURRENT_USER\\)(.+)$') {
+$baseHive   = [Microsoft.Win32.Registry]::CurrentUser
+$subKeyPath = $matches[2]
+} elseif ($RegistryPath -match '^(?i)(HKCR:\\|Registry::HKEY_CLASSES_ROOT\\)(.+)$') {
+$baseHive   = [Microsoft.Win32.Registry]::ClassesRoot
+$subKeyPath = $matches[2]
+} elseif ($RegistryPath -match '^(?i)(HKU:\\|Registry::HKEY_USERS\\)(.+)$') {
+$baseHive   = [Microsoft.Win32.Registry]::Users
+$subKeyPath = $matches[2]
+}
+if ($null -eq $baseHive -or [string]::IsNullOrWhiteSpace($subKeyPath)) { return }
 try {
-Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
-} catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
 [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
 [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
-$subKeyPath = "SYSTEM\CurrentControlSet\Services\$ServiceName"
 $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-$keyOwn = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+$keyOwn = $baseHive.OpenSubKey(
+$subKeyPath,
+[Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+[System.Security.AccessControl.RegistryRights]::TakeOwnership
+)
 if ($null -ne $keyOwn) {
 try {
 $aclOwn = $keyOwn.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
@@ -1559,14 +2168,18 @@ $keyOwn.SetAccessControl($aclOwn)
 $keyOwn.Dispose()
 }
 }
-$keyAcl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+$keyAcl = $baseHive.OpenSubKey(
+$subKeyPath,
+[Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+[System.Security.AccessControl.RegistryRights]::ChangePermissions
+)
 if ($null -ne $keyAcl) {
 try {
 $acl = $keyAcl.GetAccessControl()
 $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
 $adminSid,
 [System.Security.AccessControl.RegistryRights]::FullControl,
-[System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
+([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
 [System.Security.AccessControl.PropagationFlags]::None,
 [System.Security.AccessControl.AccessControlType]::Allow
 )
@@ -1576,14 +2189,127 @@ $keyAcl.SetAccessControl($acl)
 $keyAcl.Dispose()
 }
 }
-Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+} catch { }
 }
+function Set-ProtectedServiceStart {
+param(
+[Parameter(Mandatory=$true)][string]$ServiceName,
+[Parameter(Mandatory=$true)][int]$StartValue,
+[switch]$StartService,
+[string]$Module = ""
+)
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+if (-not (Test-Path -LiteralPath $regPath)) { return }
+$startFlag = if ($StartService.IsPresent) { " -StartService" } else { "" }
+if (-not [string]::IsNullOrWhiteSpace($Module)) {
+Write-UltixExpertCommand -CommandText "Set-ProtectedServiceStart -ServiceName '$ServiceName' -StartValue $StartValue$startFlag" -Module $Module
+}
+$escalatedAcl = $false
+try {
+Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+} catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+$escalatedAcl = $true
+Grant-UltixRegistryKeyAccess -RegistryPath $regPath
+try {
+Set-ItemProperty -LiteralPath $regPath -Name "Start" -Value $StartValue -Type DWord -Force -ErrorAction Stop
+} catch {
+if (-not [string]::IsNullOrWhiteSpace($Module)) {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+}
+throw
+}
+}
+$scmSynced = $false
 if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
-[void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
+$scmSynced = [WinUltix.PrivilegeEnabler]::SetServiceConfigLive($ServiceName, $StartValue, $StartService.IsPresent)
 }
 if ($StartService.IsPresent -and $StartValue -ne 4) {
 Start-Service -Name $ServiceName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
 }
+if (-not [string]::IsNullOrWhiteSpace($Module)) {
+$aclNote = if ($escalatedAcl) { " | ACL: TrustedInstaller Bypassed" } else { "" }
+$scmNote = if ($scmSynced) { " | Live SCM: Synced" } else { "" }
+Write-UltixExpertResult -OutputText "$ServiceName -> Start=$StartValue$scmNote$aclNote" -ExitCode 0 -Module $Module
+}
+}
+function Stop-UltixService {
+param(
+[Parameter(Mandatory=$true)][string]$ServiceName,
+[switch]$IncludePerUserInstances,
+[string]$Module = ""
+)
+$targets = [System.Collections.Generic.List[System.ServiceProcess.ServiceController]]::new()
+try {
+$mainSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($null -ne $mainSvc) { $targets.Add($mainSvc) }
+if ($IncludePerUserInstances.IsPresent) {
+foreach ($subSvc in @(Get-Service -Name "${ServiceName}_*" -ErrorAction SilentlyContinue)) {
+$targets.Add($subSvc)
+}
+}
+if ($targets.Count -eq 0) { return }
+$runningTargets = @($targets | Where-Object { $_.Status -ne 'Stopped' })
+if ($runningTargets.Count -eq 0) { return }
+if (-not [string]::IsNullOrWhiteSpace($Module)) {
+Write-UltixExpertCommand -CommandText "Stop-UltixService -ServiceName '$ServiceName'" -Module $Module
+}
+$usedScmFallback = $false
+foreach ($svc in $runningTargets) {
+Stop-Service -InputObject $svc -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+$svc.Refresh()
+if ($svc.Status -ne 'Stopped' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
+$usedScmFallback = $true
+[void][WinUltix.PrivilegeEnabler]::StopServiceLive($svc.ServiceName)
+Start-Sleep -Milliseconds 150
+$svc.Refresh()
+}
+}
+$finalStates = ($runningTargets | ForEach-Object { "$($_.ServiceName)=$($_.Status)" }) -join ", "
+$scmNote = if ($usedScmFallback) { " | Live SCM ControlService" } else { "" }
+if (-not [string]::IsNullOrWhiteSpace($Module)) {
+Write-UltixExpertResult -OutputText "$finalStates$scmNote" -ExitCode 0 -Module $Module
+}
+} finally {
+foreach ($t in $targets) {
+if ($null -ne $t) { $t.Dispose() }
+}
+}
+}
+function Stop-UltixProcess {
+param(
+[Parameter(Mandatory=$true)][string[]]$Name,
+[string]$Module = ""
+)
+$procs = @(Get-Process -Name $Name -ErrorAction SilentlyContinue)
+if ($procs.Count -eq 0) { return 0 }
+$killedCount = 0
+$procNames   = ($procs | Select-Object -ExpandProperty ProcessName -Unique) -join ","
+if (-not [string]::IsNullOrWhiteSpace($Module)) {
+Write-UltixExpertCommand -CommandText "Stop-Process -Name '$procNames' -Force" -Module $Module
+}
+try {
+foreach ($p in $procs) {
+try {
+if (-not $p.HasExited) {
+$p.Kill()
+$killedCount++
+}
+} catch {
+try {
+Stop-Process -Id $p.Id -Force -ErrorAction Stop
+$killedCount++
+} catch { }
+}
+}
+} finally {
+foreach ($p in $procs) {
+if ($null -ne $p) { $p.Dispose() }
+}
+}
+if (-not [string]::IsNullOrWhiteSpace($Module)) {
+Write-UltixExpertResult -OutputText "Terminated $killedCount instance(s) ($procNames)" -ExitCode 0 -Module $Module
+}
+return $killedCount
 }
 function Unlock-UltixTrustedInstaller {
 $tiRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TrustedInstaller"
@@ -1623,7 +2349,8 @@ return $null
 function Update-ShellEnvironment {
 param(
 [array]$ModifiedItems = @(),
-[switch]$ForceExplorerRestart
+[switch]$ForceExplorerRestart,
+[string]$Module = "CORE"
 )
 $needsExplorerRestart = $ForceExplorerRestart.IsPresent
 $needsSearchRestart   = $false
@@ -1637,18 +2364,189 @@ try {
 [WinUltix.ShellInterop]::BroadcastShellRefresh()
 } catch { }
 if ($needsSearchRestart) {
-Stop-Process -Name "SearchHost" -Force -ErrorAction SilentlyContinue
+[void](Stop-UltixProcess -Name "SearchHost" -Module $Module)
 Write-GUI " -> Refreshed Windows Search UI host (SearchHost.exe)."
 }
 if ($needsExplorerRestart) {
 Write-GUI " -> Policy change requires shell reload. Restarting explorer.exe..."
-Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+[void](Stop-UltixProcess -Name "explorer" -Module $Module)
 Start-Sleep -Milliseconds 400
-if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
+$expProcs = @(Get-Process -Name "explorer" -ErrorAction SilentlyContinue)
+if ($expProcs.Count -eq 0) {
 Start-Process "explorer.exe"
+} else {
+foreach ($ep in $expProcs) { if ($null -ne $ep) { $ep.Dispose() } }
 }
 } else {
 Write-GUI " -> Shell & Taskbar refreshed live via Win32 WM_SETTINGCHANGE / SHChangeNotify."
+}
+}
+function Write-UltixExpertCommand {
+param(
+[Parameter(Mandatory=$true)][string]$CommandText,
+[string]$Module = "CORE"
+)
+if (-not [WinUltix.ExpertConsole]::IsVisible) { return }
+$ts = [DateTime]::Now.ToString("HH:mm:ss")
+$modPadded = "[$Module]".PadRight(15)
+[WinUltix.ExpertConsole]::WriteLine("[$ts] $modPadded > $CommandText", "93")
+}
+function Write-UltixExpertResult {
+param(
+[AllowEmptyString()][string]$OutputText,
+[int]$ExitCode = 0,
+[string]$Module = "CORE"
+)
+if (-not [WinUltix.ExpertConsole]::IsVisible) { return }
+$ts = [DateTime]::Now.ToString("HH:mm:ss")
+$modPad = " " * 15
+$color = if ($ExitCode -eq 0) { "90" } else { "91" }
+$cleanOut = if ([string]::IsNullOrWhiteSpace($OutputText)) { "OK (No stdout)" } else { $OutputText.Trim() }
+[WinUltix.ExpertConsole]::WriteLine("[$ts] $modPad|-> [EXIT: $ExitCode] $cleanOut", $color)
+}
+function Set-UltixRegValue {
+param(
+[Parameter(Mandatory=$true)][string]$Path,
+[AllowEmptyString()][string]$Name = "",
+[Parameter(Mandatory=$true)]$Value,
+[string]$Type = "DWord",
+[string]$Module = "CORE"
+)
+$isDefaultVal = ($Name -eq "" -or $Name -eq "(Default)")
+$fmtVal = if ($Type -eq "Binary" -and $Value -is [byte[]]) {
+$hexPreview = ($Value | Select-Object -First 4 | ForEach-Object { "0x{0:X2}" -f $_ }) -join ","
+if ($Value.Length -gt 4) { "[byte[]]($hexPreview,..[$($Value.Length)B])" } else { "[byte[]]($hexPreview)" }
+} elseif ($Type -eq "MultiString" -and $Value -is [array]) {
+"@(" + (($Value | ForEach-Object { "'$_'" }) -join ",") + ")"
+} elseif ($Type -in @("String", "ExpandString") -or $isDefaultVal) {
+"'$(([string]$Value).Replace("'", "''"))'"
+} else {
+"$Value"
+}
+if ($isDefaultVal) {
+Write-UltixExpertCommand -CommandText "Set-Item -LiteralPath '$Path' -Value $fmtVal -Force" -Module $Module
+} else {
+Write-UltixExpertCommand -CommandText "Set-ItemProperty -LiteralPath '$Path' -Name '$Name' -Value $fmtVal -Type $Type -Force" -Module $Module
+}
+try {
+if (-not (Test-Path -LiteralPath $Path)) {
+New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+}
+if ($isDefaultVal) {
+Set-Item -LiteralPath $Path -Value ([string]$Value) -Force -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "(Default) = '$Value'" -ExitCode 0 -Module $Module
+} else {
+$writeVal = $Value
+if ($Type -eq "DWord" -and $writeVal -is [long] -and $writeVal -gt [int]::MaxValue) {
+$writeVal = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$writeVal), 0)
+}
+Set-ItemProperty -LiteralPath $Path -Name $Name -Value $writeVal -Type $Type -Force -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "$Name = $fmtVal ($Type)" -ExitCode 0 -Module $Module
+}
+} catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+throw
+}
+}
+function Remove-UltixRegItem {
+param(
+[Parameter(Mandatory=$true)][string]$Path,
+[AllowEmptyString()][string]$Name = "",
+[switch]$IgnoreMissing,
+[string]$Module = "CORE"
+)
+$isKeyDelete = [string]::IsNullOrEmpty($Name)
+if (-not (Test-Path -LiteralPath $Path)) {
+if ($IgnoreMissing.IsPresent) { return }
+}
+if ($isKeyDelete) {
+Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$Path' -Recurse -Force" -Module $Module
+} else {
+Write-UltixExpertCommand -CommandText "Remove-ItemProperty -LiteralPath '$Path' -Name '$Name' -Force" -Module $Module
+}
+try {
+if ($isKeyDelete) {
+Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "Deleted key: $Path" -ExitCode 0 -Module $Module
+} else {
+Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "Deleted value: $Name" -ExitCode 0 -Module $Module
+}
+} catch [System.Management.Automation.PSArgumentException], [System.Management.Automation.ItemNotFoundException] {
+if ($IgnoreMissing.IsPresent) {
+Write-UltixExpertResult -OutputText "Already absent (No-op)" -ExitCode 0 -Module $Module
+return
+}
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+throw
+} catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+throw
+}
+}
+function Invoke-UltixExe {
+param(
+[Parameter(Mandatory=$true)][string]$FilePath,
+[string[]]$Arguments = @(),
+[string]$Module = "CORE"
+)
+$argLine = ($Arguments | ForEach-Object {
+if ($_ -eq "") {
+'""'
+} elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') {
+$safeArg = $_ -replace '\\+$', '$0$0'
+"`"$safeArg`""
+} else {
+$_
+}
+}) -join " "
+Write-UltixExpertCommand -CommandText "$FilePath $argLine".Trim() -Module $Module
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $FilePath
+$psi.Arguments = $argLine
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$proc = $null
+try {
+$proc = [System.Diagnostics.Process]::Start($psi)
+$stderrTask = $proc.StandardError.ReadToEndAsync()
+$stdout = $proc.StandardOutput.ReadToEnd()
+$proc.WaitForExit()
+$stderr = $stderrTask.GetAwaiter().GetResult()
+$ec = $proc.ExitCode
+$rawMsg = if ($ec -ne 0 -and -not [string]::IsNullOrWhiteSpace($stderr)) {
+$stderr
+} elseif (-not [string]::IsNullOrWhiteSpace($stdout)) {
+$stdout
+} else {
+$stderr
+}
+$cleanOut = ($rawMsg -replace '\x00', '' -replace '\s+', ' ').Trim()
+if ($cleanOut.Length -gt 180) { $cleanOut = $cleanOut.Substring(0, 177) + "..." }
+Write-UltixExpertResult -OutputText $cleanOut -ExitCode $ec -Module $Module
+return $ec
+} finally {
+if ($null -ne $proc) { $proc.Dispose() }
+}
+}
+function Invoke-UltixStep {
+param(
+[Parameter(Mandatory=$true)][string]$Command,
+[Parameter(Mandatory=$true)][scriptblock]$Action,
+[string]$SuccessOutput = "Completed",
+[string]$Module = "CORE"
+)
+Write-UltixExpertCommand -CommandText $Command -Module $Module
+try {
+$res = & $Action
+$msg = if ($res -is [string] -and -not [string]::IsNullOrWhiteSpace($res)) { $res } else { $SuccessOutput }
+Write-UltixExpertResult -OutputText $msg -ExitCode 0 -Module $Module
+return $res
+} catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module $Module
+throw
 }
 }
 function Write-GUI {
@@ -1959,20 +2857,18 @@ $global:progBar.Invalidate()
 $global:progBar.Update()
 }
 }
-function Update-DNSLabel {
-if ($null -eq $global:lblCurrentDNS -or $global:lblCurrentDNS.IsDisposed) { return }
+function Get-UltixActiveNetworkAdapters {
+$adapters = [System.Collections.Generic.List[PSCustomObject]]::new()
+foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+if ($nic.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
 try {
-$activeNic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
-$_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
-$_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback -and
-@($_.GetIPProperties().GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") }).Count -gt 0
-} | Select-Object -First 1
-if ($null -eq $activeNic) {
-$global:lblCurrentDNS.Text = "Current DNS: No active internet route"
-$global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::DarkGray
-return
-}
-$ipProps = $activeNic.GetIPProperties()
+$ipProps = $nic.GetIPProperties()
+if ($null -eq $ipProps) { continue }
+$validGw = @($ipProps.GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") })
+if ($validGw.Count -eq 0) { continue }
+$v4Props = $ipProps.GetIPv4Properties()
+if ($null -eq $v4Props -or $v4Props.Index -le 0) { continue }
 $v4Addrs = [System.Collections.Generic.List[string]]::new()
 $v6Addrs = [System.Collections.Generic.List[string]]::new()
 foreach ($dnsIp in $ipProps.DnsAddresses) {
@@ -1982,27 +2878,21 @@ $v4Addrs.Add($dnsIp.ToString())
 $v6Addrs.Add($dnsIp.ToString())
 }
 }
-$ifGuid = $activeNic.Id
+$ifGuid = [string]$nic.Id
 $v4RegKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$ifGuid"
-$staticNameServer = (Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
-if ([string]::IsNullOrWhiteSpace($staticNameServer) -and $v4Addrs.Count -gt 0) {
-$global:lblCurrentDNS.Text = "Current DNS: Default provider (DHCP - $($v4Addrs[0]))"
-$global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
-return
-}
-if ($v4Addrs.Count -eq 0 -and $v6Addrs.Count -eq 0) {
-$global:lblCurrentDNS.Text = "Current DNS: Default provider (DHCP)"
-$global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
-return
-}
+$staticNs = [string](Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
 $primaryV4 = if ($v4Addrs.Count -gt 0) { $v4Addrs[0] } else { "" }
-$providerName = switch ($primaryV4) {
-"9.9.9.9"        { "Quad9" }
-"1.1.1.1"        { "Cloudflare" }
-"94.140.14.14"   { "AdGuard" }
-"8.8.8.8"        { "Google" }
-"208.67.222.222" { "OpenDNS" }
+$providerName = if ([string]::IsNullOrWhiteSpace($staticNs)) {
+"Default (DHCP)"
+} else {
+switch ($primaryV4) {
+"9.9.9.9"        { "Quad9 (9.9.9.9)" }
+"1.1.1.1"        { "Cloudflare (1.1.1.1)" }
+"94.140.14.14"   { "AdGuard (94.140.14.14)" }
+"8.8.8.8"        { "Google (8.8.8.8)" }
+"208.67.222.222" { "OpenDNS (208.67.222.222)" }
 default          { "Custom" }
+}
 }
 $isDohActive = $false
 if (-not [string]::IsNullOrWhiteSpace($ifGuid) -and -not [string]::IsNullOrWhiteSpace($primaryV4)) {
@@ -2010,20 +2900,52 @@ $dohKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificPar
 $flags  = (Get-ItemProperty -LiteralPath $dohKey -Name "DohFlags" -ErrorAction SilentlyContinue).DohFlags
 if ($null -ne $flags -and ($flags -band 1) -eq 1) { $isDohActive = $true }
 }
-$stackBadge = if ($v6Addrs.Count -gt 0) { "IPv4+v6" } else { "IPv4" }
-$dohBadge   = if ($isDohActive) { " [DoH Encrypted]" } else { " [Plaintext]" }
-$global:lblCurrentDNS.Text = "Current DNS: $providerName ($primaryV4 | $stackBadge)$dohBadge"
-$global:lblCurrentDNS.ForeColor = if ($isDohActive) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::LightSkyBlue }
+$adapters.Add([PSCustomObject]@{
+InterfaceIndex   = [int]$v4Props.Index
+InterfaceGuid    = $ifGuid
+InterfaceName    = [string]$nic.Description
+InterfaceAlias   = [string]$nic.Name
+DnsV4            = @($v4Addrs)
+DnsV6            = @($v6Addrs)
+PrimaryV4        = $primaryV4
+StaticNameServer = $staticNs
+ProviderName     = $providerName
+IsDohActive      = $isDohActive
+})
+} catch { }
+}
+return @($adapters)
+}
+function Update-DNSLabel {
+if ($null -eq $global:lblCurrentDNS -or $global:lblCurrentDNS.IsDisposed) { return }
+try {
+$activeNic = @(Get-UltixActiveNetworkAdapters) | Select-Object -First 1
+if ($null -eq $activeNic) {
+$global:lblCurrentDNS.Text = "Current DNS: No active internet route"
+$global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::DarkGray
+return
+}
+if ([string]::IsNullOrWhiteSpace($activeNic.StaticNameServer)) {
+$dhcpHint = if (-not [string]::IsNullOrWhiteSpace($activeNic.PrimaryV4)) { " (DHCP - $($activeNic.PrimaryV4))" } else { " (DHCP)" }
+$global:lblCurrentDNS.Text = "Current DNS: Default provider$dhcpHint"
+$global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
+return
+}
+$shortProv  = ($activeNic.ProviderName -replace '\s*\([^)]*\)$', '')
+$stackBadge = if ($activeNic.DnsV6.Count -gt 0) { "IPv4+v6" } else { "IPv4" }
+$dohBadge   = if ($activeNic.IsDohActive) { " [DoH Encrypted]" } else { " [Plaintext]" }
+$global:lblCurrentDNS.Text = "Current DNS: $shortProv ($($activeNic.PrimaryV4) | $stackBadge)$dohBadge"
+$global:lblCurrentDNS.ForeColor = if ($activeNic.IsDohActive) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::LightSkyBlue }
 } catch {
 $global:lblCurrentDNS.Text = "Current DNS: Unknown"
 }
 }
 $global:UltixColors = @{
-Standard  = @(55, 58, 64)    # Matte Slate: Standard OS tweaks, cleaners, and repairs
-Inspector = @(45, 85, 125)   # Steel Blue: Interactive grid inspectors, analyzers, and safe profiles
-Danger    = @(135, 50, 50)   # Deep Crimson: Aggressive/destructive actions and hard kernel locks
-Audit     = @(72, 76, 82)    # Neutral Gray: All [?] audit buttons
-Add       = @(45, 95, 60)    # Muted Green: [+] add target buttons
+Standard  = @(55, 58, 64)
+Inspector = @(45, 85, 125)
+Danger    = @(135, 50, 50)
+Audit     = @(72, 76, 82)
+Add       = @(45, 95, 60)
 TabBg     = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 }
 $global:UltixTypography = @{
@@ -2031,15 +2953,15 @@ UiFamily        = "Segoe UI Semibold"
 TextFamily      = "Segoe UI"
 MonoFamily      = "Consolas"
 ScaleOffset     = 0.0
-TabHeaderSize   = 9.0     # Fixed for 57px tab headers so they never clip
-FooterBtnSize   = 9.25    # Optimal fit for 28px global footer buttons
-MainBtnSize     = 9.75    # Full-width tab buttons (320px / 370px)
-CompactBtnSize  = 9.25    # Half-width 2-column buttons (180px / 240px)
-ToolbarBtnSize  = 9.5     # Modal top toolbar buttons (Select All, Select Visible, Refresh)
-ModalActionSize = 9.75    # Modal bottom execution buttons (Start, Stop, Execute, Cancel)
-SectionHdrSize  = 9.5     # Section headers above button groups
-ModalDescSize   = 10.5    # Top description text in modals
-GridTextSize    = 10.25   # ListView & CheckedListBox rows
+TabHeaderSize   = 9.0
+FooterBtnSize   = 9.25
+MainBtnSize     = 9.75
+CompactBtnSize  = 9.25
+ToolbarBtnSize  = 9.5
+ModalActionSize = 9.75
+SectionHdrSize  = 9.5
+ModalDescSize   = 10.5
+GridTextSize    = 10.25
 }
 $global:UltixFontCache = @{}
 try {
@@ -2270,15 +3192,20 @@ param(
 [Parameter(Mandatory=$true)][scriptblock]$ScriptBlock,
 [array]$Arguments = @(),
 [Parameter(Mandatory=$true)][scriptblock]$OnComplete,
+[scriptblock]$OnError = $null,
 [System.Windows.Forms.Control[]]$ControlsToDisable = @(),
 [int]$PollIntervalMs = 150
 )
 if ($null -ne $UltixSync) {
-$prevProg  = $UltixSync.Progress
+$prevLock = $UltixSync.LockProgress
+$prevProg = $UltixSync.Progress
+$UltixSync.LockProgress = $true
+try {
 $nestedOut = & $ScriptBlock @Arguments
 if ($null -ne $OnComplete) { & $OnComplete $nestedOut }
-if ($UltixSync.Progress -eq 0 -and $prevProg -gt 0) {
-$UltixSync.Progress = $prevProg
+} finally {
+$UltixSync.LockProgress = $prevLock
+$UltixSync.Progress     = $prevProg
 }
 return
 }
@@ -2286,8 +3213,9 @@ foreach ($ctrl in $ControlsToDisable) {
 if ($null -ne $ctrl -and -not $ctrl.IsDisposed) { $ctrl.Enabled = $false }
 }
 $syncContext = [hashtable]::Synchronized(@{
-Logs     = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-Progress = -1
+Logs         = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+Progress     = -1
+LockProgress = $false
 })
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
 $fnRoster = if ($null -ne $Global:UltixToolkitFunctions -and $Global:UltixToolkitFunctions.Count -gt 0) {
@@ -2303,13 +3231,22 @@ $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStat
 }
 }
 $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Write-GUI", 'param([AllowEmptyString()][string]$Message, [switch]$DeferUpdate) if ($null -ne $UltixSync -and -not [string]::IsNullOrWhiteSpace($Message)) { $UltixSync.Logs.Enqueue($Message) }'))
-$iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Update-Progress", 'param([int]$Percent) if ($null -ne $UltixSync) { $UltixSync.Progress = $Percent }'))
+$iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Update-Progress", 'param([int]$Percent) if ($null -ne $UltixSync -and -not $UltixSync.LockProgress) { $UltixSync.Progress = $Percent }'))
+if ($null -eq $global:UltixActiveTasks) {
+$global:UltixActiveTasks = [System.Collections.Generic.List[hashtable]]::new()
+}
+$runspace = $null
+$ps       = $null
+$timer    = $null
+$taskEntry = $null
+try {
 $runspace = [runspacefactory]::CreateRunspace($iss)
 $runspace.ApartmentState = "STA"
 $runspace.ThreadOptions  = "ReuseThread"
 $runspace.Open()
 $runspace.SessionStateProxy.SetVariable("UltixSync", $syncContext)
 $runspace.SessionStateProxy.SetVariable("AppVersion", $Global:AppVersion)
+$runspace.SessionStateProxy.SetVariable("ScriptDir", $ScriptDir)
 $ps = [powershell]::Create()
 $ps.Runspace = $runspace
 [void]$ps.AddScript($ScriptBlock)
@@ -2319,14 +3256,27 @@ foreach ($arg in $Arguments) {
 $asyncResult = $ps.BeginInvoke()
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $PollIntervalMs
-$timer.Tag = @{
+$taskEntry = @{
 PS           = $ps
 Runspace     = $runspace
 AsyncResult  = $asyncResult
 Controls     = $ControlsToDisable
 OnComplete   = $OnComplete
+OnError      = $OnError
 SyncContext  = $syncContext
+Timer        = $timer
 LastProgress = -1
+}
+$timer.Tag = $taskEntry
+[void]$global:UltixActiveTasks.Add($taskEntry)
+} catch {
+if ($null -ne $ps) { try { $ps.Dispose() } catch { } }
+if ($null -ne $runspace) { try { $runspace.Close(); $runspace.Dispose() } catch { } }
+foreach ($ctrl in $ControlsToDisable) {
+if ($null -ne $ctrl -and -not $ctrl.IsDisposed) { $ctrl.Enabled = $true }
+}
+Write-GUI "  [ERROR] Failed to initialize background Runspace: $($_.Exception.Message)"
+return
 }
 $timer.Add_Tick({
 $state = $this.Tag
@@ -2363,6 +3313,9 @@ if ($dequeuedFinal -and $null -ne $global:infoBox -and -not $global:infoBox.IsDi
 $global:infoBox.ScrollToCaret()
 $global:infoBox.Update()
 }
+if ($null -ne $global:UltixActiveTasks) {
+[void]$global:UltixActiveTasks.Remove($state)
+}
 $state.PS.Dispose()
 $state.Runspace.Close()
 $state.Runspace.Dispose()
@@ -2373,7 +3326,14 @@ if ($null -ne $ctrl -and -not $ctrl.IsDisposed) { $ctrl.Enabled = $true }
 }
 if ($null -ne $taskError) {
 Update-Progress 0
-Write-GUI "  [ERROR] Background task failed: $($taskError.Exception.Message)"
+$errDetail = $taskError.Exception.Message
+if ($null -ne $taskError.Exception.InnerException -and -not [string]::IsNullOrWhiteSpace($taskError.Exception.InnerException.Message)) {
+$errDetail = $taskError.Exception.InnerException.Message
+}
+Write-GUI "  [ERROR] Background task failed: $errDetail"
+if ($null -ne $state.OnError) {
+& $state.OnError $errDetail
+}
 return
 }
 if ($null -ne $state.OnComplete) {
@@ -2641,7 +3601,8 @@ $modal.Controls.AddRange($baseControls + @($btnApply, $btnCancel))
 $modal.AcceptButton = $btnApply
 $modal.CancelButton = $btnCancel
 try {
-$result = $modal.ShowDialog($global:form)
+$useOwner = ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired)
+$result   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
 if ($hasValidItems -and ($result -eq "OK" -or $result -eq "Yes")) {
 $selectedItems = [System.Collections.Generic.List[object]]::new()
 foreach ($idx in $chkList.CheckedIndices) {
@@ -2971,7 +3932,8 @@ $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
 $modal.Controls.AddRange($controlsToAdd)
 $modal.CancelButton = $btnCancel
 try {
-$dlgRes = $modal.ShowDialog($global:form)
+$useOwner = ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired)
+$dlgRes   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
 if ($dlgRes -eq [System.Windows.Forms.DialogResult]::Yes -and $SecondaryAlwaysEnabled.IsPresent) {
 $selectedList = [System.Collections.Generic.List[object]]::new()
 foreach ($entry in $indexedData) {
@@ -3096,12 +4058,28 @@ Export-UltixHardwareSnapshot
 } else {
 @{ AffinityLasso = @(); CPPCUnhidden = @(); TimerTweaks = @(); NVMeTweaks = @(); GlobalNetwork = @() }
 }
+$isStartMenuClean = $false
+if (Get-Command Get-StartMenuState -ErrorAction SilentlyContinue) {
+$smState = @(Get-StartMenuState) | Select-Object -First 1
+if ($null -ne $smState -and -not $smState.IsDetected) { $isStartMenuClean = $true }
+}
+$dnsProfile = $null
+$primaryNic = @(Get-UltixActiveNetworkAdapters) | Select-Object -First 1
+if ($null -ne $primaryNic -and $primaryNic.ProviderName -notin @("Default (DHCP)", "Custom")) {
+$dnsProfile = [ordered]@{
+Provider   = $primaryNic.ProviderName
+EnableDoH  = [bool]$primaryNic.IsDohActive
+EnableIPv6 = ($primaryNic.DnsV6.Count -gt 0)
+}
+}
 $snapshot = [ordered]@{
 SchemaVersion           = "WinUltix_Snapshot_v1"
 AppVersion              = $AppVersion
 ExportTimestamp         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 SourceMachine           = $env:COMPUTERNAME
 Win32PrioritySeparation = $exactQuantum
+StartMenuClean          = $isStartMenuClean
+DnsProfile              = $dnsProfile
 RegistryTweaks          = @($activeRegTweaks)
 PowerDisplayTweaks      = @($activePowerDisplay)
 UsbSecurityLocks        = @($activeUsbLayers)
@@ -3117,9 +4095,11 @@ NVMeTweaks    = @($hwSnapshot.NVMeTweaks)
 GlobalNetwork = @($hwSnapshot.GlobalNetwork)
 }
 }
+Invoke-UltixStep -Command "Export-WinUltixProfile -Path '$OutFile'" -Action {
 $snapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 -Force -ErrorAction Stop
+} -SuccessOutput "Snapshot written ($($activeRegTweaks.Count) Reg, $($activePowerDisplay.Count) Pwr, $($activeUsbLayers.Count) USB, $($activeServices.Count) Svc)" -Module "PROFILE"
 $UltixSync.Progress = 100
-$hwCount = @($hwSnapshot.TimerTweaks).Count + @($hwSnapshot.NVMeTweaks).Count + @($hwSnapshot.CPPCUnhidden).Count
+$hwCount = @($hwSnapshot.TimerTweaks).Count + @($hwSnapshot.NVMeTweaks).Count + @($hwSnapshot.CPPCUnhidden).Count + @($hwSnapshot.GlobalNetwork).Count
 return [PSCustomObject]@{
 FilePath  = $OutFile
 RegCount  = $activeRegTweaks.Count
@@ -3163,15 +4143,34 @@ $regCount = @($profileData.RegistryTweaks).Count
 $pwrCount = if ($profileData.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0) { @($profileData.PowerDisplayTweaks).Count } else { 0 }
 $usbCount = if ($profileData.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0)   { @($profileData.UsbSecurityLocks).Count }   else { 0 }
 $svcCount = @($profileData.DisabledServices).Count
+$tskCount = if ($profileData.PSObject.Properties.Match("DisabledTasks").Count -gt 0)      { @($profileData.DisabledTasks).Count }      else { 0 }
 $srpCount = @($profileData.ActiveSrpLocks).Count
 $affCount = @($profileData.AffinityLasso).Count
+$hwCount = 0
+if ($profileData.PSObject.Properties.Match("HardwareLocks").Count -gt 0 -and $null -ne $profileData.HardwareLocks) {
+$hl = $profileData.HardwareLocks
+$hwCount = @($hl.CPPCUnhidden).Count + @($hl.TimerTweaks).Count + @($hl.NVMeTweaks).Count + @($hl.GlobalNetwork).Count
+}
+$smLabel = if ($profileData.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $profileData.StartMenuClean -eq $true) {
+"3-Icon Clean Layout"
+} else {
+"Unchanged"
+}
+$dnsLabel = if ($profileData.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $profileData.DnsProfile -and -not [string]::IsNullOrWhiteSpace($profileData.DnsProfile.Provider)) {
+$dohTag = if ($profileData.DnsProfile.EnableDoH) { " [DoH]" } else { "" }
+"$($profileData.DnsProfile.Provider)$dohTag"
+} else {
+"Unchanged"
+}
 $confirmMsg = "Loaded snapshot from '$($profileData.SourceMachine)' ($($profileData.ExportTimestamp)):`n`n" +
 " - Registry Tweaks: $regCount`n" +
 " - Power & Display Optimizations: $pwrCount`n" +
 " - USB Perimeter Locks: $usbCount`n" +
-" - Disabled Services: $svcCount`n" +
+" - Disabled Services / Tasks: $svcCount / $tskCount`n" +
 " - SRP+IFEO Locks: $srpCount`n" +
-" - Affinity Lasso Roster: $affCount`n`n" +
+" - Affinity Lasso / Hardware Locks: $affCount / $hwCount`n" +
+" - Start Menu Layout: $smLabel`n" +
+" - DNS Profile: $dnsLabel`n`n" +
 "Do you want to enforce this profile on the current machine?"
 $ans = [System.Windows.Forms.MessageBox]::Show($confirmMsg, "WinUltix - Import Profile", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
 if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
@@ -3186,9 +4185,8 @@ $modifiedRegItems = @()
 $UltixSync.Progress = 10
 if ($null -ne $Snapshot.CustomSrpRoster) {
 $customSrpKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-if (-not (Test-Path -LiteralPath $customSrpKey)) { New-Item -Path $customSrpKey -Force | Out-Null }
 foreach ($prop in $Snapshot.CustomSrpRoster.PSObject.Properties) {
-Set-ItemProperty -LiteralPath $customSrpKey -Name $prop.Name -Value $prop.Value -Type String -Force
+Set-UltixRegValue -Path $customSrpKey -Name $prop.Name -Value $prop.Value -Type String -Module "PROFILE"
 }
 }
 if (@($Snapshot.RegistryTweaks).Count -gt 0) {
@@ -3211,8 +4209,7 @@ $modifiedRegItems = $toApplyReg
 if ($Snapshot.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $Snapshot.Win32PrioritySeparation) {
 $savedQuantum = [int]$Snapshot.Win32PrioritySeparation
 $prioKey = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
-if (-not (Test-Path -LiteralPath $prioKey)) { New-Item -Path $prioKey -Force | Out-Null }
-Set-ItemProperty -LiteralPath $prioKey -Name "Win32PrioritySeparation" -Value $savedQuantum -Type DWord -Force
+Set-UltixRegValue -Path $prioKey -Name "Win32PrioritySeparation" -Value $savedQuantum -Type DWord -Module "PROFILE"
 $UltixSync.Logs.Enqueue((" -> Restored Quantum Scheduler (Win32PrioritySeparation = 0x{0:X2} / {0} dec)." -f $savedQuantum))
 }
 $UltixSync.Progress = 35
@@ -3278,13 +4275,21 @@ Invoke-ApplyTasks -SelectedItems $toApplyTasks -Operation "Apply"
 }
 }
 $UltixSync.Progress = 90
+if ($Snapshot.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $Snapshot.StartMenuClean -eq $true -and (Get-Command Clear-StartMenu -ErrorAction SilentlyContinue)) {
+$smCur = @(Get-StartMenuState) | Select-Object -First 1
+if ($null -ne $smCur -and $smCur.IsDetected) {
+Clear-StartMenu -Operation "Apply"
+}
+}
+if ($Snapshot.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $Snapshot.DnsProfile -and -not [string]::IsNullOrWhiteSpace($Snapshot.DnsProfile.Provider) -and (Get-Command Set-CustomDNS -ErrorAction SilentlyContinue)) {
+Set-CustomDNS -Provider ([string]$Snapshot.DnsProfile.Provider) -EnableDoH ([bool]$Snapshot.DnsProfile.EnableDoH) -EnableIPv6 ([bool]$Snapshot.DnsProfile.EnableIPv6)
+}
 if (Get-Command Import-UltixHardwareSnapshot -ErrorAction SilentlyContinue) {
 Import-UltixHardwareSnapshot -ProfileData $Snapshot
 } elseif (@($Snapshot.AffinityLasso).Count -gt 0) {
 $affPath = "HKCU:\Software\WinUltix\AffinityLasso"
-if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force | Out-Null }
 foreach ($exe in $Snapshot.AffinityLasso) {
-Set-ItemProperty -LiteralPath $affPath -Name $exe -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $affPath -Name $exe -Value 1 -Type DWord -Module "PROFILE"
 }
 $UltixSync.Logs.Enqueue(" -> Restored $(@($Snapshot.AffinityLasso).Count) process(es) to Affinity Lasso roster.")
 }
@@ -3293,9 +4298,7 @@ return ,$modifiedRegItems
 } -OnComplete ({
 param($modReg)
 Update-Progress 0
-if ($null -ne $modReg -and @($modReg).Count -gt 0) {
-Update-ShellEnvironment -ModifiedItems @($modReg)
-}
+Update-DNSLabel
 Write-GUI "=== PROFILE IMPORT COMPLETED ===`n"
 }.GetNewClosure())
 }
@@ -3611,7 +4614,8 @@ try {
 if ($rule.Type -eq "EventLogs") {
 $channels = @(wevtutil.exe el 2>$null)
 $totalCh  = $channels.Count
-$chIdx    = 0
+Invoke-UltixStep -Command "wevtutil.exe el | ForEach-Object { wevtutil.exe cl `"`$_`" } # Target: $totalCh channels" -Action {
+$chIdx = 0
 foreach ($ch in $channels) {
 $chIdx++
 if ($null -ne $UltixSync -and $totalCh -gt 0 -and ($chIdx % 20 -eq 0)) {
@@ -3619,6 +4623,8 @@ $UltixSync.Progress = [int](($chIdx / $totalCh) * 100)
 }
 & wevtutil.exe cl "$ch" 2>$null
 }
+"Cleared $totalCh Event Viewer channel(s)"
+} -Module "Z1_Cleanup"
 if ($null -ne $UltixSync) {
 $UltixSync.Logs.Enqueue("    [OK] Cleared $totalCh Event Viewer channel(s).")
 }
@@ -3626,10 +4632,13 @@ $UltixSync.Logs.Enqueue("    [OK] Cleared $totalCh Event Viewer channel(s).")
 elseif ($rule.Type -eq "RecycleBin") {
 $path = $rule.Path
 if (Test-Path -LiteralPath $path) {
+Invoke-UltixStep -Command "icacls.exe `"$path\*`" /setowner `"*S-1-5-32-544`" /T /C /Q; Remove-Item -LiteralPath `"$path\*`" -Recurse -Force" -Action {
 Grant-UltixDirectoryAdminAccess -TargetPath "$path\*"
 Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
 Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
+"Purged NTFS Recycle Bin: $path"
+} -Module "Z1_Cleanup"
 }
 }
 elseif ($rule.Type -eq "Files") {
@@ -3650,29 +4659,40 @@ $runningServices = [System.Collections.Generic.List[string]]::new()
 try {
 foreach ($svcName in $servicesToManage) {
 $svcObj = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-if ($null -ne $svcObj -and $svcObj.Status -eq 'Running') {
+if ($null -ne $svcObj) {
+$isSvcRunning = ($svcObj.Status -eq 'Running')
+$svcObj.Dispose()
+if ($isSvcRunning) {
 $runningServices.Add($svcName)
-Stop-Service -Name $svcName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+Stop-UltixService -ServiceName $svcName -Module "Z1_Cleanup"
+}
 }
 }
 if ($svcGroup -eq "CBS") {
-Stop-Process -Name "TiWorker" -Force -ErrorAction SilentlyContinue
+if ((Stop-UltixProcess -Name @("TiWorker") -Module "Z1_Cleanup") -gt 0) {
 Start-Sleep -Milliseconds 300
+}
 }
 foreach ($tPath in $targetPaths) {
 if ([string]::IsNullOrWhiteSpace($tPath) -or -not (Test-Path -LiteralPath $tPath)) { continue }
 if (Test-Path -LiteralPath $tPath -PathType Leaf) {
+Invoke-UltixStep -Command "Remove-Item -LiteralPath '$tPath' -Force" -Action {
 Remove-Item -LiteralPath $tPath -Force -ErrorAction SilentlyContinue
+} -SuccessOutput "Deleted file: $tPath" -Module "Z1_Cleanup"
 } else {
+Invoke-UltixStep -Command "Remove-Item -LiteralPath '$tPath\*' -Recurse -Force" -Action {
 Get-ChildItem -LiteralPath $tPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
 Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
+} -SuccessOutput "Emptied directory: $tPath" -Module "Z1_Cleanup"
 }
 }
 } finally {
 foreach ($svcName in $runningServices) {
 if ($svcName -ne "TrustedInstaller") {
+Invoke-UltixStep -Command "Start-Service -Name '$svcName'" -Action {
 Start-Service -Name $svcName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+} -SuccessOutput "Service '$svcName' restored" -Module "Z1_Cleanup"
 }
 }
 }
@@ -3737,8 +4757,8 @@ $enumRoot.Dispose()
 }
 if ($null -ne $UltixSync) { $UltixSync.Progress = 45 }
 $alwaysLockClasses = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-[void]$alwaysLockClasses.Add("{e2f84ce7-8efa-411c-aa69-97454ca4cb57}") # Extension INF Class
-[void]$alwaysLockClasses.Add("{5c4c3332-344d-483c-8739-259e934c9cc8}") # SoftwareComponent Class
+[void]$alwaysLockClasses.Add("{e2f84ce7-8efa-411c-aa69-97454ca4cb57}")
+[void]$alwaysLockClasses.Add("{5c4c3332-344d-483c-8739-259e934c9cc8}")
 $classRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Class", $false)
 if ($null -ne $classRoot) {
 try {
@@ -3771,9 +4791,72 @@ $clsKey.Dispose()
 $classRoot.Dispose()
 }
 }
-if ($null -ne $UltixSync) { $UltixSync.Progress = 60 }
+if ($null -ne $UltixSync) { $UltixSync.Progress = 55 }
+$activePrintFolders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$printEnvRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Print\Environments", $false)
+if ($null -ne $printEnvRoot) {
+try {
+foreach ($archName in $printEnvRoot.GetSubKeyNames()) {
+$driversRoot = $printEnvRoot.OpenSubKey("$archName\Drivers", $false)
+if ($null -eq $driversRoot) { continue }
+try {
+foreach ($verName in $driversRoot.GetSubKeyNames()) {
+$verKey = $driversRoot.OpenSubKey($verName, $false)
+if ($null -eq $verKey) { continue }
+try {
+foreach ($prnDrvName in $verKey.GetSubKeyNames()) {
+$prnKey = $verKey.OpenSubKey($prnDrvName, $false)
+if ($null -eq $prnKey) { continue }
+try {
+$pInf = [string]$prnKey.GetValue("InfPath", "")
+if ($pInf -match '(?i)\b(oem\d+\.inf)\b') {
+[void]$activeOemInfs.Add($matches[1].ToLowerInvariant())
+} elseif ($pInf -match '(?i)\\DriverStore\\FileRepository\\([^\\]+)') {
+[void]$activePrintFolders.Add($matches[1])
+}
+} finally {
+$prnKey.Dispose()
+}
+}
+} finally {
+$verKey.Dispose()
+}
+}
+} finally {
+$driversRoot.Dispose()
+}
+}
+} finally {
+$printEnvRoot.Dispose()
+}
+}
+if ($null -ne $UltixSync) { $UltixSync.Progress = 65 }
 $repoBase  = "$env:SystemRoot\System32\DriverStore\FileRepository"
 $oemToRepo = @{}
+$drvInfRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\DriverDatabase\DriverInfFiles", $false)
+if ($null -ne $drvInfRoot) {
+try {
+foreach ($infKeyName in $drvInfRoot.GetSubKeyNames()) {
+if ($infKeyName -notmatch '^(?i)(oem\d+\.inf)$') { continue }
+$infKey = $drvInfRoot.OpenSubKey($infKeyName, $false)
+if ($null -eq $infKey) { continue }
+try {
+$pkgFolder = [string]$infKey.GetValue("", "")
+if (-not [string]::IsNullOrWhiteSpace($pkgFolder)) {
+$oemKey = $matches[1].ToLowerInvariant()
+$oemToRepo[$oemKey] = Join-Path $repoBase $pkgFolder.Trim()
+if ($activePrintFolders.Contains($pkgFolder.Trim())) {
+[void]$activeOemInfs.Add($oemKey)
+}
+}
+} finally {
+$infKey.Dispose()
+}
+}
+} finally {
+$drvInfRoot.Dispose()
+}
+}
 $drvDbRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\DriverDatabase\DriverPackages", $false)
 if ($null -ne $drvDbRoot) {
 try {
@@ -3783,7 +4866,13 @@ if ($null -eq $pkgKey) { continue }
 try {
 $oemVal = [string]$pkgKey.GetValue("", "")
 if ($oemVal -match '^(?i)(oem\d+\.inf)$') {
-$oemToRepo[$matches[1].ToLowerInvariant()] = Join-Path $repoBase $pkgName
+$oemKey = $matches[1].ToLowerInvariant()
+if (-not $oemToRepo.ContainsKey($oemKey)) {
+$oemToRepo[$oemKey] = Join-Path $repoBase $pkgName
+}
+if ($activePrintFolders.Contains($pkgName)) {
+[void]$activeOemInfs.Add($oemKey)
+}
 }
 } catch {
 } finally {
@@ -3809,18 +4898,20 @@ foreach ($ln in $lines) {
 $val = ($ln -split ':\s*', 2)[1].Trim()
 if ([string]::IsNullOrWhiteSpace($val) -or $val -eq $oemInf) { continue }
 elseif ($val -match '^\{[0-9a-fA-F\-]{36}\}$') { continue }
-elseif ($origInf -eq "Unknown.inf" -and $val -match '(?i)^[a-z0-9_\-\.]+\.inf$') { $origInf = $val }
-elseif ($val -match '^\d{1,4}[/\.\-]\d{1,2}[/\.\-]\d{1,4}\s+[\d\.]+$') { $verDate = $val }
+elseif ($origInf -eq "Unknown.inf" -and $val -match '(?i)^[^\\/:*?"<>|]+\.inf$') { $origInf = $val }
+elseif ($val -match '^\d{1,4}[/\.\-\s]+\d{1,2}[/\.\-\s]+\d{1,4}\.?\s+[\d\.]+$') { $verDate = $val }
 elseif ([string]::IsNullOrEmpty($provider))  { $provider  = $val }
 elseif ([string]::IsNullOrEmpty($className)) { $className = $val }
 }
+$repoDir = $oemToRepo[$oemInf]
+if ($origInf -eq "Unknown.inf" -and -not [string]::IsNullOrWhiteSpace($repoDir)) {
+$folderLeaf = [System.IO.Path]::GetFileName($repoDir)
+if ($folderLeaf -match '(?i)^(.+?\.inf)_[^_]+_[0-9a-f]{16}$') {
+$origInf = $matches[1]
+}
+}
 if ([string]::IsNullOrEmpty($provider))  { $provider  = "Unknown" }
 if ([string]::IsNullOrEmpty($className)) { $className = "System" }
-$repoDir = $oemToRepo[$oemInf]
-if ([string]::IsNullOrWhiteSpace($repoDir) -and $origInf -ne "Unknown.inf") {
-$cand = Get-ChildItem -LiteralPath $repoBase -Filter "$($origInf)_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($null -ne $cand) { $repoDir = $cand.FullName }
-}
 $bytes  = if (-not [string]::IsNullOrWhiteSpace($repoDir) -and [System.IO.Directory]::Exists($repoDir)) { Get-UltixFastSize -TargetPaths @($repoDir) } else { 0 }
 $sizeMB = [math]::Round($bytes / 1MB, 2)
 $isActive  = $activeOemInfs.Contains($oemInf)
@@ -3902,8 +4993,8 @@ $cur++
 if ($null -ne $UltixSync) { $UltixSync.Progress = [int](($cur / $total) * 100) }
 if ($drv.IsLocked) { continue }
 $UltixSync.Logs.Enqueue(" -> Deleting DriverStore package: $($drv.OemInf) ($($drv.OriginalInf) - $($drv.SizeDisplay.Trim()))...")
-$null = pnputil.exe /delete-driver $drv.OemInf 2>&1
-if ($LASTEXITCODE -eq 0) {
+$pnpExit = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/delete-driver", $drv.OemInf) -Module "Z1_Cleanup"
+if ($pnpExit -eq 0) {
 $freedMB += $drv.SizeMB
 $UltixSync.Logs.Enqueue("    [OK] Purged $($drv.OemInf) from DriverStore.")
 } else {
@@ -4045,11 +5136,43 @@ $uKey.Dispose()
 $uninstRoot.Dispose()
 }
 }
+foreach ($prof in (Get-UltixUserProfiles)) {
+if (-not $prof.IsHiveLoaded -or $prof.SID -notmatch '^S-1-5-21-') { continue }
+foreach ($uRel in @("Software\Microsoft\Windows\CurrentVersion\Uninstall", "Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
+$uUserRoot = [Microsoft.Win32.Registry]::Users.OpenSubKey("$($prof.SID)\$uRel", $false)
+if ($null -eq $uUserRoot) { continue }
+try {
+foreach ($uName in $uUserRoot.GetSubKeyNames()) {
+$uKey = $uUserRoot.OpenSubKey($uName, $false)
+if ($null -eq $uKey) { continue }
+try {
+$lp = [string]$uKey.GetValue("LocalPackage", "")
+if (-not [string]::IsNullOrWhiteSpace($lp)) {
+$leaf = [System.IO.Path]::GetFileName($lp.Trim()).ToLowerInvariant()
+if (-not $activePackages.ContainsKey($leaf)) {
+$dn  = [string]$uKey.GetValue("DisplayName", "")
+$pub = [string]$uKey.GetValue("Publisher", "")
+$activePackages[$leaf] = [PSCustomObject]@{
+ProductName = if (-not [string]::IsNullOrWhiteSpace($dn))  { $dn }  else { $uName }
+Publisher   = if (-not [string]::IsNullOrWhiteSpace($pub)) { $pub } else { "Installed User App" }
+}
+}
+}
+} finally {
+$uKey.Dispose()
+}
+}
+} finally {
+$uUserRoot.Dispose()
+}
+}
+}
 if ($null -ne $UltixSync) { $UltixSync.Progress = 40 }
 $files = @(Get-ChildItem -LiteralPath $installerDir -File -Force -ErrorAction SilentlyContinue |
 Where-Object { $_.Extension -match '^\.(?i)(msi|msp)$' })
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $wiCom = $null
+try {
 try { $wiCom = New-Object -ComObject WindowsInstaller.Installer -ErrorAction SilentlyContinue } catch { }
 $totalFiles = [math]::Max(1, $files.Count)
 $idx = 0
@@ -4097,8 +5220,10 @@ IsDetected    = (-not $isActive)
 UIDisplayName = "$($file.Name) ($prodName | $pubName) [ $sizeMB MB ]"
 })
 }
+} finally {
 if ($null -ne $wiCom) {
-[void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wiCom)
+[void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($wiCom)
+}
 }
 $patchCacheDir = "$installerDir\`$PatchCache`$\Managed"
 if ([System.IO.Directory]::Exists($patchCacheDir)) {
@@ -4182,15 +5307,19 @@ if ($null -ne $UltixSync) { $UltixSync.Progress = [int](($cur / $total) * 100) }
 if ($pkg.IsLocked) { continue }
 try {
 if ($pkg.IsDirectory) {
+Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$($pkg.FullPath)\*' -Recurse -Force" -Module "Z1_Cleanup"
 Get-ChildItem -LiteralPath $pkg.FullPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
 Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
+Write-UltixExpertResult -OutputText "Purged $($pkg.FullPath) ($($pkg.SizeDisplay.Trim()))" -ExitCode 0 -Module "Z1_Cleanup"
 $freedMB += $pkg.SizeMB
 $UltixSync.Logs.Enqueue("    [OK] Purged Windows Installer `$PatchCache`$ ($($pkg.SizeDisplay.Trim())).")
 } elseif (Test-Path -LiteralPath $pkg.FullPath -PathType Leaf) {
+Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$($pkg.FullPath)' -Force" -Module "Z1_Cleanup"
 $fItem = Get-Item -LiteralPath $pkg.FullPath -Force -ErrorAction SilentlyContinue
 if ($null -ne $fItem) { $fItem.Attributes = 'Normal' }
 Remove-Item -LiteralPath $pkg.FullPath -Force -ErrorAction Stop
+Write-UltixExpertResult -OutputText "Deleted $($pkg.FileName) ($($pkg.SizeDisplay.Trim()))" -ExitCode 0 -Module "Z1_Cleanup"
 $freedMB += $pkg.SizeMB
 $UltixSync.Logs.Enqueue("    [OK] Deleted orphaned $($pkg.FileName) ($($pkg.ProductName) - $($pkg.SizeDisplay.Trim())).")
 }
@@ -4217,6 +5346,7 @@ function Test-IsOrphanedDiskPath {
 param([string]$RawPath, [switch]$IsDirectory)
 if ([string]::IsNullOrWhiteSpace($RawPath)) { return $false }
 $clean = [System.Environment]::ExpandEnvironmentVariables($RawPath.Trim().Trim('"')).Trim()
+$clean = $clean -replace '^(\\\\\?\\|\\\?\?\\)', ''
 if ($clean -notmatch '^([a-zA-Z]):\\') { return $false }
 $driveLetter = $matches[1]
 if (-not $readyDrives.Contains($driveLetter)) { return $false }
@@ -4384,13 +5514,21 @@ $exePath = $matches[1]
 $exePath = $exePath.Trim('"')
 }
 if (Test-IsOrphanedDiskPath -RawPath $exePath) {
+$extraProps = @{}
+foreach ($pName in $sub.Property) {
+if (-not [string]::IsNullOrEmpty($pName)) {
+$extraProps[$pName] = [string]$sub.GetValue($pName)
+}
+}
+$cleanRegPath = $sub.PSPath -replace '^Microsoft\.PowerShell\.Core\\', ''
 $orphans.Add([PSCustomObject]@{
 Category      = "[App Paths]"
 TargetName    = $sub.PSChildName
 MissingPath   = $exePath
-RegPath       = $sub.PSPath
+RegPath       = $cleanRegPath
 ValueName     = "(Default)"
 RawValueData  = $defVal
+SubValues     = $extraProps
 ValueKind     = "String"
 EntryType     = "SubKey"
 IsDetected    = $true
@@ -4470,26 +5608,51 @@ $bData = @(Get-Content -LiteralPath $selectedBackup -Raw -Encoding UTF8 -ErrorAc
 foreach ($entry in $bData) {
 if ($null -eq $entry -or [string]::IsNullOrWhiteSpace($entry.RegPath)) { continue }
 if ($entry.EntryType -eq "SubKey") {
-if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
-Set-Item -LiteralPath $entry.RegPath -Value ([string]$entry.RawValueData) -Force -ErrorAction SilentlyContinue
+Set-UltixRegValue -Path $entry.RegPath -Name "(Default)" -Value ([string]$entry.RawValueData) -Type String -Module "Z1_Cleanup"
+if ($entry.PSObject.Properties.Match("SubValues").Count -gt 0 -and $null -ne $entry.SubValues) {
+foreach ($sp in $entry.SubValues.PSObject.Properties) {
+Set-UltixRegValue -Path $entry.RegPath -Name $sp.Name -Value ([string]$sp.Value) -Type String -Module "Z1_Cleanup"
+}
+}
 $restored++
 } else {
 if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
 $kind = if ($entry.PSObject.Properties.Match("ValueKind").Count -gt 0 -and $entry.ValueKind) { [string]$entry.ValueKind } else { "String" }
 $regItem = Get-Item -LiteralPath $entry.RegPath -ErrorAction SilentlyContinue
 if ($null -ne $regItem) {
+$wKey = $null
+try {
 $wKey = $regItem.OpenSubKey("", $true)
+} catch {
+Grant-UltixRegistryKeyAccess -RegistryPath $entry.RegPath
+try { $wKey = $regItem.OpenSubKey("", $true) } catch { }
+} finally {
 $regItem.Dispose()
+}
 if ($null -ne $wKey) {
 try {
 if ($kind -eq "Binary" -and -not [string]::IsNullOrWhiteSpace($entry.RawValueData)) {
 [byte[]]$bytes = [Convert]::FromBase64String([string]$entry.RawValueData)
+Invoke-UltixStep -Command "Set-ItemProperty -LiteralPath '$($entry.RegPath)' -Name '$($entry.ValueName)' -Type Binary -Force" -Action {
 $wKey.SetValue([string]$entry.ValueName, $bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
+} -SuccessOutput "Restored Binary value '$($entry.ValueName)'" -Module "Z1_Cleanup"
 } elseif ($kind -eq "DWord") {
-$dw = if ($entry.RawValueData -match '^\d+$') { [int]$entry.RawValueData } else { 1 }
-$wKey.SetValue([string]$entry.ValueName, $dw, [Microsoft.Win32.RegistryValueKind]::DWord)
+$dw = 1
+if ($entry.RawValueData -match '^-?\d+$') {
+$parsed64 = [int64]$entry.RawValueData
+$dw = if ($parsed64 -gt [int]::MaxValue) {
+[BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$parsed64), 0)
 } else {
+[int]$parsed64
+}
+}
+Invoke-UltixStep -Command "Set-ItemProperty -LiteralPath '$($entry.RegPath)' -Name '$($entry.ValueName)' -Value $dw -Type DWord -Force" -Action {
+$wKey.SetValue([string]$entry.ValueName, $dw, [Microsoft.Win32.RegistryValueKind]::DWord)
+} -SuccessOutput "Restored DWord value '$($entry.ValueName)' = $dw" -Module "Z1_Cleanup"
+} else {
+Invoke-UltixStep -Command "Set-ItemProperty -LiteralPath '$($entry.RegPath)' -Name '$($entry.ValueName)' -Type String -Force" -Action {
 $wKey.SetValue([string]$entry.ValueName, [string]$entry.RawValueData, [Microsoft.Win32.RegistryValueKind]::String)
+} -SuccessOutput "Restored String value '$($entry.ValueName)'" -Module "Z1_Cleanup"
 }
 $restored++
 } finally {
@@ -4545,17 +5708,31 @@ $UltixSync.Progress = [int](($cur / $total) * 100)
 try {
 if ($item.EntryType -eq "SubKey") {
 if (Test-Path -LiteralPath $item.RegPath) {
-Remove-Item -LiteralPath $item.RegPath -Recurse -Force -ErrorAction Stop
+try {
+Remove-UltixRegItem -Path $item.RegPath -Module "Z1_Cleanup"
+} catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+Grant-UltixRegistryKeyAccess -RegistryPath $item.RegPath
+Remove-UltixRegItem -Path $item.RegPath -Module "Z1_Cleanup"
+}
 $removed++
 }
 } else {
 $regItem = Get-Item -LiteralPath $item.RegPath -ErrorAction Stop
 if ($null -ne $regItem) {
+$wKey = $null
+try {
 $wKey = $regItem.OpenSubKey("", $true)
+} catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+Grant-UltixRegistryKeyAccess -RegistryPath $item.RegPath
+$wKey = $regItem.OpenSubKey("", $true)
+} finally {
 $regItem.Dispose()
+}
 if ($null -ne $wKey) {
 try {
+Invoke-UltixStep -Command "Remove-ItemProperty -LiteralPath '$($item.RegPath)' -Name '$($item.ValueName)' -Force" -Action {
 $wKey.DeleteValue([string]$item.ValueName, $true)
+} -SuccessOutput "Deleted value '$($item.ValueName)'" -Module "Z1_Cleanup"
 $removed++
 } finally {
 $wKey.Dispose()
@@ -4563,7 +5740,11 @@ $wKey.Dispose()
 }
 }
 }
-} catch { }
+} catch {
+if ($null -ne $UltixSync) {
+$UltixSync.Logs.Enqueue("    [!] Access denied / skipped ($($item.TargetName)): $($_.Exception.Message)")
+}
+}
 }
 return [PSCustomObject]@{
 RemovedCount = $removed
@@ -4579,14 +5760,33 @@ Write-GUI " -> [OK] Purged $($resObj.RemovedCount) orphaned registry reference(s
 }.GetNewClosure())
 }
 function Get-GhostServicesState {
+Add-Type -AssemblyName System.ServiceProcess -ErrorAction SilentlyContinue
 $ghosts = [System.Collections.Generic.List[PSCustomObject]]::new()
 $readyDrives = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($drv in ([System.IO.DriveInfo]::GetDrives())) {
 if ($drv.IsReady) { [void]$readyDrives.Add($drv.Name.Substring(0, 1)) }
 }
 $runningNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-[System.ServiceProcess.ServiceController]::GetServices() | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.ServiceName) }
-[System.ServiceProcess.ServiceController]::GetDevices()  | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.ServiceName) }
+$allSvcs = @([System.ServiceProcess.ServiceController]::GetServices())
+try {
+foreach ($sc in $allSvcs) {
+if ($sc.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+[void]$runningNames.Add($sc.ServiceName)
+}
+}
+} finally {
+foreach ($sc in $allSvcs) { if ($null -ne $sc) { $sc.Dispose() } }
+}
+$allDevs = @([System.ServiceProcess.ServiceController]::GetDevices())
+try {
+foreach ($dv in $allDevs) {
+if ($dv.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+[void]$runningNames.Add($dv.ServiceName)
+}
+}
+} finally {
+foreach ($dv in $allDevs) { if ($null -ne $dv) { $dv.Dispose() } }
+}
 $svcRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
 if ($null -eq $svcRoot) { return $ghosts }
 try {
@@ -4673,7 +5873,8 @@ if ($null -ne $UltixSync) {
 $UltixSync.Progress = [int](($current / $total) * 100)
 $UltixSync.Logs.Enqueue(" -> Removing Ghost Service: $($item.Name)")
 }
-Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($item.Name)" -Recurse -Force -ErrorAction SilentlyContinue
+$svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($item.Name)"
+Remove-UltixRegItem -Path $svcRegPath -IgnoreMissing -Module "Z1_Cleanup"
 }
 } -OnComplete ({
 param($nullOut)
@@ -4763,7 +5964,7 @@ $allTabButtons.AddRange($row.Controls)
 $TabControl.Controls.Add($tabClean)
 }
 function Get-UltixProtectedAppxRegex {
-return "PeopleExperienceHost|XboxGameCallableUI|XboxIdentityProvider|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|Microsoft\.Winget\.Source|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
+return "PeopleExperienceHost|Microsoft\.GamingServices|XboxGameCallableUI|XboxIdentityProvider|Microsoft\.XboxGameOverlay|ShellExperienceHost|StartMenuExperienceHost|immersivecontrolpanel|SecHealthUI|WindowsDefender|WindowsStore|StorePurchaseApp|DesktopAppInstaller|Microsoft\.Winget\.|Microsoft\.WindowsPackageManager|WindowsCalculator|WindowsNotepad|Paint|WindowsTerminal|ScreenSketch|MicrosoftEdge\.Stable|Microsoft\.VCLibs|Microsoft\.NET|Microsoft\.UI\.Xaml|Microsoft\.WinJS|Microsoft\.Services\.Store|Microsoft\.WindowsAppRuntime|Microsoft\.WindowsAppSDK|Microsoft\.Graphics\.Canvas|Microsoft\.DirectX|Microsoft\.AIFabric|Microsoft\.Windows\.AugLoop|MicrosoftWindows\.Client\.(?!WebExperience)|Windows\.CBSPreview|Windows\.PrintDialog|Microsoft\.AsyncTextService|Microsoft\.AccountsControl|Microsoft\.CredDialogHost|Microsoft\.ECApp|Microsoft\.LockApp|Microsoft\.BioEnrollment|ApplicationCompatibilityEnhancements|HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebMediaExtensions|WebpImageExtension|RawImageExtension|AV1VideoExtension|AVCEncoderVideoExtension|MPEG2VideoExtension"
 }
 function Get-UltixInboxNicFodStatus {
 $usingInboxWifi = $false
@@ -4780,12 +5981,10 @@ if ($null -eq $drvKey) { continue }
 try {
 $infPath = [string]$drvKey.GetValue("InfPath", "")
 if ([string]::IsNullOrWhiteSpace($infPath) -or $infPath -match '^(?i)oem\d+\.inf$') { continue }
-$matchingId = [string]$drvKey.GetValue("MatchingDeviceId", "")
-if ($matchingId -notmatch '^(?i)(PCI|USB)\\') { continue }
 $drvDesc = [string]$drvKey.GetValue("DriverDesc", "")
 $isActiveHw = $false
 $devInstId  = [string]$drvKey.GetValue("DeviceInstanceID", "")
-if ($devInstId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($devInstId) -eq 0) {
+if ($devInstId -match '^(?i)(PCI|USB|ACPI|SD)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($devInstId) -eq 0) {
 $isActiveHw = $true
 }
 if (-not $isActiveHw) {
@@ -4794,7 +5993,7 @@ if ($null -ne $linkKey) {
 try {
 [string[]]$rootDev = $linkKey.GetValue("RootDevice", @())
 foreach ($pnpId in $rootDev) {
-if ($pnpId -match '^(?i)(PCI|USB)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($pnpId) -eq 0) {
+if ($pnpId -match '^(?i)(PCI|USB|ACPI|SD)\\' -and [WinUltix.PnpTree]::GetDeviceConfigStatus($pnpId) -eq 0) {
 $isActiveHw = $true
 break
 }
@@ -4805,7 +6004,10 @@ $linkKey.Dispose()
 }
 }
 if ($isActiveHw) {
-if ($infPath -match '(?i)(wlan|wifi|netwtw|netrtwl|netr28|netathr|netbc6)' -or $drvDesc -match '(?i)(Wi-Fi|WiFi|Wireless|802\.11|WLAN)') {
+$ifType    = $drvKey.GetValue("*IfType", 0)
+$physMedia = $drvKey.GetValue("*PhysicalMediaType", 0)
+$isWlan    = ($ifType -eq 71 -or $physMedia -eq 9 -or $infPath -match '(?i)(wlan|wifi|netwtw|netrtwl|netr28|netathr|netbc6)' -or $drvDesc -match '(?i)(Wi-Fi|WiFi|Wireless|802\.11|WLAN)')
+if ($isWlan) {
 $usingInboxWifi = $true
 } else {
 $usingInboxEth = $true
@@ -4857,7 +6059,9 @@ $hasBinary = $true
 break
 }
 }
-$liveProc  = Get-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue
+$liveProcs = @(Get-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue)
+$hasLiveProc = ($liveProcs.Count -gt 0)
+foreach ($lp in $liveProcs) { if ($null -ne $lp) { $lp.Dispose() } }
 $odTasks   = @(Get-ScheduledTask -TaskName "*OneDrive*" -ErrorAction SilentlyContinue)
 $hasRunKey = $false
 $runRoots = [System.Collections.Generic.List[string]]::new()
@@ -4876,7 +6080,7 @@ break
 }
 }
 }
-$isCoreDetected = ($hasBinary -or $hasRunKey -or ($null -ne $liveProc) -or ($odTasks.Count -gt 0))
+$isCoreDetected = ($hasBinary -or $hasRunKey -or $hasLiveProc -or ($odTasks.Count -gt 0))
 $results.Add([PSCustomObject]@{
 UIDisplayName = "Core: OneDrive Setup and Startup Routine"
 IsDetected    = $isCoreDetected
@@ -5089,7 +6293,7 @@ $appCatalog = @(
 @{ Label = "Mail & Calendar (CommunicationsApps)";        Pattern = "*windowscommunicationsapps*" }
 @{ Label = "Microsoft 365 / Office Hub";                  Pattern = "*MicrosoftOfficeHub*" }
 @{ Label = "Microsoft OneNote (UWP)";                     Pattern = "*OneNote*" }
-@{ Label = "Microsoft Family Safety";                     Pattern = "*MicrosoftFamily*|*Family*" }
+@{ Label = "Microsoft Family Safety";                     Pattern = "*MicrosoftFamily*|*ParentalControls*" }
 @{ Label = "Microsoft Clipchamp Video Editor";            Pattern = "*Clipchamp*" }
 @{ Label = "Windows Dev Home (DevHome)";                  Pattern = "*DevHome*" }
 @{ Label = "Power Automate Desktop";                      Pattern = "*PowerAutomateDesktop*" }
@@ -5139,7 +6343,7 @@ $appCatalog = @(
 @{ Label = "Norton Security Suite";                       Pattern = "*Norton*" }
 @{ Label = "Lenovo OEM Bloatware & Vantage Stubs";        Pattern = "*Lenovo*" }
 @{ Label = "Dell SupportAssist & OEM Stubs";              Pattern = "*Dell*" }
-@{ Label = "HP Support Assistant & OEM Stubs";            Pattern = "*HP*" }
+@{ Label = "HP Support Assistant & OEM Stubs";            Pattern = "AD2F1837.*|*HPInc*|*Hewlett-Packard*|*HPSupportAssistant*|*HPJumpStarts*|*HPSystemInformation*" }
 )
 $protectedRegex = Get-UltixProtectedAppxRegex
 $installedAppx = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.IsFramework -eq $false -and $_.NonRemovable -eq $false -and $_.Name -notmatch $protectedRegex })
@@ -5293,10 +6497,12 @@ Move-Item -LiteralPath $binPath -Destination $trashPath -Force -ErrorAction Sile
 Get-ChildItem -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
 try { $_.Attributes = 'Normal' } catch {}
 }
+Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$TargetDir' -Recurse -Force" -Module "Z2_Bloatware"
 Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
+Write-UltixExpertResult -OutputText "Removed OneDrive directory: $TargetDir" -ExitCode 0 -Module "Z2_Bloatware"
 if (Test-Path -LiteralPath $TargetDir) {
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [*] Releasing Shell Extension lock via Explorer refresh...") }
-Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+[void](Stop-UltixProcess -Name @("explorer") -Module "Z2_Bloatware")
 Start-Sleep -Milliseconds 600
 Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
 if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
@@ -5304,8 +6510,9 @@ Start-Process "explorer.exe"
 }
 }
 }
-Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+if ((Stop-UltixProcess -Name @("OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth") -Module "Z2_Bloatware") -gt 0) {
 Start-Sleep -Milliseconds 600
+}
 $userProfiles = @(Get-UltixUserProfiles)
 $loadedHives  = @($userProfiles | Where-Object { $_.IsHiveLoaded -and -not [string]::IsNullOrWhiteSpace($_.HiveRoot) })
 if ($loadedHives.Count -eq 0) {
@@ -5321,10 +6528,12 @@ $UltixSync.Logs.Enqueue(" -> Purging: $($item.UIDisplayName)")
 $data = $item.ActionData
 try {
 if ($data.Type -eq "Core") {
+Write-UltixExpertCommand -CommandText "Get-ScheduledTask -TaskName '*OneDrive*' | Unregister-ScheduledTask -Confirm:`$false" -Module "Z2_Bloatware"
 Get-ScheduledTask -TaskName "*OneDrive*" -ErrorAction SilentlyContinue | ForEach-Object {
 Stop-ScheduledTask -InputObject $_ -ErrorAction SilentlyContinue | Out-Null
 Unregister-ScheduledTask -InputObject $_ -Confirm:$false -ErrorAction SilentlyContinue
 }
+Write-UltixExpertResult -OutputText "Unregistered OneDrive scheduled tasks" -ExitCode 0 -Module "Z2_Bloatware"
 $installDirs = [System.Collections.Generic.List[string]]::new()
 foreach ($d in @("$env:ProgramFiles\Microsoft OneDrive", "${env:ProgramFiles(x86)}\Microsoft OneDrive", "$env:LOCALAPPDATA\Microsoft\OneDrive")) {
 if (-not [string]::IsNullOrWhiteSpace($d)) { $installDirs.Add($d) }
@@ -5354,15 +6563,19 @@ $setupCandidates.Add("$env:SystemRoot\SysWOW64\OneDriveSetup.exe")
 $setupCandidates.Add("$env:SystemRoot\System32\OneDriveSetup.exe")
 foreach ($setupExe in ($setupCandidates | Select-Object -Unique)) {
 if ([System.IO.File]::Exists($setupExe)) {
-Start-Process -FilePath $setupExe -ArgumentList "/uninstall" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
-Start-Process -FilePath $setupExe -ArgumentList "/uninstall /allusers" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+[void](Invoke-UltixExe -FilePath $setupExe -Arguments @("/uninstall") -Module "Z2_Bloatware")
+[void](Invoke-UltixExe -FilePath $setupExe -Arguments @("/uninstall", "/allusers") -Module "Z2_Bloatware")
 break
 }
 }
 $childProcs = @(Get-Process -Name "OneDriveSetup", "OneDrive", "OneDriveStandaloneUpdater", "FileCoAuth" -ErrorAction SilentlyContinue)
 if ($childProcs.Count -gt 0) {
+try {
 $childProcs | Wait-Process -Timeout 8 -ErrorAction SilentlyContinue
-Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+} finally {
+foreach ($cp in $childProcs) { if ($null -ne $cp) { $cp.Dispose() } }
+}
+[void](Stop-UltixProcess -Name @("OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth") -Module "Z2_Bloatware")
 }
 Start-Sleep -Milliseconds 500
 }
@@ -5393,7 +6606,7 @@ if ($null -ne $rKey) {
 try {
 foreach ($valName in $rKey.Property) {
 if ($valName -like "OneDrive*") {
-Remove-ItemProperty -LiteralPath $rPath -Name $valName -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $rPath -Name $valName -IgnoreMissing -Module "Z2_Bloatware"
 }
 }
 } finally {
@@ -5419,7 +6632,7 @@ $shouldRemove = $true
 $sub.Dispose()
 }
 if ($shouldRemove -and -not [string]::IsNullOrWhiteSpace($cName)) {
-Remove-Item -LiteralPath "$nsPath\$cName" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path "$nsPath\$cName" -IgnoreMissing -Module "Z2_Bloatware"
 }
 }
 }
@@ -5431,7 +6644,7 @@ $UltixSync.Logs.Enqueue("    [+] Core installation payloads, tasks & multi-profi
 elseif ($data.Type -eq "Registry") {
 $registryTargetsToVerify.Add([string]$data.Path)
 if (Test-Path -LiteralPath $data.Path) {
-Remove-Item -LiteralPath $data.Path -Recurse -Force -ErrorAction Stop
+Remove-UltixRegItem -Path $data.Path -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Registry key removed: $($data.Path)") }
 }
 }
@@ -5448,10 +6661,10 @@ $UltixSync.Logs.Enqueue("    [!] Error purging $($item.UIDisplayName): $($_.Exce
 }
 }
 }
-Stop-Process -Name "OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth" -Force -ErrorAction SilentlyContinue
+[void](Stop-UltixProcess -Name @("OneDrive", "OneDriveSetup", "OneDriveStandaloneUpdater", "FileCoAuth") -Module "Z2_Bloatware")
 foreach ($regPath in ($registryTargetsToVerify | Select-Object -Unique)) {
-if (-not [string]::IsNullOrWhiteSpace($regPath) -and (Test-Path -LiteralPath $regPath)) {
-Remove-Item -LiteralPath $regPath -Recurse -Force -ErrorAction SilentlyContinue
+if (-not [string]::IsNullOrWhiteSpace($regPath)) {
+Remove-UltixRegItem -Path $regPath -IgnoreMissing -Module "Z2_Bloatware"
 }
 }
 if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
@@ -5482,9 +6695,12 @@ $UltixSync.Logs.Enqueue(" -> Removing Capability: $($item.UIDisplayName)")
 }
 foreach ($cap in $item.ActionData) {
 try {
+Write-UltixExpertCommand -CommandText "Remove-WindowsCapability -Online -Name '$($cap.Name)'" -Module "Z2_Bloatware"
 Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "Removed FOD capability: $($cap.Name)" -ExitCode 0 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Removed FOD: $($cap.Name)") }
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to remove $($cap.Name): $($_.Exception.Message)") }
 }
 }
@@ -5515,13 +6731,22 @@ $UltixSync.Logs.Enqueue(" -> Cleaning: $($item.UIDisplayName)")
 }
 try {
 if ($item.ActionData.Type -eq "Framework") {
+Write-UltixExpertCommand -CommandText "Remove-AppxPackage -Package '$($item.ActionData.Target)' -AllUsers" -Module "Z2_Bloatware"
+try {
 Remove-AppxPackage -Package $item.ActionData.Target -AllUsers -ErrorAction Stop
+} catch {
+Remove-AppxPackage -Package $item.ActionData.Target -ErrorAction Stop
+}
+Write-UltixExpertResult -OutputText "Removed orphaned framework: $($item.ActionData.Target)" -ExitCode 0 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Removed orphaned framework: $($item.ActionData.Target)") }
 } elseif ($item.ActionData.Type -eq "Provisioned") {
+Write-UltixExpertCommand -CommandText "Remove-AppxProvisionedPackage -Online -PackageName '$($item.ActionData.Target)'" -Module "Z2_Bloatware"
 Remove-AppxProvisionedPackage -Online -PackageName $item.ActionData.Target -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "Deprovisioned orphaned base: $($item.ActionData.Target)" -ExitCode 0 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Deprovisioned orphaned base: $($item.ActionData.Target)") }
 }
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) {
 $UltixSync.Logs.Enqueue("    [!] Error removing $($item.UIDisplayName): $($_.Exception.Message)")
 }
@@ -5545,7 +6770,17 @@ Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @(,$SelectedIt
 param([array]$Items)
 $total   = $Items.Count
 $current = 0
-Stop-Process -Name "Widgets", "WidgetService", "StoreExperienceHost", "WinStore.App", "Copilot", "msteams", "olk", "aixhost", "GameBar" -Force -ErrorAction SilentlyContinue
+$procsToKill = [System.Collections.Generic.List[string]]::new()
+foreach ($sel in $Items) {
+if ($sel.UIDisplayName -match '(?i)Widgets')          { $procsToKill.Add("Widgets"); $procsToKill.Add("WidgetService") }
+if ($sel.UIDisplayName -match '(?i)Copilot|Recall')   { $procsToKill.Add("Copilot"); $procsToKill.Add("aixhost") }
+if ($sel.UIDisplayName -match '(?i)Teams')            { $procsToKill.Add("msteams") }
+if ($sel.UIDisplayName -match '(?i)New Outlook')      { $procsToKill.Add("olk") }
+if ($sel.UIDisplayName -match '(?i)Xbox Game Bar')    { $procsToKill.Add("GameBar") }
+}
+if ($procsToKill.Count -gt 0) {
+[void](Stop-UltixProcess -Name @($procsToKill | Select-Object -Unique) -Module "Z2_Bloatware")
+}
 $provisionedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($p in (Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)) {
 if (-not [string]::IsNullOrWhiteSpace($p.PackageName)) {
@@ -5570,22 +6805,28 @@ foreach ($h in $loadedHives) {
 $aiPolicies.Add("$($h.HiveRoot)\Software\Policies\Microsoft\Windows\WindowsAI")
 }
 foreach ($pol in ($aiPolicies | Select-Object -Unique)) {
-if (-not (Test-Path -LiteralPath $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
-Set-ItemProperty -LiteralPath $pol -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $pol -Name "TurnOffSavingSnapshots" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+try {
+Set-UltixRegValue -Path $pol -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -Module "Z2_Bloatware"
+Set-UltixRegValue -Path $pol -Name "TurnOffSavingSnapshots" -Value 1 -Type DWord -Module "Z2_Bloatware"
+} catch { }
 }
 if ($item.ActionData.RecallFeature -eq $true) {
 if ($null -ne $UltixSync) {
 $UltixSync.Logs.Enqueue("    [*] Stripping Windows Recall Optional Feature payload via CBS...")
 }
 try {
+Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -Remove -NoRestart" -Module "Z2_Bloatware"
 Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -Remove -NoRestart -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "Recall feature disabled and payload removed" -ExitCode 0 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled and payload removed.") }
 } catch {
 try {
+Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -NoRestart" -Module "Z2_Bloatware"
 Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -NoRestart -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "Recall feature disabled" -ExitCode 0 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled.") }
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] CBS Recall feature modification skipped: $($_.Exception.Message)") }
 }
 }
@@ -5602,25 +6843,33 @@ foreach ($h in $loadedHives) {
 $policies.Add("$($h.HiveRoot)\Software\Policies\Microsoft\Windows\WindowsCopilot")
 }
 foreach ($pol in ($policies | Select-Object -Unique)) {
-if (-not (Test-Path -LiteralPath $pol)) { New-Item -Path $pol -Force -ErrorAction SilentlyContinue | Out-Null }
-Set-ItemProperty -LiteralPath $pol -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+try {
+Set-UltixRegValue -Path $pol -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -Module "Z2_Bloatware"
+} catch { }
 }
 }
 foreach ($pkg in $item.ActionData.Installed) {
 $pfn = $pkg.PackageFamilyName
 try {
+Write-UltixExpertCommand -CommandText "Remove-AppxPackage -Package '$($pkg.PackageFullName)' -AllUsers" -Module "Z2_Bloatware"
 try {
 Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
 [void]$provisionedSet.Remove($pkg.PackageFullName)
 } catch {
 Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
 }
+Write-UltixExpertResult -OutputText "Removed Appx package: $($pkg.Name)" -ExitCode 0 -Module "Z2_Bloatware"
 if (-not [string]::IsNullOrWhiteSpace($pfn)) {
 $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$pfn"
-if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+if (-not (Test-Path -LiteralPath $deprovPath)) {
+Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $pfn" -ExitCode 0 -Module "Z2_Bloatware"
+}
 }
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Removed Appx: $($pkg.Name)") }
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 if ($pkg.Name -match "(?i)Copilot|Recall") {
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] API uninstallation blocked for $($pkg.Name). Relying on GPO lockdown.") }
 } else {
@@ -5631,16 +6880,23 @@ if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [-] Error removing $($p
 foreach ($prov in $item.ActionData.Provisioned) {
 if (-not $provisionedSet.Contains($prov.PackageName)) { continue }
 try {
+Write-UltixExpertCommand -CommandText "Remove-AppxProvisionedPackage -Online -PackageName '$($prov.PackageName)'" -Module "Z2_Bloatware"
 Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop | Out-Null
 [void]$provisionedSet.Remove($prov.PackageName)
+Write-UltixExpertResult -OutputText "Deprovisioned base image: $($prov.DisplayName)" -ExitCode 0 -Module "Z2_Bloatware"
 $pkgParts = $prov.PackageName -split '_'
 if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
 $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
 $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
-if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+if (-not (Test-Path -LiteralPath $deprovPath)) {
+Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $provPfn" -ExitCode 0 -Module "Z2_Bloatware"
+}
 }
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Deprovisioned base image: $($prov.DisplayName)") }
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 [void]$provisionedSet.Remove($prov.PackageName)
 if ($_.Exception.HResult -notin @(-2147024894, -2147024893) -and $_.Exception.Message -notmatch "(?i)0x80070002|0x80070003") {
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [-] Error deprovisioning $($prov.DisplayName): $($_.Exception.Message)") }
@@ -5674,9 +6930,12 @@ $UltixSync.Progress = [int](($current / $total) * 100)
 $UltixSync.Logs.Enqueue(" -> Purging CBS Stub: $($item.UIDisplayName)")
 }
 try {
+Write-UltixExpertCommand -CommandText "Remove-WindowsPackage -Online -PackageName '$($item.ActionData)' -NoRestart" -Module "Z2_Bloatware"
 Remove-WindowsPackage -Online -PackageName $item.ActionData -NoRestart -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "Eradicated CBS stub: $($item.ActionData)" -ExitCode 0 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [OK] Eradicated stub package: $($item.ActionData)") }
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Error purging stub: $($_.Exception.Message)") }
 }
 }
@@ -5727,17 +6986,24 @@ $current++
 $UltixSync.Progress = [int](($current / $total) * 100)
 $UltixSync.Logs.Enqueue(" -> Removing Appx: $($app.Name)")
 try {
+Write-UltixExpertCommand -CommandText "Remove-AppxPackage -Package '$($app.PackageFullName)' -AllUsers" -Module "Z2_Bloatware"
 try {
 Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
 } catch {
 Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
 }
+Write-UltixExpertResult -OutputText "Removed Appx package: $($app.Name)" -ExitCode 0 -Module "Z2_Bloatware"
 if (-not [string]::IsNullOrWhiteSpace($app.PackageFamilyName)) {
 $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$($app.PackageFamilyName)"
-if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+if (-not (Test-Path -LiteralPath $deprovPath)) {
+Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $($app.PackageFamilyName)" -ExitCode 0 -Module "Z2_Bloatware"
+}
 }
 $UltixSync.Logs.Enqueue("    [OK] $($app.Name) removed and deprovisioned.")
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 $UltixSync.Logs.Enqueue("    [!] Error removing $($app.Name): $($_.Exception.Message)")
 }
 }
@@ -5788,15 +7054,22 @@ $current++
 $UltixSync.Progress = [int](($current / $total) * 100)
 $UltixSync.Logs.Enqueue(" -> Deprovisioning: $($app.DisplayName)")
 try {
+Write-UltixExpertCommand -CommandText "Remove-AppxProvisionedPackage -Online -PackageName '$($app.PackageName)'" -Module "Z2_Bloatware"
 Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "$($app.DisplayName) deprovisioned from base image" -ExitCode 0 -Module "Z2_Bloatware"
 $pkgParts = $app.PackageName -split '_'
 if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
 $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
 $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
-if (-not (Test-Path -LiteralPath $deprovPath)) { New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null }
+if (-not (Test-Path -LiteralPath $deprovPath)) {
+Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
+New-Item -Path $deprovPath -Force -ErrorAction SilentlyContinue | Out-Null
+Write-UltixExpertResult -OutputText "Locked Deprovisioned store: $provPfn" -ExitCode 0 -Module "Z2_Bloatware"
+}
 }
 $UltixSync.Logs.Enqueue("    [OK] $($app.DisplayName) deprovisioned.")
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 $UltixSync.Logs.Enqueue("    [!] Error deprovisioning $($app.DisplayName): $($_.Exception.Message)")
 }
 }
@@ -5874,9 +7147,12 @@ $UltixSync.Progress = [int](($current / $total) * 100)
 if ($cap.IsLocked) { continue }
 $UltixSync.Logs.Enqueue(" -> Removing capability: $($cap.Name)")
 try {
+Write-UltixExpertCommand -CommandText "Remove-WindowsCapability -Online -Name '$($cap.Name)'" -Module "Z2_Bloatware"
 Remove-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "$($cap.Name) removed" -ExitCode 0 -Module "Z2_Bloatware"
 $UltixSync.Logs.Enqueue("    [OK] $($cap.Name) removed.")
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 $UltixSync.Logs.Enqueue("    [!] Failed to remove $($cap.Name): $($_.Exception.Message)")
 }
 }
@@ -5938,14 +7214,19 @@ if ($feat.IsLocked) { continue }
 try {
 if ($Action -eq "Primary") {
 $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
+Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -NoRestart" -Module "Z2_Bloatware"
 Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "$($feat.FeatureName) disabled" -ExitCode 0 -Module "Z2_Bloatware"
 $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
 } else {
 $UltixSync.Logs.Enqueue(" -> Enabling feature: $($feat.FeatureName)")
+Write-UltixExpertCommand -CommandText "Enable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -All -NoRestart" -Module "Z2_Bloatware"
 Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop | Out-Null
+Write-UltixExpertResult -OutputText "$($feat.FeatureName) enabled" -ExitCode 0 -Module "Z2_Bloatware"
 $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) enabled (Reboot may be required).")
 }
 } catch {
+Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
 $UltixSync.Logs.Enqueue("    [!] Failed to modify $($feat.FeatureName): $($_.Exception.Message)")
 }
 }
@@ -6080,7 +7361,11 @@ $currentValue = $rawVal
 $valueExists = $true
 }
 }
-if ($rule.ContainsKey("ValidValues")) {
+if ($rule.Expected -eq "DELETE_KEY") {
+if ($null -eq $regKey) { $isDetected = $false }
+} elseif ($rule.Expected -eq "DELETE_VALUE") {
+if (-not $valueExists) { $isDetected = $false }
+} elseif ($rule.ContainsKey("ValidValues")) {
 if ($valueExists -and ($rule.ValidValues -contains $currentValue)) {
 $isDetected = $false
 }
@@ -6231,7 +7516,7 @@ $rules = @(
 @{ UIDisplayName = "Kernel: Disable Paging Executive (Keeps core system in RAM)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Expected = 1; Default = 0; Type = "DWord" }
 @{ UIDisplayName = "MMCSS: System Responsiveness (Allocate 100% CPU to Games)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Expected = 0; Default = 20; Type = "DWord" }
 @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; ValidValues = @(4294967295, -1); Type = "DWord" }
-@{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(38, 40, 42, 22, 24); Type = "DWord" }
+@{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(21, 22, 24, 25, 26, 37, 38, 40, 41, 42); Type = "DWord" }
 @{ UIDisplayName = "Power: Disable Windows Power Throttling globally"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; Name = "PowerThrottlingOff"; Expected = 1; Default = 0; Type = "DWord" }
 @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
 @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
@@ -6326,18 +7611,17 @@ $srpPaths = "$srpRoot\0\Paths"
 $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
 $nullStub = "$env:SystemRoot\System32\systray.exe"
 if ($Op -eq 'Apply') {
-if (-not (Test-Path -LiteralPath $srpRoot)) { New-Item -Path $srpRoot -Force | Out-Null }
-$srpSettings = @{
+$srpSettings = [ordered]@{
 "AuthenticodeEnabled" = 0
 "DefaultLevel"        = 262144
 "TransparentEnabled"  = 1
 "PolicyScope"         = 0
 }
 foreach ($kvp in $srpSettings.GetEnumerator()) {
-Set-ItemProperty -LiteralPath $srpRoot -Name $kvp.Key -Value $kvp.Value -Type DWord -Force
+Set-UltixRegValue -Path $srpRoot -Name $kvp.Key -Value $kvp.Value -Type DWord -Module "Z3_Registry"
 }
 $exeTypes = [string[]]@("BAT","CMD","COM","EXE","HTA","LNK","MSI","OCX","PIF","REG","SCR","VBS","WSF")
-Set-ItemProperty -LiteralPath $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Force
+Set-UltixRegValue -Path $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Module "Z3_Registry"
 if (-not (Test-Path -LiteralPath "$srpRoot\0"))      { New-Item -Path "$srpRoot\0" -Force | Out-Null }
 if (-not (Test-Path -LiteralPath "$srpRoot\262144")) { New-Item -Path "$srpRoot\262144" -Force | Out-Null }
 if (-not (Test-Path -LiteralPath $srpPaths))         { New-Item -Path $srpPaths -Force | Out-Null }
@@ -6348,7 +7632,7 @@ foreach ($item in $Items) {
 $current++
 if ($null -ne $UltixSync) {
 $UltixSync.Progress = [int](($current / $total) * 75)
-$UltixSync.Logs.Enqueue(" -> $($actionVerb) Execution Lock: $($item.UIDisplayName)")
+$UltixSync.Logs.Enqueue(" -> $($actionVerb): $($item.UIDisplayName)")
 }
 $target       = $item.ActionData
 $guid         = Get-DeterministicSrpGuid -InputString $target.TargetPath
@@ -6361,34 +7645,28 @@ if (Test-Path -LiteralPath $srpPaths) {
 foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
 $existingData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
 if ($existingData -eq $target.TargetPath -and $subKey.PSChildName -ne $guid) {
-Remove-Item -LiteralPath $subKey.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $subKey.PSPath -IgnoreMissing -Module "Z3_Registry"
 }
 }
 }
-New-Item -Path $ruleKey -Force | Out-Null
-Set-ItemProperty -LiteralPath $ruleKey -Name "Description" -Value "WinUltix SRP Lockdown" -Type String -Force
-Set-ItemProperty -LiteralPath $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String -Force
-Set-ItemProperty -LiteralPath $ruleKey -Name "SaferFlags" -Value 0 -Type DWord -Force
-if (-not (Test-Path -LiteralPath $ifeoKey)) { New-Item -Path $ifeoKey -Force | Out-Null }
+Set-UltixRegValue -Path $ruleKey -Name "Description" -Value "WinUltix SRP Lockdown" -Type String -Module "Z3_Registry"
+Set-UltixRegValue -Path $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String -Module "Z3_Registry"
+Set-UltixRegValue -Path $ruleKey -Name "SaferFlags" -Value 0 -Type DWord -Module "Z3_Registry"
 if ($target.IsCustom -and $target.TargetPath -notmatch '[\*\?]') {
-Set-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Value 1 -Type DWord -Force
-Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
-if (-not (Test-Path -LiteralPath $filterSubKey)) { New-Item -Path $filterSubKey -Force | Out-Null }
-Set-ItemProperty -LiteralPath $filterSubKey -Name "FilterFullPath" -Value $target.TargetPath -Type String -Force
-Set-ItemProperty -LiteralPath $filterSubKey -Name "Debugger" -Value $nullStub -Type String -Force
-Set-ItemProperty -LiteralPath $filterSubKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $ifeoKey -Name "UseFilter" -Value 1 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $filterSubKey -Name "FilterFullPath" -Value $target.TargetPath -Type String -Module "Z3_Registry"
+Set-UltixRegValue -Path $filterSubKey -Name "Debugger" -Value $nullStub -Type String -Module "Z3_Registry"
+Set-UltixRegValue -Path $filterSubKey -Name "WinUltixManaged" -Value 1 -Type DWord -Module "Z3_Registry"
 } else {
-Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Value $nullStub -Type String -Force
-Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+Remove-UltixRegItem -Path $ifeoKey -Name "UseFilter" -IgnoreMissing -Module "Z3_Registry"
+Set-UltixRegValue -Path $ifeoKey -Name "Debugger" -Value $nullStub -Type String -Module "Z3_Registry"
+Set-UltixRegValue -Path $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Module "Z3_Registry"
 }
 $procName = [System.IO.Path]::GetFileNameWithoutExtension($target.ExeName)
-$activeProc = Get-Process -Name $procName -ErrorAction SilentlyContinue
-if ($activeProc) {
-$activeProc | Stop-Process -Force -ErrorAction SilentlyContinue
-if ($null -ne $UltixSync) {
+$killedProcs = Stop-UltixProcess -Name $procName -Module "Z3_Registry"
+if ($killedProcs -gt 0 -and $null -ne $UltixSync) {
 $UltixSync.Logs.Enqueue("    [OK] Flushed active process ($procName) from memory.")
-}
 }
 $policyChanged = $true
 } else {
@@ -6396,26 +7674,26 @@ if (Test-Path -LiteralPath $srpPaths) {
 foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
 $itemData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
 if ($subKey.PSChildName -eq $guid -or $itemData -eq $target.TargetPath) {
-Remove-Item -LiteralPath $subKey.PSPath -Force -Recurse -ErrorAction Stop
+Remove-UltixRegItem -Path $subKey.PSPath -Module "Z3_Registry"
 $policyChanged = $true
 }
 }
 }
 if (Test-Path -LiteralPath $ifeoKey) {
 if (Test-Path -LiteralPath $filterSubKey) {
-Remove-Item -LiteralPath $filterSubKey -Recurse -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $filterSubKey -IgnoreMissing -Module "Z3_Registry"
 $policyChanged = $true
 }
 $isManaged = (Get-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -ErrorAction SilentlyContinue).WinUltixManaged
 $dbgVal    = (Get-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -ErrorAction SilentlyContinue).Debugger
 if ($isManaged -eq 1 -or $dbgVal -match "systray\.exe") {
 if (-not $target.IsCustom -or $dbgVal -match "systray\.exe") {
-Remove-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $ifeoKey -Name "Debugger" -IgnoreMissing -Module "Z3_Registry"
 }
 $remainingSubKeys = @(Get-ChildItem -LiteralPath $ifeoKey -ErrorAction SilentlyContinue)
 if ($remainingSubKeys.Count -eq 0) {
-Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
-Remove-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $ifeoKey -Name "UseFilter" -IgnoreMissing -Module "Z3_Registry"
+Remove-UltixRegItem -Path $ifeoKey -Name "WinUltixManaged" -IgnoreMissing -Module "Z3_Registry"
 }
 $remainingProps = @()
 $ifeoItem = Get-Item -LiteralPath $ifeoKey -ErrorAction SilentlyContinue
@@ -6423,7 +7701,7 @@ if ($null -ne $ifeoItem) {
 try { $remainingProps = @($ifeoItem.Property) } finally { $ifeoItem.Dispose() }
 }
 if ($remainingSubKeys.Count -eq 0 -and $remainingProps.Count -eq 0) {
-Remove-Item -LiteralPath $ifeoKey -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $ifeoKey -IgnoreMissing -Module "Z3_Registry"
 }
 $policyChanged = $true
 }
@@ -6441,7 +7719,7 @@ $UltixSync.Logs.Enqueue("    [!] Failed to modify execution lock: $($_.Exception
 if ($Op -eq 'Revert' -and (Test-Path -LiteralPath $srpPaths)) {
 $remainingSrp = @(Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)
 if ($remainingSrp.Count -eq 0) {
-Remove-Item -LiteralPath $srpRoot -Recurse -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $srpRoot -IgnoreMissing -Module "Z3_Registry"
 }
 }
 $exitCode = $null
@@ -6450,10 +7728,7 @@ if ($null -ne $UltixSync) {
 $UltixSync.Logs.Enqueue(" -> Refreshing Safer API policy tokens (gpupdate.exe /force in background)...")
 $UltixSync.Progress = 85
 }
-$gpProc = Start-Process -FilePath "gpupdate.exe" -ArgumentList "/force" -WindowStyle Hidden -PassThru
-$gpProc.WaitForExit()
-$exitCode = $gpProc.ExitCode
-$gpProc.Dispose()
+$exitCode = Invoke-UltixExe -FilePath "gpupdate.exe" -Arguments @("/force") -Module "Z3_Registry"
 }
 if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
 return [PSCustomObject]@{
@@ -6490,6 +7765,24 @@ $total        = $Items.Count
 $current      = 0
 $touchedMouse = $false
 $actionVerb   = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
+$logLine = {
+param([string]$Msg)
+if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue($Msg) } else { Write-GUI $Msg }
+}
+$invokeWithAclEscalation = {
+param([string]$RegPath, [scriptblock]$OpBlock)
+try {
+& $OpBlock
+} catch {
+$aclTarget = $RegPath -replace '^Registry::HKEY_CLASSES_ROOT\\', 'HKLM:\SOFTWARE\Classes\'
+if ($aclTarget -match '^HKLM:\\' -and (Get-Command -Name Grant-UltixRegistryKeyAccess -ErrorAction SilentlyContinue)) {
+Grant-UltixRegistryKeyAccess -RegistryPath $aclTarget
+& $OpBlock
+} else {
+throw
+}
+}
+}
 foreach ($item in $Items) {
 $current++
 if ($null -ne $UltixSync) {
@@ -6505,16 +7798,18 @@ $touchedMouse = $true
 }
 $targetValue = if ($Op -eq 'Apply') { $reg.Expected } else { $reg.Default }
 if ($null -eq $targetValue -and $Op -eq 'Revert') {
-Write-GUI "    [!] Missing 'Default' property in array definition. Skipping."
+& $logLine "    [!] Missing 'Default' property in array definition. Skipping."
 continue
 }
 try {
 if ($targetValue -eq 'DELETE_KEY') {
 if (Test-Path -LiteralPath $reg.Path) {
-Remove-Item -LiteralPath $reg.Path -Recurse -Force -ErrorAction Stop | Out-Null
+& $invokeWithAclEscalation $reg.Path {
+Remove-UltixRegItem -Path $reg.Path -Module "Z3_Registry"
+}
 $parentKey = Split-Path -Path $reg.Path -Parent
 if ($parentKey -match "\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2\}$" -and (Test-Path -LiteralPath $parentKey)) {
-Remove-Item -LiteralPath $parentKey -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+Remove-UltixRegItem -Path $parentKey -IgnoreMissing -Module "Z3_Registry"
 }
 }
 continue
@@ -6525,18 +7820,19 @@ if ($reg.Name -eq "DirectXUserGlobalSettings") {
 $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
 $cleanedDx  = ($existingDx -replace "SwapEffectUpgradeEnable=\d+;?", "").Trim()
 if ([string]::IsNullOrWhiteSpace($cleanedDx)) {
-Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction SilentlyContinue | Out-Null
+Remove-UltixRegItem -Path $reg.Path -Name $reg.Name -IgnoreMissing -Module "Z3_Registry"
 } else {
-Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $cleanedDx -Type String -Force -ErrorAction Stop | Out-Null
+Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $cleanedDx -Type String -Module "Z3_Registry"
 }
 } else {
-Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction Stop | Out-Null
+& $invokeWithAclEscalation $reg.Path {
+Remove-UltixRegItem -Path $reg.Path -Name $reg.Name -IgnoreMissing -Module "Z3_Registry"
+}
 }
 }
 continue
 }
-if (-not (Test-Path -LiteralPath $reg.Path)) { New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null }
-if ($Op -eq 'Apply' -and $reg.ContainsKey("ValidValues")) {
+if ($Op -eq 'Apply' -and $reg.ContainsKey("ValidValues") -and (Test-Path -LiteralPath $reg.Path)) {
 $curRaw = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
 if ($null -ne $curRaw) {
 $curNorm = if ($reg.Type -eq "DWord" -and $curRaw -is [int] -and $curRaw -lt 0) {
@@ -6546,24 +7842,34 @@ $curRaw
 }
 if ($reg.ValidValues -contains $curNorm -or $reg.ValidValues -contains $curRaw) {
 if ($reg.Name -eq "Win32PrioritySeparation" -and $curNorm -ne $reg.Expected) {
-Write-GUI ("    [OK] Preserved active Quantum Scheduler preset (0x{0:X2} / {0} dec)." -f [int]$curNorm)
+& $logLine ("    [OK] Preserved active Quantum Scheduler preset (0x{0:X2} / {0} dec)." -f [int]$curNorm)
 }
 continue
 }
 }
 }
+$altSynced = $false
 if ($reg.ContainsKey("AltName")) {
+$ucpdSvc = Get-Service -Name "UCPD" -ErrorAction SilentlyContinue
+if ($null -ne $ucpdSvc -and $ucpdSvc.Status -eq 'Running') {
+Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4 -Module "Z3_Registry"
+Invoke-UltixStep -Command "Disable-ScheduledTask -TaskPath '\Microsoft\Windows\AppxDeploymentClient\' -TaskName 'UCPD velocity'" -Action {
+Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
+} -SuccessOutput "Disarmed UCPD velocity task" -Module "Z3_Registry"
+}
 if ($Op -eq 'Apply') {
-Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+try {
+Set-UltixRegValue -Path $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Module "Z3_Registry"
+$altSynced = $true
+} catch { }
 } else {
-Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
-Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
+Remove-UltixRegItem -Path $reg.Path -Name $reg.AltName -IgnoreMissing -Module "Z3_Registry"
+Remove-UltixRegItem -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -IgnoreMissing -Module "Z3_Registry"
+$altSynced = $true
 }
 }
-if ($reg.Name -eq "" -or $reg.Name -eq "(Default)") {
-Set-Item -LiteralPath $reg.Path -Value ([string]$targetValue) -Force -ErrorAction Stop | Out-Null
-} elseif ($reg.Name -eq "DirectXUserGlobalSettings" -and $Op -eq 'Apply') {
+if ($reg.Name -eq "DirectXUserGlobalSettings" -and $Op -eq 'Apply') {
 $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
 if ([string]::IsNullOrWhiteSpace($existingDx)) {
 $newDx = "SwapEffectUpgradeEnable=1;"
@@ -6573,35 +7879,39 @@ $newDx = $existingDx -replace "SwapEffectUpgradeEnable=\d+", "SwapEffectUpgradeE
 $sep   = if ($existingDx.EndsWith(";")) { "" } else { ";" }
 $newDx = "$existingDx${sep}SwapEffectUpgradeEnable=1;"
 }
-Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $newDx -Type String -Force -ErrorAction Stop | Out-Null
+Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $newDx -Type String -Module "Z3_Registry"
 } else {
-$writeVal = $targetValue
-if ($reg.Type -eq "DWord" -and $writeVal -is [long] -and $writeVal -gt [int]::MaxValue) {
-$writeVal = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$writeVal), 0)
+& $invokeWithAclEscalation $reg.Path {
+Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $targetValue -Type $reg.Type -Module "Z3_Registry"
 }
-Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $writeVal -Type $reg.Type -Force -ErrorAction Stop | Out-Null
 }
 } catch {
 if ($reg.ContainsKey("AltName")) {
 try {
 if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UCPD") {
-Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4
+Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4 -Module "Z3_Registry"
+Invoke-UltixStep -Command "Disable-ScheduledTask -TaskPath '\Microsoft\Windows\AppxDeploymentClient\' -TaskName 'UCPD velocity'" -Action {
 Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
+} -SuccessOutput "Disarmed UCPD velocity task" -Module "Z3_Registry"
 }
 if ($Op -eq 'Apply') {
-Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction Stop | Out-Null
-Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-Write-GUI "    [+] Bypassed UCPD.sys filter via $($reg.AltName)=1 & disarmed UCPD driver."
+if (-not $altSynced) {
+Set-UltixRegValue -Path $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Module "Z3_Registry"
+}
+& $logLine "    [+] Bypassed UCPD.sys filter via $($reg.AltName)=1 & disarmed UCPD driver."
 } else {
-Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
-Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
-Write-GUI "    [+] Reverted $($reg.AltName) policy & disarmed UCPD filter (Reboot unlocks $($reg.Name))."
+if (-not $altSynced) {
+Remove-UltixRegItem -Path $reg.Path -Name $reg.AltName -IgnoreMissing -Module "Z3_Registry"
+Remove-UltixRegItem -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -IgnoreMissing -Module "Z3_Registry"
+}
+& $logLine "    [+] Reverted $($reg.AltName) policy & disarmed UCPD filter (Reboot unlocks $($reg.Name))."
 }
 } catch {
-Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+& $logLine "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
 }
 } else {
-Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+& $logLine "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
 }
 }
 }
@@ -6611,10 +7921,16 @@ $mProps = Get-ItemProperty -LiteralPath "HKCU:\Control Panel\Mouse" -Name "Mouse
 $t1 = if ($null -ne $mProps -and $mProps.MouseThreshold1 -match '^\d+$') { [int]$mProps.MouseThreshold1 } else { 0 }
 $t2 = if ($null -ne $mProps -and $mProps.MouseThreshold2 -match '^\d+$') { [int]$mProps.MouseThreshold2 } else { 0 }
 $sp = if ($null -ne $mProps -and $mProps.MouseSpeed -match '^\d+$')      { [int]$mProps.MouseSpeed }      else { 0 }
-if ([WinUltix.NativeMethods]::ApplyLiveMouseParams($t1, $t2, $sp)) {
-Write-GUI "    [OK] Live-reloaded win32kfull.sys pointer acceleration table (SPI_SETMOUSE: $t1/$t2/$sp)."
+Invoke-UltixStep -Command "[WinUltix.NativeMethods]::ApplyLiveMouseParams($t1, $t2, $sp)" -Action {
+if (-not [WinUltix.NativeMethods]::ApplyLiveMouseParams($t1, $t2, $sp)) {
+throw "user32!SystemParametersInfoW(SPI_SETMOUSE) returned false"
 }
-} catch { }
+"Live-reloaded win32kfull.sys pointer curve ($t1/$t2/$sp)"
+} -Module "Z3_Registry"
+& $logLine "    [OK] Live-reloaded win32kfull.sys pointer acceleration table (SPI_SETMOUSE: $t1/$t2/$sp)."
+} catch {
+& $logLine "    [!] Live SPI_SETMOUSE reload failed (changes will apply on next logon): $($_.Exception.Message)"
+}
 }
 } -OnComplete ({
 param($nullOut)
@@ -6697,6 +8013,9 @@ $UltixSync.Logs.Enqueue("  [!] Residual MDM Start Menu provider/lock detected in
 } else {
 $UltixSync.Logs.Enqueue("  [OK] No residual MDM Start Menu locks or orphaned provider keys found.")
 }
+$bakExists = Test-Path -LiteralPath "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
+$defJson   = Test-Path -LiteralPath "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell\LayoutModification.json"
+$UltixSync.Logs.Enqueue("  [*] Backup (start2_backup.bin): $(if($bakExists){'Present'}else{'None'}) | Default User LayoutModification.json: $(if($defJson){'Provisioned'}else{'Not set'})")
 $UltixSync.Progress = 100
 } -OnComplete ({
 param($nullOut)
@@ -6723,25 +8042,37 @@ $startStatePath = Join-Path -Path $pkgDir.FullName -ChildPath "LocalState"
 $origBin        = Join-Path $startStatePath "start2.bin"
 $bakBin         = "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
 $UltixSync.Progress = 40
+Invoke-UltixStep -Command "Stop-UltixProcess -Name 'StartMenuExperienceHost','ShellExperienceHost','explorer'" -Action {
+if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
+Stop-UltixProcess -Name @("StartMenuExperienceHost", "ShellExperienceHost", "explorer")
+} else {
 Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+}
+} -SuccessOutput "Stopped shell host processes" -Module "Z3_Registry"
 Start-Sleep -Milliseconds 350
 if (Test-Path -LiteralPath $bakBin) {
-Copy-Item -LiteralPath $bakBin -Destination $origBin -Force -ErrorAction SilentlyContinue
+Invoke-UltixStep -Command "Copy-Item -LiteralPath '$bakBin' -Destination '$origBin' -Force" -Action {
+Copy-Item -LiteralPath $bakBin -Destination $origBin -Force -ErrorAction Stop
+} -SuccessOutput "Restored original start2.bin database" -Module "Z3_Registry"
 $UltixSync.Logs.Enqueue("    [OK] Restored original start2.bin from $bakBin.")
 } else {
 $UltixSync.Logs.Enqueue("    [*] No start2_backup.bin found in %LOCALAPPDATA%\WinUltix; reverting registry view flags only.")
 }
-Remove-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-Remove-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "ShowRecentList", "ShowFrequentList" -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-Remove-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_IrisRecommendations", "Start_AccountNotifications" -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "HideRecommendedSection" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoRecentDocsHistory" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -IgnoreMissing -Module "Z3_Registry"
+Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -Value 0 -Type DWord -Module "Z3_Registry"
+Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "ShowRecentList" -IgnoreMissing -Module "Z3_Registry"
+Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "ShowFrequentList" -IgnoreMissing -Module "Z3_Registry"
+Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -Value 1 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 1 -Type DWord -Module "Z3_Registry"
+Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_IrisRecommendations" -IgnoreMissing -Module "Z3_Registry"
+Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_AccountNotifications" -IgnoreMissing -Module "Z3_Registry"
+Set-UltixRegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "HideRecommendedSection" -Value 0 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoRecentDocsHistory" -Value 0 -Type DWord -Module "Z3_Registry"
 $defaultJsonPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell\LayoutModification.json"
 if (Test-Path -LiteralPath $defaultJsonPath) {
+Invoke-UltixStep -Command "Remove-Item -LiteralPath '$defaultJsonPath' -Force" -Action {
 Remove-Item -LiteralPath $defaultJsonPath -Force -ErrorAction SilentlyContinue
+} -SuccessOutput "Removed Default User LayoutModification.json" -Module "Z3_Registry"
 }
 if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
 Start-Process "explorer.exe"
@@ -6779,38 +8110,38 @@ $UltixSync.Logs.Enqueue(" -> [1/7] Disabling ContentDeliveryManager, Recent File
 $cdmPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
 if (Test-Path -LiteralPath $cdmPath) {
 foreach ($cdmName in @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "SubscribedContentEnabled")) {
-Set-ItemProperty -LiteralPath $cdmPath -Name $cdmName -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-UltixRegValue -Path $cdmPath -Name $cdmName -Value 0 -Type DWord -Module "Z3_Registry"
 }
-if (Test-Path -LiteralPath "$cdmPath\SuggestedApps") {
-Remove-Item -LiteralPath "$cdmPath\SuggestedApps" -Recurse -Force -ErrorAction SilentlyContinue
-}
+Remove-UltixRegItem -Path "$cdmPath\SuggestedApps" -IgnoreMissing -Module "Z3_Registry"
 }
 $advPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
 if (Test-Path -LiteralPath $advPath) {
-Set-ItemProperty -LiteralPath $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $advPath -Name "Start_Layout" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-UltixRegValue -Path $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $advPath -Name "Start_Layout" -Value 1 -Type DWord -Module "Z3_Registry"
 }
 $expPolPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
-if (-not (Test-Path -LiteralPath $expPolPath)) { New-Item -Path $expPolPath -Force -ErrorAction SilentlyContinue | Out-Null }
-Set-ItemProperty -LiteralPath $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-UltixRegValue -Path $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Module "Z3_Registry"
 $recentDir = "$env:APPDATA\Microsoft\Windows\Recent"
 if (Test-Path -LiteralPath $recentDir) {
+Invoke-UltixStep -Command "Remove-Item -Path '$recentDir\*','$recentDir\AutomaticDestinations\*' -Force" -Action {
 Get-ChildItem -LiteralPath $recentDir -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 if (Test-Path -LiteralPath "$recentDir\AutomaticDestinations") {
 Get-ChildItem -LiteralPath "$recentDir\AutomaticDestinations" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
+} -SuccessOutput "Cleared Recent items & JumpList destinations" -Module "Z3_Registry"
 }
 if ($null -ne $UltixSync) {
 $UltixSync.Progress = 30
 $UltixSync.Logs.Enqueue(" -> [2/7] Injecting temporary MDM PolicyManager provider context...")
 }
+$hadEnrollmentBefore = (Test-Path -LiteralPath $enrollmentPath)
+Invoke-UltixStep -Command "New-Item -Path '$enrollmentPath','$providerPath' -Force" -Action {
 if (-not (Test-Path -LiteralPath $enrollmentPath)) {
 New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
-$createdEnrollment = $true
 }
 Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
 Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
@@ -6821,45 +8152,57 @@ New-Item -Path $providerPath -Force -ErrorAction Stop | Out-Null
 }
 Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
 Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
-if (-not (Test-Path -LiteralPath $policyDevicePath)) {
-New-Item -Path $policyDevicePath -Force -ErrorAction Stop | Out-Null
-}
-Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
-Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
-Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
+"Provisioned temporary MDM node ($provGuid)"
+} -Module "Z3_Registry"
+$createdEnrollment = (-not $hadEnrollmentBefore) -and (Test-Path -LiteralPath $enrollmentPath)
+Set-UltixRegValue -Path $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Module "Z3_Registry"
+Set-UltixRegValue -Path $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Module "Z3_Registry"
 if ($null -ne $UltixSync) {
 $UltixSync.Progress = 45
 $UltixSync.Logs.Enqueue(" -> [3/7] Purging CloudStore tile grid and enforcing AllAppsViewMode=2 (List View)...")
 }
 $cloudStoreRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
 if (Test-Path -LiteralPath $cloudStoreRoot) {
+Invoke-UltixStep -Command "Get-ChildItem '$cloudStoreRoot' | Where-Object { `$_.PSChildName -match 'start\.tilegrid|unifiedtile|start\.allapps|start\.properties' } | Remove-Item -Recurse -Force" -Action {
 Get-ChildItem -LiteralPath $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
 $_.PSChildName -match "start\.tilegrid|unifiedtile|start\.allapps|start\.properties"
 } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+} -SuccessOutput "Purged CloudStore Start tile grid caches" -Module "Z3_Registry"
 }
 $startRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
-if (Test-Path -LiteralPath $startRegPath) {
-Remove-Item -LiteralPath $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
-}
-New-Item -Path $startRegPath -Force -ErrorAction SilentlyContinue | Out-Null
-Set-ItemProperty -LiteralPath $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-Set-ItemProperty -LiteralPath $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-$origBin = Join-Path $startStatePath "start2.bin"
-$bakDir  = "$env:LOCALAPPDATA\WinUltix"
-$bakBin  = "$bakDir\start2_backup.bin"
-if ((Test-Path -LiteralPath $origBin) -and -not (Test-Path -LiteralPath $bakBin)) {
+Remove-UltixRegItem -Path $startRegPath -IgnoreMissing -Module "Z3_Registry"
+Set-UltixRegValue -Path $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Module "Z3_Registry"
+Set-UltixRegValue -Path $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Module "Z3_Registry"
+$origBin   = Join-Path $startStatePath "start2.bin"
+$bakDir    = "$env:LOCALAPPDATA\WinUltix"
+$bakBin    = "$bakDir\start2_backup.bin"
+$prevClean = (Get-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -ErrorAction SilentlyContinue).StartMenuClearedSize
+$isAlreadyClean = ($null -ne $prevClean -and (Test-Path -LiteralPath $origBin) -and [math]::Abs((Get-Item -LiteralPath $origBin -Force).Length - $prevClean) -le 512)
+if ((Test-Path -LiteralPath $origBin) -and -not (Test-Path -LiteralPath $bakBin) -and -not $isAlreadyClean) {
+Invoke-UltixStep -Command "Copy-Item -LiteralPath '$origBin' -Destination '$bakBin' -Force" -Action {
 if (-not (Test-Path -LiteralPath $bakDir)) { New-Item -Path $bakDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
 Copy-Item -LiteralPath $origBin -Destination $bakBin -Force -ErrorAction SilentlyContinue
+} -SuccessOutput "Backed up original start2.bin" -Module "Z3_Registry"
 }
 if ($null -ne $UltixSync) {
 $UltixSync.Progress = 60
 $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
 }
-Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+$stopShellHosts = {
+param([string[]]$Names)
+if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
+Stop-UltixProcess -Name $Names
+} else {
+Stop-Process -Name $Names -Force -ErrorAction SilentlyContinue
+}
+}
+Invoke-UltixStep -Command "Stop-UltixProcess -Name 'StartMenuExperienceHost','ShellExperienceHost','explorer'; Remove-Item -Path '$startStatePath\start*.bin*' -Force" -Action {
+& $stopShellHosts @("StartMenuExperienceHost", "ShellExperienceHost", "explorer")
 Start-Sleep -Milliseconds 300
 for ($attempt = 1; $attempt -le 6; $attempt++) {
-Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+& $stopShellHosts @("StartMenuExperienceHost")
 Get-ChildItem -Path $startStatePath -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
 $binFull = $_.FullName
 try {
@@ -6873,6 +8216,7 @@ Move-Item -LiteralPath $binFull -Destination $trashBin -Force -ErrorAction Silen
 if (-not (Test-Path -LiteralPath (Join-Path $startStatePath "start2.bin"))) { break }
 Start-Sleep -Milliseconds 60
 }
+} -SuccessOutput "Wiped locked start2.bin database" -Module "Z3_Registry"
 if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
 Start-Process "explorer.exe"
 Start-Sleep -Milliseconds 800
@@ -6881,17 +8225,21 @@ if ($null -ne $UltixSync) {
 $UltixSync.Progress = 75
 $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
 }
+try {
+Invoke-UltixStep -Command "(New-Object WinUltix.AppActivator).ActivateApplication('Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App', `$null, 0, [ref]`$activatedPid)" -Action {
 $appActivator = $null
 try {
 $appActivator = New-Object WinUltix.AppActivator
 [uint32]$activatedPid = 0
 [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
-} catch {
+"Activated StartMenuExperienceHost (PID: $activatedPid)"
 } finally {
 if ($null -ne $appActivator -and [System.Runtime.InteropServices.Marshal]::IsComObject($appActivator)) {
-[void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($appActivator)
+[void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($appActivator)
 }
 }
+} -Module "Z3_Registry"
+} catch { }
 $compiledBinPath = Join-Path $startStatePath "start2.bin"
 $elapsed = 0
 while ($elapsed -lt 4500) {
@@ -6906,9 +8254,10 @@ break
 }
 }
 if (Test-Path -LiteralPath $compiledBinPath) {
-$newBinSize = (Get-Item -LiteralPath $compiledBinPath -Force).Length
-if (-not (Test-Path -LiteralPath "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
-Set-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
+$newBinSize = [int](Get-Item -LiteralPath $compiledBinPath -Force).Length
+if ($newBinSize -gt 1024) {
+Set-UltixRegValue -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Module "Z3_Registry"
+}
 }
 if ($null -ne $UltixSync) {
 $UltixSync.Logs.Enqueue("    [OK] Native start2.bin compiled (3-Icon + Classic Alphabetical List + No Recent Files).")
@@ -6935,7 +8284,11 @@ Remove-Item -LiteralPath "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$prov
 if ($createdEnrollment -and (Test-Path -LiteralPath $enrollmentPath)) {
 Remove-Item -LiteralPath $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
 }
+if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
+Stop-UltixProcess -Name @("StartMenuExperienceHost")
+} else {
 Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+}
 if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
 Start-Process "explorer.exe"
 }
@@ -7012,8 +8365,9 @@ ActionData    = @{ Type = "PowerCfg"; Sub = "501a4d13-42af-4429-9fd1-a8218c268e2
 $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
 $cabcReg = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
 $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)
+$cabcStatus = "AC: $(if($null -ne $cabcVal){$cabcVal}else{'N/A'}), Reg: $(if($cabcReg -eq 1){'Disabled'}else{'Default'})"
 $results.Add([PSCustomObject]@{
-UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming)"
+UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming) ($cabcStatus)"
 IsDetected    = (-not $isCabcOpt)
 ActionData    = @{ Type = "CABC"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "aded5e82-b909-4619-9949-f5d71dac0bcb"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 1 }
 })
@@ -7041,27 +8395,28 @@ $UltixSync.Logs.Enqueue(" -> $($verb): $($item.UIDisplayName)")
 $d = $item.ActionData
 try {
 if ($d.Type -eq "Hiber") {
-if ($Op -eq 'Apply') {
-powercfg.exe /hibernate off 2>$null
-} else {
-powercfg.exe /hibernate on 2>$null
-}
+$hiberArg = if ($Op -eq 'Apply') { "off" } else { "on" }
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/hibernate", $hiberArg) -Module "Z3_Registry")
 } elseif ($d.Type -eq "PowerCfg") {
 $acVal = if ($Op -eq 'Apply') { $d.OptAC } else { $d.DefAC }
 $dcVal = if ($Op -eq 'Apply') { $d.OptDC } else { $d.DefDC }
-powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $acVal 2>$null
-powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $dcVal 2>$null
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$acVal") -Module "Z3_Registry")
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$dcVal") -Module "Z3_Registry")
 } elseif ($d.Type -eq "CABC") {
 $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+$hasCabcGuid = ($null -ne (Get-UltixPowerAcIndex -SubGroupGuid $d.Sub -SettingGuid $d.Guid -IncludeHidden))
 if ($Op -eq 'Apply') {
-powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.OptAC 2>$null
-powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.OptDC 2>$null
-if (-not (Test-Path -LiteralPath $gfxKey)) { New-Item -Path $gfxKey -Force -ErrorAction SilentlyContinue | Out-Null }
-Set-ItemProperty -LiteralPath $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+if ($hasCabcGuid) {
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.OptAC)") -Module "Z3_Registry")
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.OptDC)") -Module "Z3_Registry")
+}
+Set-UltixRegValue -Path $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Module "Z3_Registry"
 } else {
-powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.DefAC 2>$null
-powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.DefDC 2>$null
-Remove-ItemProperty -LiteralPath $gfxKey -Name "DisableCABC" -Force -ErrorAction SilentlyContinue
+if ($hasCabcGuid) {
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.DefAC)") -Module "Z3_Registry")
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.DefDC)") -Module "Z3_Registry")
+}
+Remove-UltixRegItem -Path $gfxKey -Name "DisableCABC" -IgnoreMissing -Module "Z3_Registry"
 }
 }
 } catch {
@@ -7070,7 +8425,7 @@ $UltixSync.Logs.Enqueue("    [!] Failed on $($item.UIDisplayName): $($_.Exceptio
 }
 }
 }
-powercfg.exe /setactive SCHEME_CURRENT 2>$null
+[void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setactive", "SCHEME_CURRENT") -Module "Z3_Registry")
 if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
 } -OnComplete ({
 param($nullOut)
@@ -7174,17 +8529,26 @@ if ($null -ne $UltixSync -and $total -gt 0) {
 $UltixSync.Progress = [int](($current / $total) * 100)
 }
 $currentStart = $null
+$svcType      = $null
+$userFlags    = $null
 if ($null -ne $svcRoot) {
 $svcKey = $svcRoot.OpenSubKey($rule.Name, $false)
 if ($null -ne $svcKey) {
 try {
 $currentStart = $svcKey.GetValue("Start", $null)
+$svcType      = $svcKey.GetValue("Type", $null)
+$userFlags    = $svcKey.GetValue("UserServiceFlags", $null)
 } finally {
 $svcKey.Dispose()
 }
 }
 }
 $isDetected = ($null -ne $currentStart -and [int]$currentStart -ne [int]$rule.ExpectedStart)
+if (-not $isDetected -and [int]$rule.ExpectedStart -eq 4 -and $null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
+if ($null -ne $userFlags -and [int]$userFlags -ne 0) {
+$isDetected = $true
+}
+}
 $results.Add([PSCustomObject]@{
 UIDisplayName = $rule.UIDisplayName
 IsDetected    = $isDetected
@@ -7202,20 +8566,29 @@ param(
 [Parameter(Mandatory=$true)][string]$TaskPath,
 [Parameter(Mandatory=$true)][string]$TaskName
 )
-$relPath  = ($TaskPath.Trim('\') + "\" + $TaskName).TrimStart('\')
-$treePath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\$relPath"
-if (Test-Path -LiteralPath $treePath) {
+$relPath = ($TaskPath.Trim('\') + "\" + $TaskName).TrimStart('\')
+$subPath = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\$relPath"
 try {
-[byte[]]$sdBytes = (Get-ItemProperty -LiteralPath $treePath -Name "SD" -ErrorAction SilentlyContinue).SD
+$treeKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subPath, $false)
+if ($null -ne $treeKey) {
+try {
+[byte[]]$sdBytes = $treeKey.GetValue("SD", $null)
 if ($null -ne $sdBytes -and $sdBytes.Length -ge 20) {
 $rawSd = New-Object System.Security.AccessControl.RawSecurityDescriptor($sdBytes, 0)
 if ($null -ne $rawSd.DiscretionaryAcl) {
+$targetSids    = @("S-1-5-32-544", "S-1-5-32-545", "S-1-5-11", "S-1-1-0")
+$writeDelMask  = 0x500D0006
 $adminWritable = $false
 foreach ($ace in $rawSd.DiscretionaryAcl) {
-if ([int]$ace.AceQualifier -ne 0) { continue }
-$sidVal = $ace.SecurityIdentifier.Value
-if ($sidVal -in @("S-1-5-32-544", "S-1-5-32-545", "S-1-5-11", "S-1-1-0")) {
-if (($ace.AccessMask -band 0x50000006) -ne 0) {
+if ([int]$ace.AceQualifier -eq 1 -and $ace.SecurityIdentifier.Value -in $targetSids) {
+if (($ace.AccessMask -band $writeDelMask) -ne 0) {
+return $false
+}
+}
+}
+foreach ($ace in $rawSd.DiscretionaryAcl) {
+if ([int]$ace.AceQualifier -eq 0 -and $ace.SecurityIdentifier.Value -in $targetSids) {
+if (($ace.AccessMask -band $writeDelMask) -ne 0) {
 $adminWritable = $true
 break
 }
@@ -7224,8 +8597,11 @@ break
 if (-not $adminWritable) { return $false }
 }
 }
-} catch { }
+} finally {
+$treeKey.Dispose()
 }
+}
+} catch { }
 return $true
 }
 function Get-TelemetryTasksState {
@@ -7271,7 +8647,7 @@ $rules = @(
 @{ UIDisplayName = "Telemetry: Problem Reports Control Panel Support (wercplsupport)"; Name = "wercplsupport"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Telemetry: Program Compatibility Assistant (PcaSvc)"; Name = "PcaSvc"; ExpectedStart = 4; DefaultStart = 2 }
 @{ UIDisplayName = "Telemetry: Windows Insider Service (wisvc)"; Name = "wisvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Updates: Windows Update Medic Service - Re-enabling requires reboot (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Maps: Downloaded Maps Manager (MapsBroker)"; Name = "MapsBroker"; ExpectedStart = 4; DefaultStart = 2 }
 @{ UIDisplayName = "Retail: Retail Demo Service (RetailDemo)"; Name = "RetailDemo"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Bloat: Microsoft Wallet Service (WalletService)"; Name = "WalletService"; ExpectedStart = 4; DefaultStart = 3 }
@@ -7292,8 +8668,8 @@ $rules = @(
 @{ UIDisplayName = "Diagnostics: Diagnostic Service Host (WdiServiceHost)"; Name = "WdiServiceHost"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Diagnostics: Diagnostic System Host (WdiSystemHost)"; Name = "WdiSystemHost"; ExpectedStart = 4; DefaultStart = 3 }
 @{ UIDisplayName = "Diagnostics: Performance Logs & Alerts (pla)"; Name = "pla"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Updates: Windows Update Medic Service (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
-@{ UIDisplayName = "Updates: Delivery Optimization P2P - Used by WinGet/Store msstore downloads (DoSvc)"; Name = "DoSvc"; ExpectedStart = 3; DefaultStart = 2; OptIn = $true }
+@{ UIDisplayName = "Updates: Windows Update Medic Service - Re-enabling requires reboot (WaaSMedicSvc)"; Name = "WaaSMedicSvc"; ExpectedStart = 4; DefaultStart = 3 }
+@{ UIDisplayName = "Updates: Delivery Optimization P2P - Used by WinGet/Store; re-enabling requires reboot (DoSvc)"; Name = "DoSvc"; ExpectedStart = 3; DefaultStart = 2; OptIn = $true }
 @{ UIDisplayName = "Edge: Edge Update Service - Required by WinGet for Edge/WebView2 updates (edgeupdate)"; Name = "edgeupdate"; ExpectedStart = 4; DefaultStart = 2; OptIn = $true }
 @{ UIDisplayName = "Edge: Edge Update Service M - Required by WinGet for Edge/WebView2 updates (edgeupdatem)"; Name = "edgeupdatem"; ExpectedStart = 4; DefaultStart = 3; OptIn = $true }
 @{ UIDisplayName = "Performance: SysMain / Superfetch - Disables RAM caching (SysMain)"; Name = "SysMain"; ExpectedStart = 4; DefaultStart = 2 }
@@ -7373,12 +8749,17 @@ if ($tasks.Count -eq 0) { continue }
 $okCount   = 0
 $skipCount = 0
 foreach ($task in $tasks) {
+$fullTaskId = "$($task.TaskPath)$($task.TaskName)"
 try {
 if ($Op -eq 'Apply') {
+Invoke-UltixStep -Command "Stop-ScheduledTask -TaskPath '$($task.TaskPath)' -TaskName '$($task.TaskName)'; Disable-ScheduledTask -TaskPath '$($task.TaskPath)' -TaskName '$($task.TaskName)'" -Action {
 Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null
 Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+} -SuccessOutput "Disabled task: $fullTaskId" -Module "Z4_Services"
 } else {
+Invoke-UltixStep -Command "Enable-ScheduledTask -TaskPath '$($task.TaskPath)' -TaskName '$($task.TaskName)'" -Action {
 Enable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+} -SuccessOutput "Enabled task: $fullTaskId" -Module "Z4_Services"
 }
 $okCount++
 } catch {
@@ -7431,18 +8812,22 @@ continue
 }
 try {
 $shouldAutoStart = ($Op -eq 'Revert' -and $targetValue -eq 2)
-Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue -StartService:$shouldAutoStart
+Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue -StartService:$shouldAutoStart -Module "Z4_Services"
 $svcType = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
 $isPerUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
 if ($isPerUserTemplate) {
 $flagVal = if ($Op -eq 'Apply') { 0 } else { 3 }
-Set-ItemProperty -LiteralPath $svcRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
+try {
+Set-UltixRegValue -Path $svcRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Module "Z4_Services"
+} catch { }
+}
+if ($isPerUserTemplate) {
+Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue | ForEach-Object {
+Set-ProtectedServiceStart -ServiceName $_.Name -StartValue $targetValue -Module "Z4_Services"
+}
 }
 if ($Op -eq 'Apply') {
-Stop-Service -Name $svc.Name -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-if ($isPerUserTemplate) {
-Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-}
+Stop-UltixService -ServiceName $svc.Name -IncludePerUserInstances:$isPerUserTemplate -Module "Z4_Services"
 }
 } catch {
 if ($null -ne $UltixSync) {
@@ -7458,6 +8843,7 @@ Write-GUI " -> $ProfileName services enforcement completed ($Operation).`n"
 }
 function Get-SystemServicesTable_Worker {
 $criticalServices = "^(?i)(RpcSs|DcomLaunch|RpcEptMapper|LSM|SamSs|PlugPlay|EventLog|BFE|mpssvc|nsi|ProfSvc|gpsvc|CryptSvc|TrustedInstaller|WinDefend|WdNisSvc|MpDefenderCoreService|SecurityHealthService|wscsvc|Dhcp|Dnscache|Winmgmt|Schedule|UserManager|CoreMessagingRegistrar|SystemEventsBroker|Power|BrokerInfrastructure|Appinfo|AppXSvc|StateRepository|TextInputManagementService|TimeBrokerSvc|ClipSVC|AppIDSvc|KeyIso|VaultSvc|Netlogon|LanmanWorkstation|LanmanServer|Wcmsvc|NlaSvc|AudioSrv|AudioEndpointBuilder|MMCSS|FontCache|StorSvc|vds|volmgr|partmgr|mountmgr|stornvme|storahci|Ntfs|FltMgr|Tcpip|AFD)$"
+$tiScmProtected   = "^(?i)(WaaSMedicSvc|DoSvc|UsoSvc|wuauserv|BITS|uhssvc)$"
 $svcRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
 $rawServices = @(Get-Service -ErrorAction SilentlyContinue)
 $total = [math]::Max(1, $rawServices.Count)
@@ -7496,7 +8882,14 @@ $startLabel = switch ($startCode) {
 default { [string]$s.StartType }
 }
 if ($startCode -in @(0, 1)) { $isCrit = $true }
-$startDisp = if ($isCrit) { "$startLabel [CRITICAL - LOCKED]" } else { $startLabel }
+$isTiProtected = (-not $isCrit) -and ($sName -match $tiScmProtected)
+$startDisp = if ($isCrit) {
+"$startLabel [CRITICAL - LOCKED]"
+} elseif ($isTiProtected) {
+"$startLabel [TI-Protected / Reboot to re-enable]"
+} else {
+$startLabel
+}
 $svcs.Add([PSCustomObject]@{
 Name        = $sName
 DisplayName = $s.DisplayName
@@ -7530,7 +8923,7 @@ $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
 $modal.ForeColor = [System.Drawing.Color]::White
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 $lblDesc = New-Object System.Windows.Forms.Label
-$lblDesc.Text = "Full live control over Windows Services. 'Start' automatically unlocks Disabled (Start=4) services to Manual before starting. Critical OS services (Red) are locked."
+$lblDesc.Text = "Full live control over Windows Services. 'Start' unlocks Disabled services (TI-Protected services like WaaSMedicSvc/DoSvc require a reboot after re-enabling). Critical OS services (Red) are locked."
 $lblDesc.UseMnemonic = $false
 $lblDesc.Location = New-Object System.Drawing.Point(15, 10)
 $lblDesc.Size = New-Object System.Drawing.Size(935, 38)
@@ -7807,36 +9200,35 @@ $curStart  = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Start" -ErrorActi
 $baseStart = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
 if ($curStart -eq 4 -or $baseStart -eq 4) {
 $UltixSync.Logs.Enqueue(" -> Auto-unlocking Disabled service '$sName' to Manual (Start=3) & Starting...")
-Set-ProtectedServiceStart -ServiceName $sName -StartValue 3 -StartService
-if ($baseSvcName -ne $sName -and (Test-Path -LiteralPath $baseRegPath)) {
-Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue 3 -StartService
-}
 $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
-if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
-Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+$isUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
+if ($isUserTemplate) {
+try {
+Set-UltixRegValue -Path $baseRegPath -Name "UserServiceFlags" -Value 3 -Type DWord -Module "Z4_Services"
+} catch { }
 }
+if ($baseSvcName -ne $sName -and (Test-Path -LiteralPath $baseRegPath)) {
+Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue 3 -Module "Z4_Services"
+}
+Set-ProtectedServiceStart -ServiceName $sName -StartValue 3 -StartService:(-not ($isUserTemplate -and $baseSvcName -eq $sName)) -Module "Z4_Services"
 } else {
+$syncStart = if ($curStart -in @(2, 3)) { [int]$curStart } else { -1 }
 $UltixSync.Logs.Enqueue(" -> Starting service: $sName ($($svc.DisplayName))")
+Invoke-UltixStep -Command "[WinUltix.PrivilegeEnabler]::SetServiceConfigLive('$sName', $syncStart, `$true); Start-Service -Name '$sName'" -Action {
 if ($null -ne ([WinUltix.PrivilegeEnabler].GetMethod("SetServiceConfigLive"))) {
-[void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($sName, -1, $true)
+[void][WinUltix.PrivilegeEnabler]::SetServiceConfigLive($sName, $syncStart, $true)
 }
 Start-Service -Name $sName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+"$sName -> Status: $((Get-Service -Name $sName -ErrorAction SilentlyContinue).Status)"
+} -Module "Z4_Services"
 }
 $curStatus = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
 $UltixSync.Logs.Enqueue("    [OK] ${sName} -> Status: $curStatus.")
 }
 "Stop" {
 $UltixSync.Logs.Enqueue(" -> Stopping service: $sName ($($svc.DisplayName))")
-Stop-Service -Name $sName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-if ($baseSvcName -ne $sName) {
-Get-Service -Name "${baseSvcName}_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-}
+Stop-UltixService -ServiceName $sName -IncludePerUserInstances:($baseSvcName -ne $sName) -Module "Z4_Services"
 $afterStop = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
-if ($afterStop -eq 'Running' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
-[void][WinUltix.PrivilegeEnabler]::StopServiceLive($sName)
-Start-Sleep -Milliseconds 250
-$afterStop = (Get-Service -Name $sName -ErrorAction SilentlyContinue).Status
-}
 $UltixSync.Logs.Enqueue("    [OK] ${sName} -> Status: $afterStop.")
 }
 default {
@@ -7848,25 +9240,25 @@ $targetStart = switch ($OpMode) {
 $flagVal   = if ($targetStart -eq 4) { 0 } else { 3 }
 $modeLabel = if ($targetStart -eq 2) { "Automatic (2)" } elseif ($targetStart -eq 3) { "Manual (3)" } else { "Disabled (4)" }
 $UltixSync.Logs.Enqueue(" -> Setting StartType [$modeLabel]: $sName ($($svc.DisplayName))")
-Set-ProtectedServiceStart -ServiceName $sName -StartValue $targetStart
+Set-ProtectedServiceStart -ServiceName $sName -StartValue $targetStart -Module "Z4_Services"
 if (Test-Path -LiteralPath $baseRegPath) {
 if ($baseSvcName -ne $sName) {
-Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart
+Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart -Module "Z4_Services"
 }
 $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
 if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
-Set-ItemProperty -LiteralPath $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Force -ErrorAction SilentlyContinue
+try {
+Set-UltixRegValue -Path $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Module "Z4_Services"
+} catch { }
 }
 if ($targetStart -in @(3, 4)) {
-Remove-ItemProperty -LiteralPath $baseRegPath -Name "DelayedAutostart" -Force -ErrorAction SilentlyContinue
+try {
+Remove-UltixRegItem -Path $baseRegPath -Name "DelayedAutostart" -IgnoreMissing -Module "Z4_Services"
+} catch { }
 }
 }
 if ($targetStart -eq 4) {
-Stop-Service -Name $sName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-Get-Service -Name "${baseSvcName}_*" -ErrorAction SilentlyContinue | Stop-Service -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-if ((Get-Service -Name $sName -ErrorAction SilentlyContinue).Status -eq 'Running' -and $null -ne ([WinUltix.PrivilegeEnabler].GetMethod("StopServiceLive"))) {
-[void][WinUltix.PrivilegeEnabler]::StopServiceLive($sName)
-}
+Stop-UltixService -ServiceName $baseSvcName -IncludePerUserInstances:($baseSvcName -ne $sName) -Module "Z4_Services"
 $UltixSync.Logs.Enqueue("    [OK] $sName locked to Disabled (Start=4) and stopped.")
 } else {
 $UltixSync.Logs.Enqueue("    [OK] $sName StartType updated to $modeLabel in Registry & live SCM.")
@@ -8055,7 +9447,8 @@ $keyObj = Get-Item -LiteralPath $reg.Path -ErrorAction SilentlyContinue
 if ($null -ne $keyObj) {
 try {
 foreach ($valName in $keyObj.Property) {
-$valData = [string]$keyObj.GetValue($valName)
+$lookupName = if ($valName -eq "(Default)") { "" } else { $valName }
+$valData    = [string]$keyObj.GetValue($lookupName, "")
 $state = if ($reg.Approved -ne "") {
 Resolve-StartupApprovedState -ApprovedRegPath $reg.Approved -EntryName $valName
 } else {
@@ -8136,12 +9529,14 @@ if ($Action -eq "Primary") {
 $UltixSync.Logs.Enqueue(" -> Deleting startup entry: $($item.Name) [$($item.Location)]")
 try {
 if ($item.Type -eq "Registry") {
-Remove-ItemProperty -LiteralPath $item.RegPath -Name $item.Name -Force -ErrorAction Stop
+Remove-UltixRegItem -Path $item.RegPath -Name $item.Name -Module "Z4_Services"
 } else {
+Invoke-UltixStep -Command "Remove-Item -LiteralPath '$($item.Command)' -Force" -Action {
 Remove-Item -LiteralPath $item.Command -Force -ErrorAction Stop
+} -SuccessOutput "Removed startup shortcut: $($item.Name)" -Module "Z4_Services"
 }
 if (-not [string]::IsNullOrWhiteSpace($item.ApprovedPath) -and (Test-Path -LiteralPath $item.ApprovedPath)) {
-Remove-ItemProperty -LiteralPath $item.ApprovedPath -Name $item.Name -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $item.ApprovedPath -Name $item.Name -IgnoreMissing -Module "Z4_Services"
 }
 $UltixSync.Logs.Enqueue("    [OK] Permanently removed $($item.Name).")
 } catch {
@@ -8153,18 +9548,15 @@ $UltixSync.Logs.Enqueue("    [!] $($item.Name) [$($item.Location)] does not supp
 continue
 }
 try {
-if (-not (Test-Path -LiteralPath $item.ApprovedPath)) {
-New-Item -Path $item.ApprovedPath -Force | Out-Null
-}
 if ($item.State -match "^Disabled") {
 [byte[]]$enableBytes = @(0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-Set-ItemProperty -LiteralPath $item.ApprovedPath -Name $item.Name -Value $enableBytes -Type Binary -Force -ErrorAction Stop
+Set-UltixRegValue -Path $item.ApprovedPath -Name $item.Name -Value $enableBytes -Type Binary -Module "Z4_Services"
 $UltixSync.Logs.Enqueue(" -> [ENABLED]  $($item.Name) [$($item.Location)]")
 } else {
 [byte[]]$headerBytes  = @(0x03, 0x00, 0x00, 0x00)
 [byte[]]$timeBytes    = [BitConverter]::GetBytes([DateTime]::UtcNow.ToFileTimeUtc())
 [byte[]]$disableBytes = $headerBytes + $timeBytes
-Set-ItemProperty -LiteralPath $item.ApprovedPath -Name $item.Name -Value $disableBytes -Type Binary -Force -ErrorAction Stop
+Set-UltixRegValue -Path $item.ApprovedPath -Name $item.Name -Value $disableBytes -Type Binary -Module "Z4_Services"
 $UltixSync.Logs.Enqueue(" -> [DISABLED] $($item.Name) [$($item.Location)]")
 }
 } catch {
@@ -8217,8 +9609,10 @@ if ($clean -match '^"([^"]+)"') {
 $clean = $matches[1].Trim()
 } elseif ($clean -match '(?i)^(.+?\.(?:exe|bat|cmd|vbs|ps1|msc|com|scr|hta|js|wsf))(?:$|\s)') {
 $clean = $matches[1].Trim()
-} else {
+} elseif (-not [System.IO.File]::Exists($clean.Trim('"')) -and -not [System.IO.File]::Exists(($clean.Trim('"') + ".exe"))) {
 $clean = ($clean.Trim('"') -split '\s+')[0]
+} else {
+$clean = $clean.Trim('"')
 }
 if ([string]::IsNullOrWhiteSpace($clean) -or $clean -match '^\$\(' -or $clean -match '^[a-zA-Z][a-zA-Z0-9+\-.]*://') {
 return $true
@@ -8285,7 +9679,7 @@ if ($null -ne $t.Repetition -and -not [string]::IsNullOrWhiteSpace($t.Repetition
 return ($tags -join ", ")
 }
 $protectedTaskNames = "^(?i)(WinUltix_CPPC_Failsafe|MpIdleTask|Windows Defender.*|BitLocker.*|PcaPatchDbTask|SdbinstMergeDbTask)$"
-$msTelemetryPaths   = "(?i)^\\Microsoft\\Windows\\(Application Experience|Autochk|Customer Experience Improvement Program|DiskDiagnostic|Feedback|Location|Maps|Mobile Broadband Accounts|NetTrace|Power Efficiency Diagnostics|PushToInstall|RetailDemo|CloudExperienceHost|Windows Error Reporting|WaaSMedic)\\"
+$msTelemetryPaths   = "(?i)^\\Microsoft\\Windows\\(Application Experience|Autochk|Customer Experience Improvement Program|DiskDiagnostic|Feedback|Location|Maps|Mobile Broadband Accounts|NetTrace|PerformanceTrace|Power Efficiency Diagnostics|PushToInstall|RetailDemo|CloudExperienceHost|Windows Error Reporting|WaaSMedic)\\"
 $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
 $total = [math]::Max(1, $allTasks.Count)
 $idx = 0
@@ -8383,11 +9777,14 @@ $current = 0
 foreach ($item in $Selected) {
 $current++
 $UltixSync.Progress = [int](($current / $total) * 100)
+$fullTaskId = "$($item.TaskPath)$($item.Name)"
 if ($Action -eq "Primary") {
-$UltixSync.Logs.Enqueue(" -> Unregistering task: $($item.TaskPath)$($item.Name)")
+$UltixSync.Logs.Enqueue(" -> Unregistering task: $fullTaskId")
 try {
+Invoke-UltixStep -Command "Stop-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'; Unregister-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)' -Confirm:`$false" -Action {
 Stop-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction SilentlyContinue | Out-Null
 Unregister-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -Confirm:$false -ErrorAction Stop
+} -SuccessOutput "Unregistered task: $fullTaskId" -Module "Z4_Services"
 $UltixSync.Logs.Enqueue("    [OK] Permanently removed $($item.Name).")
 } catch {
 $UltixSync.Logs.Enqueue("    [!] Failed to remove $($item.Name): $($_.Exception.Message)")
@@ -8395,12 +9792,16 @@ $UltixSync.Logs.Enqueue("    [!] Failed to remove $($item.Name): $($_.Exception.
 } else {
 try {
 if ($item.State -eq "Disabled") {
+Invoke-UltixStep -Command "Enable-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'" -Action {
 Enable-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction Stop | Out-Null
-$UltixSync.Logs.Enqueue(" -> [ENABLED]  $($item.TaskPath)$($item.Name)")
+} -SuccessOutput "Enabled task: $fullTaskId" -Module "Z4_Services"
+$UltixSync.Logs.Enqueue(" -> [ENABLED]  $fullTaskId")
 } else {
+Invoke-UltixStep -Command "Stop-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'; Disable-ScheduledTask -TaskPath '$($item.TaskPath)' -TaskName '$($item.Name)'" -Action {
 Stop-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction SilentlyContinue | Out-Null
 Disable-ScheduledTask -TaskName $item.Name -TaskPath $item.TaskPath -ErrorAction Stop | Out-Null
-$UltixSync.Logs.Enqueue(" -> [DISABLED] $($item.TaskPath)$($item.Name)")
+} -SuccessOutput "Disabled task: $fullTaskId" -Module "Z4_Services"
+$UltixSync.Logs.Enqueue(" -> [DISABLED] $fullTaskId")
 }
 } catch {
 $UltixSync.Logs.Enqueue("    [!] Failed to toggle $($item.Name): $($_.Exception.Message)")
@@ -8504,10 +9905,11 @@ IsDetected    = ($denyExecPol -ne 1)
 OptIn         = $true
 ActionData    = @{ Layer = "DenyExecute"; OptIn = $true }
 })
-$usbstorStart  = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
-$uaspstorStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor" -Name "Start" -ErrorAction SilentlyContinue).Start
-$denyReadPol   = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -ErrorAction SilentlyContinue).Deny_Read
-$isHardLocked  = ($usbstorStart -eq 4 -and $uaspstorStart -eq 4 -and $denyReadPol -eq 1)
+$usbstorStart   = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
+$uaspKeyExists  = Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor"
+$uaspstorStart  = if ($uaspKeyExists) { (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor" -Name "Start" -ErrorAction SilentlyContinue).Start } else { 4 }
+$denyReadPol    = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -ErrorAction SilentlyContinue).Deny_Read
+$isHardLocked   = ($usbstorStart -eq 4 -and $uaspstorStart -eq 4 -and $denyReadPol -eq 1)
 $results.Add([PSCustomObject]@{
 UIDisplayName = "USB Total Blackout: Disable USBSTOR + UASPStor Drivers (Blocks all USB Sticks & SSDs)"
 IsDetected    = (-not $isHardLocked)
@@ -8558,25 +9960,22 @@ $UltixSync.Progress = [int](($current / $total) * 100)
 $UltixSync.Logs.Enqueue(" -> $verb USB Security Layer: $($item.UIDisplayName)")
 }
 $layer = $item.ActionData.Layer
-if (-not (Test-Path -LiteralPath $remGuidKey)) { New-Item -Path $remGuidKey -Force | Out-Null }
-if (-not (Test-Path -LiteralPath $storPolKey)) { New-Item -Path $storPolKey -Force | Out-Null }
 switch ($layer) {
 "WriteProtect" {
 if ($Op -eq 'Apply') {
-Set-ItemProperty -LiteralPath $storPolKey -Name "WriteProtect" -Value 1 -Type DWord -Force
-Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $storPolKey -Name "WriteProtect" -Value 1 -Type DWord -Module "Z5_Utilities"
+Set-UltixRegValue -Path $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Module "Z5_Utilities"
 foreach ($wpdKey in $wpdGuids) {
-if (-not (Test-Path -LiteralPath $wpdKey)) { New-Item -Path $wpdKey -Force | Out-Null }
-Set-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $wpdKey -Name "Deny_Write" -Value 1 -Type DWord -Module "Z5_Utilities"
 }
 } else {
-Set-ItemProperty -LiteralPath $storPolKey -Name "WriteProtect" -Value 0 -Type DWord -Force
+Set-UltixRegValue -Path $storPolKey -Name "WriteProtect" -Value 0 -Type DWord -Module "Z5_Utilities"
 $denyReadActive = (Get-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -ErrorAction SilentlyContinue).Deny_Read
 if ($denyReadActive -ne 1) {
-Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $remGuidKey -Name "Deny_Write" -IgnoreMissing -Module "Z5_Utilities"
 foreach ($wpdKey in $wpdGuids) {
 if (Test-Path -LiteralPath $wpdKey) {
-Remove-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $wpdKey -Name "Deny_Write" -IgnoreMissing -Module "Z5_Utilities"
 }
 }
 }
@@ -8584,50 +9983,52 @@ Remove-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Force -ErrorAction 
 }
 "DenyExecute" {
 if ($Op -eq 'Apply') {
-Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Execute" -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $remGuidKey -Name "Deny_Execute" -Value 1 -Type DWord -Module "Z5_Utilities"
 } else {
-Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Execute" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $remGuidKey -Name "Deny_Execute" -IgnoreMissing -Module "Z5_Utilities"
 }
 }
 "TotalBlock" {
 if ($Op -eq 'Apply') {
-Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 4
-Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 4
-Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -Value 1 -Type DWord -Force
-Set-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 4 -Module "Z5_Utilities"
+if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor") {
+Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 4 -Module "Z5_Utilities"
+}
+Set-UltixRegValue -Path $remGuidKey -Name "Deny_Read" -Value 1 -Type DWord -Module "Z5_Utilities"
+Set-UltixRegValue -Path $remGuidKey -Name "Deny_Write" -Value 1 -Type DWord -Module "Z5_Utilities"
 foreach ($wpdKey in $wpdGuids) {
-if (-not (Test-Path -LiteralPath $wpdKey)) { New-Item -Path $wpdKey -Force | Out-Null }
-Set-ItemProperty -LiteralPath $wpdKey -Name "Deny_Read" -Value 1 -Type DWord -Force
-Set-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $wpdKey -Name "Deny_Read" -Value 1 -Type DWord -Module "Z5_Utilities"
+Set-UltixRegValue -Path $wpdKey -Name "Deny_Write" -Value 1 -Type DWord -Module "Z5_Utilities"
 }
 } else {
-Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 3
-Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 3
-Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Read" -Force -ErrorAction SilentlyContinue
+Set-ProtectedServiceStart -ServiceName "USBSTOR" -StartValue 3 -Module "Z5_Utilities"
+if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UASPStor") {
+Set-ProtectedServiceStart -ServiceName "UASPStor" -StartValue 3 -Module "Z5_Utilities"
+}
+Remove-UltixRegItem -Path $remGuidKey -Name "Deny_Read" -IgnoreMissing -Module "Z5_Utilities"
 foreach ($wpdKey in $wpdGuids) {
 if (Test-Path -LiteralPath $wpdKey) {
-Remove-ItemProperty -LiteralPath $wpdKey -Name "Deny_Read" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $wpdKey -Name "Deny_Read" -IgnoreMissing -Module "Z5_Utilities"
 }
 }
 $wpActive = (Get-ItemProperty -LiteralPath $storPolKey -Name "WriteProtect" -ErrorAction SilentlyContinue).WriteProtect
 if ($null -eq $wpActive -or $wpActive -eq 0) {
-Remove-ItemProperty -LiteralPath $remGuidKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $remGuidKey -Name "Deny_Write" -IgnoreMissing -Module "Z5_Utilities"
 foreach ($wpdKey in $wpdGuids) {
 if (Test-Path -LiteralPath $wpdKey) {
-Remove-ItemProperty -LiteralPath $wpdKey -Name "Deny_Write" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $wpdKey -Name "Deny_Write" -IgnoreMissing -Module "Z5_Utilities"
 }
 }
 }
 }
 }
 "LockScreenGuard" {
-if (-not (Test-Path -LiteralPath $fveKey)) { New-Item -Path $fveKey -Force | Out-Null }
 if ($Op -eq 'Apply') {
-Set-ItemProperty -LiteralPath $fveKey -Name "DisableExternalDMAUnderLock" -Value 1 -Type DWord -Force
-Set-ItemProperty -LiteralPath $pwrKey -Name "DisableUsbEnumerationOnLock" -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $fveKey -Name "DisableExternalDMAUnderLock" -Value 1 -Type DWord -Module "Z5_Utilities"
+Set-UltixRegValue -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -Value 1 -Type DWord -Module "Z5_Utilities"
 } else {
-Remove-ItemProperty -LiteralPath $fveKey -Name "DisableExternalDMAUnderLock" -Force -ErrorAction SilentlyContinue
-Remove-ItemProperty -LiteralPath $pwrKey -Name "DisableUsbEnumerationOnLock" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $fveKey -Name "DisableExternalDMAUnderLock" -IgnoreMissing -Module "Z5_Utilities"
+Remove-UltixRegItem -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -IgnoreMissing -Module "Z5_Utilities"
 }
 }
 }
@@ -8677,24 +10078,13 @@ IPv6     = @("2620:119:35::35", "2620:119:53::53")
 Template = "https://doh.opendns.com/dns-query"
 }
 }
-$routedAdapters = [System.Collections.Generic.List[PSCustomObject]]::new()
-foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
-if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
-if ($nic.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
-try {
-$ipProps = $nic.GetIPProperties()
-$validGw = @($ipProps.GatewayAddresses | Where-Object { $_.Address.ToString() -notin @("0.0.0.0", "::") })
-if ($null -eq $ipProps -or $validGw.Count -eq 0) { continue }
-$v4Props = $ipProps.GetIPv4Properties()
-if ($null -eq $v4Props -or $v4Props.Index -le 0) { continue }
-$routedAdapters.Add([PSCustomObject]@{
-InterfaceIndex = [int]$v4Props.Index
-InterfaceGuid  = [string]$nic.Id
-InterfaceName  = [string]$nic.Description
-InterfaceAlias = [string]$nic.Name
-})
-} catch { }
+$isDhcp = ($TargetProvider -eq "Default (DHCP)")
+$cfg    = if (-not $isDhcp) { $dnsCatalog[$TargetProvider] } else { $null }
+if (-not $isDhcp -and $null -eq $cfg) {
+$UltixSync.Logs.Enqueue(" [!] Unknown DNS provider profile '$TargetProvider'. Aborting without changes.")
+return
 }
+$routedAdapters = @(Get-UltixActiveNetworkAdapters)
 if ($routedAdapters.Count -eq 0) {
 $UltixSync.Logs.Enqueue(" [!] No active network adapters with a default gateway found.")
 return
@@ -8714,55 +10104,83 @@ $ifGuid  = $nicInfo.InterfaceGuid
 $ifName  = $nicInfo.InterfaceName
 $dohV4Root = "$ifSpecBase\$ifGuid\DohInterfaceSettings\Doh"
 $dohV6Root = "$ifSpecBase\$ifGuid\DohInterfaceSettings\Doh6"
-if (Test-Path -LiteralPath $dohV4Root) { Remove-Item -LiteralPath $dohV4Root -Recurse -Force -ErrorAction SilentlyContinue }
-if (Test-Path -LiteralPath $dohV6Root) { Remove-Item -LiteralPath $dohV6Root -Recurse -Force -ErrorAction SilentlyContinue }
-if ($TargetProvider -eq "Default (DHCP)") {
+Remove-UltixRegItem -Path $dohV4Root -IgnoreMissing -Module "Z5_Utilities"
+Remove-UltixRegItem -Path $dohV6Root -IgnoreMissing -Module "Z5_Utilities"
+if ($isDhcp) {
 try {
+Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses" -Action {
 Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses -ErrorAction Stop
+} -SuccessOutput "Reset DNS to DHCP on [$ifName]" -Module "Z5_Utilities"
 $UltixSync.Logs.Enqueue(" -> [$ifName]: Reverted IPv4/IPv6 DNS to DHCP and cleared DoH locks.")
 } catch {
 $UltixSync.Logs.Enqueue(" [!] [$ifName]: Failed to reset DNS: $($_.Exception.Message)")
 }
 continue
 }
-$cfg = $dnsCatalog[$TargetProvider]
-if ($null -eq $cfg) { continue }
 $allServers = [System.Collections.Generic.List[string]]::new()
-foreach ($ip4 in $cfg.IPv4) { $allServers.Add($ip4) }
-if ($UseIPv6) {
-foreach ($ip6 in $cfg.IPv6) { $allServers.Add($ip6) }
-}
+$v4List     = @($cfg.IPv4)
+$v4Literal  = ($v4List | ForEach-Object { "'$_'" }) -join ","
 try {
-Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($allServers) -ErrorAction Stop
-if (-not $UseIPv6) {
+Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($v4Literal)" -Action {
+Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $v4List -ErrorAction Stop
+} -SuccessOutput "Enforced IPv4 DNS ($($v4List -join ', ')) on [$ifName]" -Module "Z5_Utilities"
+foreach ($ip4 in $v4List) { $allServers.Add($ip4) }
+} catch {
+$UltixSync.Logs.Enqueue(" [!] [$ifName]: Error setting IPv4 DNS servers: $($_.Exception.Message)")
+}
+if ($UseIPv6) {
+$v6List    = @($cfg.IPv6)
+$v6Literal = ($v6List | ForEach-Object { "'$_'" }) -join ","
+try {
+Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($v6Literal)" -Action {
+Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $v6List -ErrorAction Stop
+} -SuccessOutput "Enforced IPv6 DNS ($($v6List -join ', ')) on [$ifName]" -Module "Z5_Utilities"
+foreach ($ip6 in $v6List) { $allServers.Add($ip6) }
+} catch {
+$UltixSync.Logs.Enqueue(" [!] [$ifName]: IPv6 stack unbound or unavailable ($($_.Exception.Message)).")
+}
+} else {
 $tcp6IfKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$ifGuid"
 if (Test-Path -LiteralPath $tcp6IfKey) {
-Set-ItemProperty -LiteralPath $tcp6IfKey -Name "NameServer" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+$curV6Ns = (Get-ItemProperty -LiteralPath $tcp6IfKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
+if (-not [string]::IsNullOrWhiteSpace($curV6Ns)) {
+try {
+Set-UltixRegValue -Path $tcp6IfKey -Name "NameServer" -Value "" -Type String -Module "Z5_Utilities"
+} catch { }
 }
 }
+}
+if ($allServers.Count -gt 0) {
 $UltixSync.Logs.Enqueue(" -> [$ifName]: Enforced servers: $($allServers -join ', ')")
-} catch {
-$UltixSync.Logs.Enqueue(" [!] [$ifName]: Error setting DNS servers: $($_.Exception.Message)")
 }
 if ($UseDoH) {
-if (-not (Test-Path -LiteralPath $wellKnownBase)) { New-Item -Path $wellKnownBase -Force | Out-Null }
 foreach ($ip in $allServers) {
 $wkKey = "$wellKnownBase\$ip"
-if (-not (Test-Path -LiteralPath $wkKey)) { New-Item -Path $wkKey -Force | Out-Null }
-Set-ItemProperty -LiteralPath $wkKey -Name "Template" -Value $cfg.Template -Type String -Force -ErrorAction SilentlyContinue
+try {
+Set-UltixRegValue -Path $wkKey -Name "Template" -Value $cfg.Template -Type String -Module "Z5_Utilities"
+} catch { }
 if ($hasDohCmd) {
+try {
+Invoke-UltixStep -Command "Add-DnsClientDohServerAddress -ServerAddress '$ip' -DohTemplate '$($cfg.Template)' -AllowFallbackToUdp `$true -AutoUpgrade `$true" -Action {
 Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $true -AutoUpgrade $true -ErrorAction SilentlyContinue
 Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $cfg.Template -AllowFallbackToUdp $true -AutoUpgrade $true -ErrorAction SilentlyContinue
+} -SuccessOutput "Configured DoH template for $ip" -Module "Z5_Utilities"
+} catch { }
 }
 $isV6 = ($ip -match ":")
 $targetDohKey = if ($isV6) { "$dohV6Root\$ip" } else { "$dohV4Root\$ip" }
-if (-not (Test-Path -LiteralPath $targetDohKey)) { New-Item -Path $targetDohKey -Force | Out-Null }
-Set-ItemProperty -LiteralPath $targetDohKey -Name "DohFlags" -Value ([uint64]1) -Type QWord -Force -ErrorAction SilentlyContinue
+try {
+Set-UltixRegValue -Path $targetDohKey -Name "DohFlags" -Value ([uint64]1) -Type QWord -Module "Z5_Utilities"
+} catch { }
 }
 $UltixSync.Logs.Enqueue("    [+] Native DoH encryption activated ($($cfg.Template)).")
 }
 }
+try {
+Invoke-UltixStep -Command "Clear-DnsClientCache" -Action {
 Clear-DnsClientCache -ErrorAction SilentlyContinue
+} -SuccessOutput "Flushed DNS resolver cache" -Module "Z5_Utilities"
+} catch { }
 if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
 } -OnComplete ({
 param($nullOut)
@@ -8771,20 +10189,54 @@ Update-DNSLabel
 Write-GUI " -> DNS configuration completed and resolver cache flushed.`n"
 }.GetNewClosure())
 }
-function Start-ClassicNet      { Start-Process "ncpa.cpl" }
-function Start-ClassicApps     { Start-Process "appwiz.cpl" }
-function Start-ClassicSound    { Start-Process "mmsys.cpl" }
-function Start-ClassicPrinters { Start-Process "explorer.exe" -ArgumentList "shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{A8A91A66-3A7D-4424-8D24-04E180695C7A}" }
-function Start-ClassicSysProp  { Start-Process "SystemPropertiesAdvanced.exe" }
-function Start-ClassicPower    { Start-Process "powercfg.cpl" }
+function Start-ClassicNet {
+Invoke-UltixStep -Command "Start-Process 'ncpa.cpl'" -Action {
+Start-Process "ncpa.cpl"
+} -SuccessOutput "Launched Network Connections (ncpa.cpl)" -Module "Z5_Utilities"
+}
+function Start-ClassicApps {
+Invoke-UltixStep -Command "Start-Process 'appwiz.cpl'" -Action {
+Start-Process "appwiz.cpl"
+} -SuccessOutput "Launched Programs and Features (appwiz.cpl)" -Module "Z5_Utilities"
+}
+function Start-ClassicSound {
+Invoke-UltixStep -Command "Start-Process 'mmsys.cpl'" -Action {
+Start-Process "mmsys.cpl"
+} -SuccessOutput "Launched Sound Properties (mmsys.cpl)" -Module "Z5_Utilities"
+}
+function Start-ClassicPrinters {
+$shellUri = "shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{A8A91A66-3A7D-4424-8D24-04E180695C7A}"
+Invoke-UltixStep -Command "Start-Process 'explorer.exe' -ArgumentList '$shellUri'" -Action {
+Start-Process "explorer.exe" -ArgumentList $shellUri
+} -SuccessOutput "Launched Win32 Devices and Printers" -Module "Z5_Utilities"
+}
+function Start-ClassicSysProp {
+Invoke-UltixStep -Command "Start-Process 'SystemPropertiesAdvanced.exe'" -Action {
+Start-Process "SystemPropertiesAdvanced.exe"
+} -SuccessOutput "Launched Advanced System Properties" -Module "Z5_Utilities"
+}
+function Start-ClassicPower {
+Invoke-UltixStep -Command "Start-Process 'powercfg.cpl'" -Action {
+Start-Process "powercfg.cpl"
+} -SuccessOutput "Launched Power Options (powercfg.cpl)" -Module "Z5_Utilities"
+}
 function Start-ClassicGpoOrReg {
 if ([System.IO.File]::Exists("$env:windir\System32\gpedit.msc")) {
-Start-Process "mmc.exe" -ArgumentList "`"$env:windir\System32\gpedit.msc`""
+$gpoPath = "$env:windir\System32\gpedit.msc"
+Invoke-UltixStep -Command "Start-Process 'mmc.exe' -ArgumentList '`"$gpoPath`"'" -Action {
+Start-Process "mmc.exe" -ArgumentList "`"$gpoPath`""
+} -SuccessOutput "Launched Local Group Policy Editor (gpedit.msc)" -Module "Z5_Utilities"
 } else {
+Invoke-UltixStep -Command "Start-Process 'regedit.exe'" -Action {
 Start-Process "regedit.exe"
+} -SuccessOutput "Launched Registry Editor (regedit.exe)" -Module "Z5_Utilities"
 }
 }
-function Start-ClassicCompMgmt { Start-Process "compmgmt.msc" }
+function Start-ClassicCompMgmt {
+Invoke-UltixStep -Command "Start-Process 'compmgmt.msc'" -Action {
+Start-Process "compmgmt.msc"
+} -SuccessOutput "Launched Computer Management (compmgmt.msc)" -Module "Z5_Utilities"
+}
 function Initialize-Z5UI {
 param([System.Windows.Forms.TabControl]$TabControl)
 $tabSec = New-Object System.Windows.Forms.TabPage
@@ -8859,16 +10311,39 @@ $dlg.Title = "Select Executable to Block (SRP+IFEO)"
 $dlg.InitialDirectory = "$env:ProgramFiles"
 try {
 if ($dlg.ShowDialog($global:form) -eq [System.Windows.Forms.DialogResult]::OK) {
-$exeName = [System.IO.Path]::GetFileName($dlg.FileName)
-$protectedCoreBins = '^(?i)(explorer|svchost|lsass|csrss|smss|wininit|winlogon|services|dwm|sihost|taskhostw|conhost|cmd|powershell|pwsh|regedit|mmc|taskmgr|systray|gpupdate|WinUltix)\.exe$'
+$fullPath = [System.IO.Path]::GetFullPath($dlg.FileName)
+$exeName  = [System.IO.Path]::GetFileName($fullPath)
+$protectedCoreBins = '^(?i)(ntoskrnl|winload|bootmgr|explorer|svchost|lsass|csrss|smss|wininit|winlogon|userinit|logonui|consent|credentialuibroker|services|dwm|fontdrvhost|sihost|taskhostw|runtimebroker|startmenuexperiencehost|shellexperiencehost|conhost|cmd|powershell|pwsh|regedit|mmc|taskmgr|systray|gpupdate|rundll32|dllhost|msiexec|dism|sfc|sc|net|net1|icacls|bcdedit|msmpeng|nissrv|securityhealthservice|smartscreen|WinUltix)\.exe$'
 if ($exeName -match $protectedCoreBins) {
-[System.Windows.Forms.MessageBox]::Show("Blocking core Windows shell/kernel binary '$exeName' is forbidden to prevent OS lockout.", "WinUltix - Safety Guard", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+[System.Windows.Forms.MessageBox]::Show("Blocking core Windows shell, security, or kernel binary '$exeName' is forbidden to prevent OS lockout.", "WinUltix - Safety Guard", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
 return
 }
-$regKey = "HKLM:\SOFTWARE\WinUltix\SRP"
-if (-not (Test-Path -LiteralPath $regKey)) { New-Item -Path $regKey -Force | Out-Null }
-Set-ItemProperty -LiteralPath $regKey -Name $exeName -Value $dlg.FileName -Type String -Force
-Write-GUI " -> Added custom SRP+IFEO target: $exeName ($($dlg.FileName))"
+$regKey   = "HKLM:\SOFTWARE\WinUltix\SRP"
+$valLabel = $exeName
+if (Test-Path -LiteralPath $regKey) {
+$existingProps = Get-ItemProperty -LiteralPath $regKey -ErrorAction SilentlyContinue
+if ($null -ne $existingProps) {
+$existingNames = @($existingProps.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS(Path|ParentPath|ChildName|Drive|Provider)$' } | Select-Object -ExpandProperty Name)
+foreach ($en in $existingNames) {
+if ([string]::Equals([string]$existingProps.$en, $fullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+Write-GUI " -> Custom SRP+IFEO target already registered: $en ($fullPath)`n"
+return
+}
+}
+if ($existingNames -contains $valLabel) {
+$parentFolder = [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($fullPath))
+$baseAlias    = if (-not [string]::IsNullOrWhiteSpace($parentFolder)) { "$exeName ($parentFolder)" } else { "$exeName #2" }
+$valLabel     = $baseAlias
+$suffixIdx    = 2
+while ($existingNames -contains $valLabel) {
+$valLabel = "$baseAlias #$suffixIdx"
+$suffixIdx++
+}
+}
+}
+}
+Set-UltixRegValue -Path $regKey -Name $valLabel -Value $fullPath -Type String -Module "Z5_Utilities"
+Write-GUI " -> Added custom SRP+IFEO target: $valLabel ($fullPath)`n"
 }
 } finally {
 $dlg.Dispose()
@@ -8884,7 +10359,7 @@ Write-GUI " -> Custom SRP+IFEO roster is already empty.`n"
 return
 }
 $customItems = @(Get-RegState_SRP | Where-Object { $_.ActionData.IsCustom -eq $true })
-Remove-Item -LiteralPath $regKey -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+Remove-UltixRegItem -Path $regKey -IgnoreMissing -Module "Z5_Utilities"
 if ($customItems.Count -gt 0) {
 Write-GUI " -> Purging custom SRP+IFEO tracking list and reverting $($customItems.Count) custom rule(s)..."
 Invoke-ApplySRP -SelectedItems $customItems -Operation "Revert" -ControlsToDisable $allTabButtons.ToArray()
@@ -8905,10 +10380,12 @@ Invoke-UltixAuditFlow `
 }.GetNewClosure())
 $lblDNS = New-Object System.Windows.Forms.Label
 $lblDNS.Text = "Hardened DNS & Native DoH Enforcer (IPv4 / IPv6)"
+$lblDNS.AccessibleName = "SectionHeader"
+$lblDNS.UseMnemonic = $false
 $lblDNS.Location = New-Object System.Drawing.Point(15, 228)
 $lblDNS.Size = New-Object System.Drawing.Size(370, 20)
 $lblDNS.ForeColor = [System.Drawing.Color]::DarkGray
-$lblDNS.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblDNS.Font = Get-UltixFont -Role "SectionHeader"
 $comboDNS = New-Object System.Windows.Forms.ComboBox
 $comboDNS.Location = New-Object System.Drawing.Point(15, 252)
 $comboDNS.Size = New-Object System.Drawing.Size(240, 25)
@@ -8951,10 +10428,12 @@ $global:lblCurrentDNS.Font = New-Object System.Drawing.Font("Consolas", 9.2, [Sy
 $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
 $lblClassic = New-Object System.Windows.Forms.Label
 $lblClassic.Text = "Classic Win32 Control & Admin Applets"
+$lblClassic.AccessibleName = "SectionHeader"
+$lblClassic.UseMnemonic = $false
 $lblClassic.Location = New-Object System.Drawing.Point(15, 345)
 $lblClassic.Size = New-Object System.Drawing.Size(370, 20)
 $lblClassic.ForeColor = [System.Drawing.Color]::DarkGray
-$lblClassic.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblClassic.Font = Get-UltixFont -Role "SectionHeader"
 $btnNetCpl = New-UltixButton -Parent $tabSec -X 15 -Y 370 -Width 180 -Height 40 -RGB @(55, 58, 64) `
 -Text "Network Adapters (ncpa)" `
 -Description "Direct launch of the classic Win32 Network Connections applet (ncpa.cpl)." `
@@ -9011,7 +10490,9 @@ Write-GUI " -> Launching external maintenance console: $Title..."
 Update-Progress 20
 Invoke-AsyncTask -ControlsToDisable $validControls -ScriptBlock {
 param($CmdTitle, $CmdChain)
-$fullArgs = "/v:on /c `"title $CmdTitle & color 0A & set WUX_ERR=0 & $CmdChain & if !WUX_ERR! EQU 0 (set WUX_ERR=!ERRORLEVEL!) & echo. & echo Operation finished (Exit Code: !WUX_ERR!). Press any key to close... & pause >nul & exit /b !WUX_ERR!`""
+$safeTitle = $CmdTitle -replace '["&|<>^]', ''
+$fullArgs  = "/v:on /c `"title $safeTitle & color 0A & set WUX_ERR=0 & $CmdChain & if !WUX_ERR! EQU 0 (set WUX_ERR=!ERRORLEVEL!) & echo. & echo Operation finished (Exit Code: !WUX_ERR!). Press any key to close... & pause >nul & exit /b !WUX_ERR!`""
+Write-UltixExpertCommand -CommandText "cmd.exe $fullArgs" -Module "Z6_Integrity"
 $exitCode = -1
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $fullArgs -PassThru -ErrorAction Stop
 try {
@@ -9020,6 +10501,7 @@ $exitCode = $proc.ExitCode
 } finally {
 $proc.Dispose()
 }
+Write-UltixExpertResult -OutputText "External maintenance console [$CmdTitle] closed" -ExitCode $exitCode -Module "Z6_Integrity"
 return [PSCustomObject]@{
 Title    = $CmdTitle
 ExitCode = $exitCode
@@ -9056,6 +10538,7 @@ $sbOutput       = [System.Text.StringBuilder]::new()
 $exitCode       = -1
 $proc           = $null
 $loggedFinalize = $false
+Write-UltixExpertCommand -CommandText "dism.exe /Online /Cleanup-Image /AnalyzeComponentStore /English" -Module "Z6_Integrity"
 try {
 $proc = [System.Diagnostics.Process]::Start($psi)
 if ($null -ne $proc) {
@@ -9114,7 +10597,7 @@ if ($null -ne $proc) { $proc.Dispose() }
 }
 if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
 $dismOutput = $sbOutput.ToString()
-$sizeMatches = @([regex]::Matches($dismOutput, '(?im):\s*([\d\.,]+\s*[MGK]B)\b'))
+$sizeMatches = @([regex]::Matches($dismOutput, '(?im):\s*([\d\.,]+\s*(?:[TGMK]B|Bytes))\b'))
 $actualSize  = if ($sizeMatches.Count -ge 2) {
 $sizeMatches[1].Groups[1].Value.Trim()
 } elseif ($sizeMatches.Count -eq 1) {
@@ -9131,6 +10614,7 @@ $reclaimableCount -gt 0 -or
 ($dismOutput -match "(?im)Recommended.*?:\s*(Yes|True|1)\b")
 )
 $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+Write-UltixExpertResult -OutputText "Actual Size: $actualSize | Reclaimable Packages: $reclaimableCount | Cleanup Recommended: $recommended" -ExitCode $exitCode -Module "Z6_Integrity"
 return [PSCustomObject]@{
 UIDisplayName = "WinSxS Payload (Actual Size: $actualSize)"
 IsDetected    = $recommended
@@ -9160,8 +10644,7 @@ Update-Progress 15
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 Unlock-UltixTrustedInstaller
 $UltixSync.Progress = 35
-$null = & dism.exe /Online /Cleanup-Image /CheckHealth /English 2>&1
-$dismExit = $LASTEXITCODE
+$dismExit = Invoke-UltixExe -FilePath "dism.exe" -Arguments @("/Online", "/Cleanup-Image", "/CheckHealth", "/English") -Module "Z6_Integrity"
 $cbsKey     = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing"
 $cbsProps   = Get-ItemProperty -LiteralPath $cbsKey -Name "CorruptionFlags", "StoreCorrupt", "UnavailableRepairCount" -ErrorAction SilentlyContinue
 $hasRegCorr = ($null -ne $cbsProps) -and (
@@ -9172,7 +10655,9 @@ $hasRegCorr = ($null -ne $cbsProps) -and (
 $isHealthy = ($dismExit -eq 0 -and -not $hasRegCorr)
 $UltixSync.Progress = 70
 $sysDrive  = $env:SystemDrive.TrimEnd('\')
-$dirtyCode = [WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+$dirtyCode = Invoke-UltixStep -Command "[WinUltix.NativeMethods]::IsVolumeDirty('$sysDrive') (FSCTL_IS_VOLUME_DIRTY)" -Action {
+[WinUltix.NativeMethods]::IsVolumeDirty($sysDrive)
+} -Module "Z6_Integrity"
 $isDirty   = ($dirtyCode -eq 1)
 $UltixSync.Progress = 90
 $cbsReboot = Test-Path -LiteralPath "$cbsKey\RebootPending"
@@ -9232,18 +10717,18 @@ Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 try {
 $UltixSync.Progress = 25
 $UltixSync.Logs.Enqueue(" -> [1/4] Flushing DNS Resolver Cache (ipconfig /flushdns)...")
-$null = & ipconfig.exe /flushdns 2>&1
+$null = Invoke-UltixExe -FilePath "ipconfig.exe" -Arguments @("/flushdns") -Module "Z6_Integrity"
 $UltixSync.Progress = 50
 $UltixSync.Logs.Enqueue(" -> [2/4] Clearing ARP routing tables & resetting WinHTTP proxy...")
-$null = & arp.exe -d * 2>&1
-$null = & netsh.exe winhttp reset proxy 2>&1
+$null = Invoke-UltixExe -FilePath "arp.exe" -Arguments @("-d", "*") -Module "Z6_Integrity"
+$null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winhttp", "reset", "proxy") -Module "Z6_Integrity"
 $UltixSync.Progress = 75
 $UltixSync.Logs.Enqueue(" -> [3/4] Resetting Winsock Catalog (netsh winsock reset)...")
-$null = & netsh.exe winsock reset 2>&1
+$null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winsock", "reset") -Module "Z6_Integrity"
 $UltixSync.Progress = 95
 $UltixSync.Logs.Enqueue(" -> [4/4] Resetting TCP/IPv4 & IPv6 Stack (netsh int ip/ipv6 reset)...")
-$null = & netsh.exe int ip reset 2>&1
-$null = & netsh.exe int ipv6 reset 2>&1
+$null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("int", "ip", "reset") -Module "Z6_Integrity"
+$null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("int", "ipv6", "reset") -Module "Z6_Integrity"
 $UltixSync.Progress = 100
 $UltixSync.Logs.Enqueue(" -> [OK] Network stack refreshed (Reboot recommended to finalize Winsock reset).")
 } catch {
@@ -9265,48 +10750,49 @@ $UltixSync.Progress = 20
 $spoolReg = "HKLM:\SYSTEM\CurrentControlSet\Services\Spooler"
 $curStart = (Get-ItemProperty -LiteralPath $spoolReg -Name "Start" -ErrorAction SilentlyContinue).Start
 if ($curStart -eq 4) {
-Set-ProtectedServiceStart -ServiceName "Spooler" -StartValue 2
+Set-ProtectedServiceStart -ServiceName "Spooler" -StartValue 2 -Module "Z6_Integrity"
 $UltixSync.Logs.Enqueue(" -> Re-enabled Print Spooler service (Was locked to Disabled by Gaming Profile).")
 }
-$spoolerProcs = @(Get-Process -Name "spoolsv" -ErrorAction SilentlyContinue)
-if ($spoolerProcs.Count -gt 0) {
-foreach ($p in $spoolerProcs) {
-try { $p.Kill() } catch { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-finally { $p.Dispose() }
-}
+Stop-UltixService -ServiceName "Spooler" -Module "Z6_Integrity"
+$killedSpool = Stop-UltixProcess -Name "spoolsv" -Module "Z6_Integrity"
+if ($killedSpool -gt 0) {
 $UltixSync.Logs.Enqueue(" -> Terminated locked spoolsv.exe process.")
 } else {
-Stop-Service -Name "Spooler" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
 $UltixSync.Logs.Enqueue(" -> Stopped Print Spooler service.")
 }
 Start-Sleep -Milliseconds 800
 $UltixSync.Progress = 50
 $spoolPath = "$env:windir\System32\spool\PRINTERS"
 if (Test-Path -LiteralPath $spoolPath) {
-$purgedCount = 0
+$purgedCount = Invoke-UltixStep -Command "Remove-Item '$spoolPath\*.SHD,*.SPL,*.TMP' -Force" -Action {
+$cnt = 0
 Get-ChildItem -Path "$spoolPath\*" -Include "*.SHD", "*.SPL", "*.TMP" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
 try {
 $_.Attributes = 'Normal'
 Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-$purgedCount++
+$cnt++
 } catch { }
 }
+return $cnt
+} -SuccessOutput "Purged orphaned print queue files" -Module "Z6_Integrity"
 $UltixSync.Logs.Enqueue(" -> Purged $purgedCount orphaned .SHD/.SPL print queue file(s).")
 }
 $UltixSync.Progress = 80
-$printWorkflow = @(Get-Service -Name "PrintWorkflowUserSvc*" -ErrorAction SilentlyContinue)
+$printWorkflow = @(Get-Service -Name "PrintWorkflowUserSvc_*" -ErrorAction SilentlyContinue)
 if ($printWorkflow.Count -gt 0) {
+Stop-UltixService -ServiceName "PrintWorkflowUserSvc" -IncludePerUserInstances -Module "Z6_Integrity"
 foreach ($wfSvc in $printWorkflow) {
-try {
-Stop-Service -InputObject $wfSvc -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-Start-Service -InputObject $wfSvc -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-} finally {
+$wfName = $wfSvc.Name
 $wfSvc.Dispose()
+Invoke-UltixStep -Command "Start-Service -Name '$wfName'" -Action {
+Start-Service -Name $wfName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+} -SuccessOutput "Started $wfName" -Module "Z6_Integrity"
 }
+$UltixSync.Logs.Enqueue(" -> Restarted $($printWorkflow.Count) dynamic PrintWorkflowUserSvc instance(s).")
 }
-$UltixSync.Logs.Enqueue(" -> Restarted dynamic PrintWorkflowUserSvc service.")
-}
+Invoke-UltixStep -Command "Start-Service -Name 'Spooler'" -Action {
 Start-Service -Name "Spooler" -WarningAction SilentlyContinue -ErrorAction Stop
+} -SuccessOutput "Print Spooler service started" -Module "Z6_Integrity"
 $UltixSync.Progress = 100
 $UltixSync.Logs.Enqueue(" -> [OK] Print Spooler service is back online.")
 } catch {
@@ -9329,30 +10815,34 @@ try {
 $UltixSync.Progress = 15
 $UltixSync.Logs.Enqueue(" -> [1/5] Stopping wuauserv, cryptSvc, bits, dosvc, and msiserver...")
 foreach ($svc in $wuServices) {
-Stop-Service -Name $svc -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+Stop-UltixService -ServiceName $svc -Module "Z6_Integrity"
 }
-Start-Sleep -Milliseconds 800
+Start-Sleep -Milliseconds 500
 $UltixSync.Progress = 35
 $bitsPaths = @(
 "$env:ProgramData\Microsoft\Network\Downloader",
 "$env:ALLUSERSPROFILE\Application Data\Microsoft\Network\Downloader"
 ) | Select-Object -Unique
-$qmgrCount = 0
+$qmgrCount = Invoke-UltixStep -Command "Remove-Item '$env:ProgramData\Microsoft\Network\Downloader\qmgr*' -Force" -Action {
+$cnt = 0
 foreach ($bPath in $bitsPaths) {
 if (Test-Path -LiteralPath $bPath) {
 Get-ChildItem -Path "$bPath\qmgr*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
 try {
 $_.Attributes = 'Normal'
 Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-$qmgrCount++
+$cnt++
 } catch { }
 }
 }
 }
+return $cnt
+} -SuccessOutput "Purged BITS transfer queue files" -Module "Z6_Integrity"
 $UltixSync.Logs.Enqueue(" -> [2/5] Purged $qmgrCount corrupted BITS transfer queue file(s) (qmgr*.dat).")
 $UltixSync.Progress = 55
 $catroot2  = "$env:windir\System32\catroot2"
 $dataStore = "$env:windir\SoftwareDistribution\DataStore"
+Invoke-UltixStep -Command "Remove-Item '$catroot2\*', '$dataStore\*' -Recurse -Force" -Action {
 foreach ($targetDir in @($catroot2, $dataStore)) {
 if (Test-Path -LiteralPath $targetDir) {
 Get-ChildItem -LiteralPath $targetDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
@@ -9363,6 +10853,7 @@ Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContin
 }
 }
 }
+} -SuccessOutput "Flushed Catroot2 catalog cache and WU DataStore" -Module "Z6_Integrity"
 $UltixSync.Logs.Enqueue(" -> [3/5] Flushed Catroot2 cryptographic catalog cache and WU DataStore.")
 $UltixSync.Progress = 75
 $modernDlls = @(
@@ -9379,11 +10870,7 @@ $validDllPaths.Add("`"$dllFull`"")
 }
 }
 if ($validDllPaths.Count -gt 0) {
-$batchArgs = "/s " + ($validDllPaths -join " ")
-$regProc = Start-Process -FilePath "regsvr32.exe" -ArgumentList $batchArgs -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-if ($null -ne $regProc) {
-try { $regProc.WaitForExit(15000) | Out-Null } finally { $regProc.Dispose() }
-}
+$null = Invoke-UltixExe -FilePath "regsvr32.exe" -Arguments (@("/s") + $validDllPaths) -Module "Z6_Integrity"
 }
 $UltixSync.Logs.Enqueue(" -> [4/5] Batch re-registered $($validDllPaths.Count) Cryptographic, WinTrust, and WU COM DLLs.")
 } catch {
@@ -9393,10 +10880,11 @@ $UltixSync.Progress = 95
 $svcDefaults = @{ "cryptSvc" = 2; "bits" = 3; "wuauserv" = 3; "dosvc" = 2; "msiserver" = 3 }
 foreach ($svc in @("cryptSvc", "bits", "wuauserv", "dosvc", "msiserver")) {
 $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+if (-not (Test-Path -LiteralPath $sPath)) { continue }
 $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
-$targetSt = if ($curSt -eq 4) { $svcDefaults[$svc] } else { [int]$curSt }
+$targetSt = if ($null -eq $curSt -or $curSt -eq 4) { $svcDefaults[$svc] } else { [int]$curSt }
 $startNow = ($svc -in @("cryptSvc", "bits", "wuauserv", "dosvc"))
-Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService:$startNow
+Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService:$startNow -Module "Z6_Integrity"
 }
 $UltixSync.Progress = 100
 $UltixSync.Logs.Enqueue(" -> [5/5] [OK] Windows Update, Delivery Optimization & Cryptographic services restored and online.")
@@ -9413,16 +10901,19 @@ Write-GUI "--- AUDIT: WMI / CIM Repository Health (Background Thread) ---"
 Update-Progress 20
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 $UltixSync.Progress = 40
-$verifyOut = (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+$verifyOut = Invoke-UltixStep -Command "winmgmt.exe /verifyrepository" -Action {
+(& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+} -Module "Z6_Integrity"
 $UltixSync.Progress = 75
-$cimHealthy = $false
+$cimHealthy = Invoke-UltixStep -Command "Test-CimNamespaces (root\cimv2, root\StandardCimv2)" -Action {
 try {
 $null = Get-CimInstance -Namespace "root\cimv2" -ClassName Win32_OperatingSystem -Property Caption -ErrorAction Stop
 $null = Get-CimInstance -Namespace "root\StandardCimv2" -ClassName MSFT_NetAdapter -ErrorAction Stop
-$cimHealthy = $true
+return $true
 } catch {
-$cimHealthy = $false
+return $false
 }
+} -Module "Z6_Integrity"
 $UltixSync.Progress = 100
 return [PSCustomObject]@{
 VerifyOutput = $verifyOut
@@ -9447,20 +10938,28 @@ Write-GUI " -> Initiating WMI / CIM Repository Salvage (Background Thread)..."
 Update-Progress 15
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 try {
+$wmiReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\Winmgmt"
+$wmiStart = (Get-ItemProperty -LiteralPath $wmiReg -Name "Start" -ErrorAction SilentlyContinue).Start
+if ($wmiStart -eq 4) {
+Set-ProtectedServiceStart -ServiceName "Winmgmt" -StartValue 2 -StartService -Module "Z6_Integrity"
+} else {
+Start-Service -Name "Winmgmt" -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+}
 $UltixSync.Progress = 25
 $UltixSync.Logs.Enqueue(" -> [1/3] Running winmgmt /verifyrepository...")
-$verifyOut = (& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+$verifyOut = Invoke-UltixStep -Command "winmgmt.exe /verifyrepository" -Action {
+(& winmgmt.exe /verifyrepository 2>&1 | Out-String).Trim()
+} -Module "Z6_Integrity"
 $UltixSync.Logs.Enqueue("    [*] Status: $verifyOut")
 $UltixSync.Progress = 55
 $UltixSync.Logs.Enqueue(" -> [2/3] Executing non-destructive winmgmt /salvagerepository...")
-$salvageOut = (& winmgmt.exe /salvagerepository 2>&1 | Out-String).Trim()
+$salvageOut = Invoke-UltixStep -Command "winmgmt.exe /salvagerepository" -Action {
+(& winmgmt.exe /salvagerepository 2>&1 | Out-String).Trim()
+} -Module "Z6_Integrity"
 $UltixSync.Logs.Enqueue("    [*] Result: $salvageOut")
 $UltixSync.Progress = 85
 $UltixSync.Logs.Enqueue(" -> [3/3] Refreshing WMI Performance Adapter (wmiadap /f)...")
-$adapProc = Start-Process -FilePath "wmiadap.exe" -ArgumentList "/f" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-if ($null -ne $adapProc) {
-try { $adapProc.WaitForExit(15000) | Out-Null } finally { $adapProc.Dispose() }
-}
+$null = Invoke-UltixExe -FilePath "wmiadap.exe" -Arguments @("/f") -Module "Z6_Integrity"
 $UltixSync.Progress = 100
 $UltixSync.Logs.Enqueue(" -> [OK] WMI Repository verification and salvage routine finished.")
 } catch {
@@ -9480,25 +10979,26 @@ Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 try {
 $UltixSync.Progress = 25
 $UltixSync.Logs.Enqueue(" -> [1/4] Stopping Explorer shell to release memory-mapped .db handles...")
-Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+$null = Stop-UltixProcess -Name "explorer" -Module "Z6_Integrity"
 Start-Sleep -Milliseconds 600
 $UltixSync.Progress = 55
 $explorerCacheDir = "$env:LOCALAPPDATA\Microsoft\Windows\Explorer"
-$purgedIcons  = 0
-$purgedThumbs = 0
+$counts = Invoke-UltixStep -Command "Remove-Item '$explorerCacheDir\iconcache*.db,thumbcache*.db' -Force" -Action {
+$pIcons  = 0
+$pThumbs = 0
 if (Test-Path -LiteralPath $explorerCacheDir) {
 Get-ChildItem -Path "$explorerCacheDir\iconcache*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
 try {
 $_.Attributes = 'Normal'
 Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-$purgedIcons++
+$pIcons++
 } catch { }
 }
 Get-ChildItem -Path "$explorerCacheDir\thumbcache*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
 try {
 $_.Attributes = 'Normal'
 Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-$purgedThumbs++
+$pThumbs++
 } catch { }
 }
 }
@@ -9508,16 +11008,17 @@ try {
 $item = Get-Item -LiteralPath $legacyIconDb -Force -ErrorAction SilentlyContinue
 if ($null -ne $item) { $item.Attributes = 'Normal' }
 Remove-Item -LiteralPath $legacyIconDb -Force -ErrorAction Stop
-$purgedIcons++
+$pIcons++
 } catch { }
 }
+return @($pIcons, $pThumbs)
+} -SuccessOutput "Purged icon and thumbnail cache databases" -Module "Z6_Integrity"
+$purgedIcons  = $counts[0]
+$purgedThumbs = $counts[1]
 $UltixSync.Logs.Enqueue(" -> [2/4] Purged $purgedIcons iconcache_*.db and $purgedThumbs thumbcache_*.db file(s).")
 $UltixSync.Progress = 80
 $UltixSync.Logs.Enqueue(" -> [3/4] Triggering ie4uinit.exe cache rebuild...")
-$ieProc = Start-Process -FilePath "ie4uinit.exe" -ArgumentList "-show" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-if ($null -ne $ieProc) {
-try { $ieProc.WaitForExit(10000) | Out-Null } finally { $ieProc.Dispose() }
-}
+$null = Invoke-UltixExe -FilePath "ie4uinit.exe" -Arguments @("-show") -Module "Z6_Integrity"
 $UltixSync.Progress = 100
 $UltixSync.Logs.Enqueue(" -> [4/4] [OK] Shell Icon & Thumbnail caches rebuilt cleanly.")
 } catch {
@@ -9525,7 +11026,9 @@ $UltixSync.Logs.Enqueue(" [!] Failed to rebuild Icon/Thumbnail cache: $($_.Excep
 } finally {
 $expProcs = @(Get-Process -Name "explorer" -ErrorAction SilentlyContinue)
 if ($expProcs.Count -eq 0) {
+Invoke-UltixStep -Command "Start-Process 'explorer.exe'" -Action {
 Start-Process "explorer.exe"
+} -SuccessOutput "Explorer shell restarted" -Module "Z6_Integrity"
 } else {
 foreach ($ep in $expProcs) { $ep.Dispose() }
 }
@@ -9544,19 +11047,24 @@ Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
 try {
 $UltixSync.Progress = 25
 $UltixSync.Logs.Enqueue(" -> [1/4] Re-registering Windows Time service (W32Time) & unlocking SCM configuration...")
-Stop-Service -Name "W32Time" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-& w32tm.exe /unregister 2>$null | Out-Null
+Stop-UltixService -ServiceName "W32Time" -Module "Z6_Integrity"
+$null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/unregister") -Module "Z6_Integrity"
 Start-Sleep -Milliseconds 300
-& w32tm.exe /register 2>$null | Out-Null
-Set-ProtectedServiceStart -ServiceName "W32Time" -StartValue 3
+$null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/register") -Module "Z6_Integrity"
+Set-ProtectedServiceStart -ServiceName "W32Time" -StartValue 3 -Module "Z6_Integrity"
 $UltixSync.Progress = 55
 $UltixSync.Logs.Enqueue(" -> [2/4] Starting Windows Time service & configuring resilient NTP pool (Cloudflare / Pool.ntp / MS)...")
+Invoke-UltixStep -Command "Start-Service -Name 'W32Time'" -Action {
 Start-Service -Name "W32Time" -WarningAction SilentlyContinue -ErrorAction Stop
-& w32tm.exe /config /manualpeerlist:"pool.ntp.org,0x8 time.cloudflare.com,0x8 time.windows.com,0x9" /syncfromflags:manual /reliable:yes /update 2>$null | Out-Null
+} -SuccessOutput "W32Time service started" -Module "Z6_Integrity"
+$ntpPeers = "pool.ntp.org,0x8 time.cloudflare.com,0x8 time.windows.com,0x9"
+$null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/config", "/manualpeerlist:$ntpPeers", "/syncfromflags:manual", "/reliable:yes", "/update") -Module "Z6_Integrity"
 $UltixSync.Progress = 85
 $UltixSync.Logs.Enqueue(" -> [3/4] Triggering immediate NTP clock resynchronization (w32tm /resync /rediscover)...")
-$null = & w32tm.exe /resync /rediscover 2>&1
-$srcOut = (& w32tm.exe /query /source 2>&1 | Out-String).Trim()
+$null = Invoke-UltixExe -FilePath "w32tm.exe" -Arguments @("/resync", "/rediscover") -Module "Z6_Integrity"
+$srcOut = Invoke-UltixStep -Command "w32tm.exe /query /source" -Action {
+(& w32tm.exe /query /source 2>&1 | Out-String).Trim()
+} -Module "Z6_Integrity"
 $UltixSync.Progress = 100
 $UltixSync.Logs.Enqueue(" -> [4/4] [OK] System clock synchronized (Active NTP Source: $srcOut).")
 } catch {
@@ -9599,26 +11107,30 @@ $sPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
 if (Test-Path -LiteralPath $sPath) {
 $curSt = (Get-ItemProperty -LiteralPath $sPath -Name "Start" -ErrorAction SilentlyContinue).Start
 $targetSt = if ($curSt -eq 4 -or $svc -eq "dosvc") { $svcMap[$svc] } else { [int]$curSt }
-Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService
+Set-ProtectedServiceStart -ServiceName $svc -StartValue $targetSt -StartService -Module "Z6_Integrity"
 }
 }
 $deprovRoot = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
 if (Test-Path -LiteralPath $deprovRoot) {
 Get-ChildItem -LiteralPath $deprovRoot -ErrorAction SilentlyContinue | Where-Object {
 $_.PSChildName -match '(?i)(Winget|DesktopAppInstaller|WindowsStore|StorePurchaseApp|Xbox|GamingServices|VCLibs|UI\.Xaml|WindowsAppRuntime)'
-} | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+} | ForEach-Object {
+Remove-UltixRegItem -Path "$deprovRoot\$($_.PSChildName)" -IgnoreMissing -Module "Z6_Integrity"
+}
 }
 $UltixSync.Progress = 35
 $UltixSync.Logs.Enqueue(" -> [2/4] Flushing corrupted Microsoft Store LocalCache & running wsreset -i...")
-Stop-Process -Name "WinStore.App", "StoreExperienceHost", "WindowsPackageManagerServer", "winget" -Force -ErrorAction SilentlyContinue
+$null = Stop-UltixProcess -Name @("WinStore.App", "StoreExperienceHost", "WindowsPackageManagerServer", "winget") -Module "Z6_Integrity"
 $storeCache = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_*\LocalCache" -Directory -ErrorAction SilentlyContinue
 foreach ($dir in $storeCache) {
 Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
+Invoke-UltixStep -Command "wsreset.exe -i" -Action {
 $wsProc = Start-Process -FilePath "wsreset.exe" -ArgumentList "-i" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
 if ($null -ne $wsProc) {
 try { $wsProc.WaitForExit(6000) | Out-Null } finally { $wsProc.Dispose() }
 }
+} -SuccessOutput "Triggered Microsoft Store reset (wsreset -i)" -Module "Z6_Integrity"
 $UltixSync.Progress = 50
 $UltixSync.Logs.Enqueue(" -> [3/4] Re-registering Store, WinGet (DesktopAppInstaller) & Xbox manifests...")
 $corePattern = "^(?i).*(WindowsStore|StorePurchaseApp|DesktopAppInstaller|Winget\.Source|XboxIdentityProvider|XboxGameCallableUI|GamingServices)$"
@@ -9633,7 +11145,9 @@ if (-not [string]::IsNullOrWhiteSpace($pkg.InstallLocation)) {
 $manifest = Join-Path $pkg.InstallLocation "AppxManifest.xml"
 if ([System.IO.File]::Exists($manifest)) {
 try {
+Invoke-UltixStep -Command "Add-AppxPackage -DisableDevelopmentMode -Register '$manifest'" -Action {
 Add-AppxPackage -DisableDevelopmentMode -Register $manifest -ErrorAction Stop
+} -SuccessOutput "Registered $($pkg.Name)" -Module "Z6_Integrity"
 $reRegCount++
 } catch { }
 }
@@ -9642,27 +11156,51 @@ $reRegCount++
 $UltixSync.Logs.Enqueue("    [OK] Re-registered $reRegCount Store, WinGet & Xbox manifest(s).")
 $UltixSync.Progress = 80
 $UltixSync.Logs.Enqueue(" -> [4/4] Resetting WinHTTP proxy locks & repairing WinGet source index (source2.msix)...")
-$null = & netsh.exe winhttp reset proxy 2>&1
-Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-$tmpMsix = Join-Path $env:TEMP "WinUltix_WingetSource2.msix"
+$null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winhttp", "reset", "proxy") -Module "Z6_Integrity"
+Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Module "Z6_Integrity"
+$tmpMsix    = Join-Path $env:TEMP "WinUltix_WingetSource2.msix"
+$sourceUrl  = "https://cdn.winget.microsoft.com/cache/source2.msix"
+$activeNics = @(Get-UltixActiveNetworkAdapters)
+if ($activeNics.Count -eq 0 -or -not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) {
+$UltixSync.Logs.Enqueue("    [*] Offline environment detected (no routed gateway) -- skipping remote WinGet source2.msix download.")
+} else {
 try {
+$dlBytes = Invoke-UltixStep -Command "HttpWebRequest GET '$sourceUrl' (Timeout: 10s/15s) -> '$tmpMsix'" -Action {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-$wc = New-Object System.Net.WebClient
+$req = [System.Net.HttpWebRequest]::Create($sourceUrl)
+$req.Method           = "GET"
+$req.Timeout          = 10000
+$req.ReadWriteTimeout = 15000
+$req.UserAgent        = "WinUltix-Integrity/3.19"
+$resp = $null
+$inStream = $null
+$outStream = $null
 try {
-$wc.DownloadFile("https://cdn.winget.microsoft.com/cache/source2.msix", $tmpMsix)
+$resp      = $req.GetResponse()
+$inStream  = $resp.GetResponseStream()
+$outStream = [System.IO.File]::Create($tmpMsix)
+$inStream.CopyTo($outStream)
+$outStream.Flush()
+return [int64]$outStream.Length
 } finally {
-$wc.Dispose()
+if ($null -ne $outStream) { $outStream.Dispose() }
+if ($null -ne $inStream)  { $inStream.Dispose() }
+if ($null -ne $resp)      { $resp.Dispose() }
 }
+} -Module "Z6_Integrity"
 $UltixSync.Progress = 92
-if ([System.IO.File]::Exists($tmpMsix) -and ([System.IO.FileInfo]::new($tmpMsix)).Length -gt 1048576) {
+if ([System.IO.File]::Exists($tmpMsix) -and $dlBytes -gt 1048576) {
+Invoke-UltixStep -Command "Add-AppxPackage -Path '$tmpMsix' -ForceApplicationShutdown" -Action {
 Add-AppxPackage -Path $tmpMsix -ForceApplicationShutdown -ErrorAction Stop
+} -SuccessOutput "Installed WinGet v2 index package (source2.msix)" -Module "Z6_Integrity"
 $UltixSync.Logs.Enqueue("    [OK] Installed fresh WinGet v2 index package (source2.msix).")
 }
 } catch {
-$UltixSync.Logs.Enqueue("    [!] WinGet source2.msix refresh notice: $($_.Exception.Message)")
+$UltixSync.Logs.Enqueue("    [!] WinGet source2.msix refresh skipped (offline/timeout): $($_.Exception.Message)")
 } finally {
 if (Test-Path -LiteralPath $tmpMsix) {
 Remove-Item -LiteralPath $tmpMsix -Force -ErrorAction SilentlyContinue
+}
 }
 }
 $UltixSync.Progress = 100
@@ -9789,11 +11327,11 @@ $profileResult = $null
 if ($nativeCores.Count -ge 6) {
 $effClasses = @($nativeCores | Select-Object -ExpandProperty EfficiencyClass -Unique | Sort-Object)
 if ($effClasses.Count -gt 1) {
-$minEff = $effClasses[0]
+$maxEff = $effClasses[$effClasses.Count - 1]
 [int64]$eCoreMask = 0
 $eCoreCount = 0
 foreach ($c in $nativeCores) {
-if ($c.EfficiencyClass -eq $minEff) {
+if ($c.EfficiencyClass -lt $maxEff) {
 $eCoreMask = $eCoreMask -bor $c.Mask
 $eCoreCount++
 }
@@ -9824,6 +11362,7 @@ $largestL3  = $sortedL3[$sortedL3.Count - 1]
 $isAsymmetricX3D = ($largestL3.SizeBytes -gt $smallestL3.SizeBytes)
 $targetDomain = if ($isAsymmetricX3D) { $smallestL3 } else { $nativeCaches[$nativeCaches.Count - 1] }
 $tailMask = [WinUltix.CpuTopology]::GetTailThreadsMask($targetDomain.Mask, 4)
+if ($tailMask -eq 0) { $tailMask = $targetDomain.Mask }
 $l3MB = [math]::Round($targetDomain.SizeBytes / 1MB, 0)
 $labelStr = if ($isAsymmetricX3D) { "AMD Dual-CCD X3D" } else { "AMD Dual-CCD" }
 $profileResult = [PSCustomObject]@{
@@ -10094,7 +11633,7 @@ continue
 $priority = "---"
 try { $priority = $activeProc.PriorityClass.ToString() } catch { $priority = "Protected" }
 $isLockedNow = $false
-try { $isLockedNow = ($activeProc.ProcessorAffinity -eq $targetMask) } catch { }
+try { $isLockedNow = ($activeProc.ProcessorAffinity.ToInt64() -eq $targetMask.ToInt64()) } catch { }
 $statusTag = if ($isLockedNow) { "[LOCKED]  " } else { "[RUNNING] " }
 $listRunning.Add([PSCustomObject]@{
 UIDisplayName = "$statusTag $app"
@@ -10153,51 +11692,6 @@ ActionData    = $rule
 })
 }
 return @($results)
-}
-function Grant-UltixRegistryKeyAccess {
-param([Parameter(Mandatory=$true)][string]$RegistryPath)
-$subKeyPath = $RegistryPath -replace '^(?i)(HKLM:\\|Registry::HKEY_LOCAL_MACHINE\\)', ''
-if ([string]::IsNullOrWhiteSpace($subKeyPath)) { return }
-try {
-[WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
-[WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
-$adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-$keyOwn = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-$subKeyPath,
-[Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-[System.Security.AccessControl.RegistryRights]::TakeOwnership
-)
-if ($null -ne $keyOwn) {
-try {
-$aclOwn = $keyOwn.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
-$aclOwn.SetOwner($adminSid)
-$keyOwn.SetAccessControl($aclOwn)
-} finally {
-$keyOwn.Dispose()
-}
-}
-$keyAcl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-$subKeyPath,
-[Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-[System.Security.AccessControl.RegistryRights]::ChangePermissions
-)
-if ($null -ne $keyAcl) {
-try {
-$acl = $keyAcl.GetAccessControl()
-$rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-$adminSid,
-[System.Security.AccessControl.RegistryRights]::FullControl,
-([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
-[System.Security.AccessControl.PropagationFlags]::None,
-[System.Security.AccessControl.AccessControlType]::Allow
-)
-$acl.SetAccessRule($rule)
-$keyAcl.SetAccessControl($acl)
-} finally {
-$keyAcl.Dispose()
-}
-}
-} catch { }
 }
 function Get-HardwareState_IRQ {
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -10529,8 +12023,44 @@ return @($results | Sort-Object SortRank, RawDeviceName)
 function Get-HardwareState_WHEA {
 if ($null -ne $UltixSync) { $UltixSync.Progress = 10 }
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-[int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
+$nativeCores = @([WinUltix.CpuTopology]::GetProcessorCores())
+[int64[]]$coreMasks = if ($nativeCores.Count -gt 0) {
+@($nativeCores | ForEach-Object { [int64]$_.Mask })
+} else {
+$lpTotal = [Environment]::ProcessorCount
+$fbList = [System.Collections.Generic.List[int64]]::new()
+for ($i = 0; $i -lt $lpTotal; $i += 2) {
+$m = ([int64]1 -shl $i)
+if (($i + 1) -lt $lpTotal) { $m = $m -bor ([int64]1 -shl ($i + 1)) }
+$fbList.Add($m)
+}
+@($fbList)
+}
 $coreCount = $coreMasks.Count
+$apicToLp = @{}
+$cpuRegRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("HARDWARE\DESCRIPTION\System\CentralProcessor", $false)
+if ($null -ne $cpuRegRoot) {
+try {
+foreach ($lpKeyName in $cpuRegRoot.GetSubKeyNames()) {
+if ($lpKeyName -notmatch '^\d+$') { continue }
+$lpSub = $cpuRegRoot.OpenSubKey($lpKeyName, $false)
+if ($null -ne $lpSub) {
+try {
+$hwApic = $lpSub.GetValue("~ApicId", $null)
+if ($null -eq $hwApic) { $hwApic = $lpSub.GetValue("InitialApicId", $null) }
+if ($null -eq $hwApic) { $hwApic = $lpSub.GetValue("ApicId", $null) }
+if ($null -ne $hwApic) {
+$apicToLp[[int]$hwApic] = [int]$lpKeyName
+}
+} finally {
+$lpSub.Dispose()
+}
+}
+}
+} finally {
+$cpuRegRoot.Dispose()
+}
+}
 try {
 if ($null -ne $UltixSync) { $UltixSync.Progress = 25 }
 $events = @(Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WHEA-Logger'} -MaxEvents 500 -ErrorAction Stop)
@@ -10555,7 +12085,8 @@ if ($apicId -eq "N/A" -and $msg -match "APIC ID:\s*(\d+)") {
 $apicId = $matches[1]
 }
 if ($apicId -match '^\d+$') {
-$lpIdx = [int]$apicId
+$rawApic = [int]$apicId
+$lpIdx = if ($apicToLp.ContainsKey($rawApic)) { $apicToLp[$rawApic] } else { $rawApic }
 $matchedCore = -1
 if ($lpIdx -ge 0 -and $lpIdx -lt 63) {
 $threadBit = ([int64]1 -shl $lpIdx)
@@ -10567,7 +12098,7 @@ break
 }
 }
 if ($matchedCore -ge 0) {
-$coreInfo = "(Core $matchedCore)"
+$coreInfo = "(Core $matchedCore / LP#$lpIdx)"
 } else {
 $coreInfo = "(LP#$lpIdx)"
 }
@@ -10579,6 +12110,8 @@ $humanReadable = "[CPU] Cache/Core Error -> Vcore too low or Curve Optimizer too
 $humanReadable = "[IF/SoC] Interconnect Error -> FCLK unstable or VSOC/VDDG too low!"
 } elseif ($id -eq 47) {
 $humanReadable = "[RAM] Memory Controller -> tREFI/tRFC too tight or VDDQ too low!"
+} elseif ($id -in @(1, 17)) {
+$humanReadable = "[PCIe] Bus/Link Error -> Check GPU/NVMe PCIe Gen speed, riser, or ASPM!"
 } else {
 if ($msg -match "Error Type:\s*(.+?)\r?\n") { $humanReadable = $matches[1] }
 }
@@ -10776,17 +12309,18 @@ param([array]$SelectedItems, [bool]$Execute = $true)
 if ($SelectedItems.Count -eq 0) { return }
 $topo = Get-CPUTopologyProfile
 $targetMask = $topo.Mask
+$maskHex = "0x$($targetMask.ToInt64().ToString('X'))"
 $configPath = "HKCU:\Software\WinUltix\AffinityLasso"
-if (-not (Test-Path -LiteralPath $configPath)) { New-Item -Path $configPath -Force -ErrorAction SilentlyContinue | Out-Null }
 foreach ($item in $SelectedItems) {
 $exeName  = $item.ActionData.ExeName
 $procName = $item.ActionData.ProcName
-Set-ItemProperty -LiteralPath $configPath -Name $exeName -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+Set-UltixRegValue -Path $configPath -Name $exeName -Value 1 -Type DWord -Module "Z7_Hardware"
 if ($Execute) {
 $procs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
 if ($procs.Count -gt 0) {
 try {
 Write-GUI " -> Live Locking ($($topo.CoreDesc)): $exeName ($($procs.Count) instances)"
+Invoke-UltixStep -Command "Set-ProcessAffinity '$exeName' -Mask $maskHex -Priority BelowNormal" -Action {
 foreach ($p in $procs) {
 try {
 $p.ProcessorAffinity = $targetMask
@@ -10795,6 +12329,7 @@ $p.PriorityClass     = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
 Write-GUI "    [!] Access denied: PID $($p.Id) (System lock)"
 }
 }
+} -SuccessOutput "Locked $($procs.Count) instance(s) of $exeName to $maskHex" -Module "Z7_Hardware"
 } finally {
 foreach ($p in $procs) { if ($null -ne $p) { $p.Dispose() } }
 }
@@ -10813,11 +12348,12 @@ $configPath     = "HKCU:\Software\WinUltix\AffinityLasso"
 $lpCount        = [Environment]::ProcessorCount
 $fullMaskVal    = if ($lpCount -ge 64) { -1 } else { ([int64]1 -shl $lpCount) - 1 }
 $systemAffinity = [System.IntPtr]$fullMaskVal
+$sysMaskHex     = "0x$($systemAffinity.ToInt64().ToString('X'))"
 foreach ($item in $SelectedItems) {
 $exeName  = $item.ActionData.ExeName
 $procName = $item.ActionData.ProcName
 if (-not $KeepConfig -and (Test-Path -LiteralPath $configPath)) {
-Remove-ItemProperty -LiteralPath $configPath -Name $exeName -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $configPath -Name $exeName -IgnoreMissing -Module "Z7_Hardware"
 }
 if ($Execute) {
 $procs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
@@ -10834,12 +12370,14 @@ break
 }
 if ($needsUnlock) {
 Write-GUI " -> Releasing CPU Restraints: $exeName"
+Invoke-UltixStep -Command "Reset-ProcessAffinity '$exeName' -Mask $sysMaskHex -Priority Normal" -Action {
 foreach ($p in $procs) {
 try {
 $p.ProcessorAffinity = $systemAffinity
 $p.PriorityClass     = [System.Diagnostics.ProcessPriorityClass]::Normal
 } catch { }
 }
+} -SuccessOutput "Restored full CPU affinity ($sysMaskHex) for $exeName" -Module "Z7_Hardware"
 }
 } finally {
 foreach ($p in $procs) { if ($null -ne $p) { $p.Dispose() } }
@@ -10857,7 +12395,7 @@ foreach ($item in $SelectedItems) {
 $rule = $item.ActionData
 Write-GUI " -> Unlocking Visibility: $($rule.UIDisplayName)"
 try {
-Set-ItemProperty -Path $rule.Path -Name $rule.Name -Value $rule.Expected -Type DWord -Force -ErrorAction Stop | Out-Null
+Set-UltixRegValue -Path $rule.Path -Name $rule.Name -Value $rule.Expected -Type DWord -Module "Z7_Hardware"
 } catch { Write-GUI "    [!] Failed to unhide: $($rule.UIDisplayName)" }
 }
 }
@@ -10865,24 +12403,30 @@ function Set-UltixCPPCState {
 param([Parameter(Mandatory=$true)][ValidateSet('Engage', 'Release')][string]$Mode)
 $p = 'HKLM:\SOFTWARE\WinUltix\CPPC'
 if ($Mode -eq 'Engage') {
-if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
 $e  = Get-UltixPowerAcIndex -SettingGuid '36687f9e-e3a5-4dbf-b1dc-15eb381c6863' -IncludeHidden
 $d  = Get-UltixPowerAcIndex -SettingGuid '4b92d758-5a24-4851-a470-815d78aee119' -IncludeHidden
 $pr = Get-UltixPowerAcIndex -SettingGuid '7b224883-b3cc-4d79-819f-8374152cbe7c' -IncludeHidden
-if ($null -ne $e -and -not ($e -eq 0 -and $d -eq 100 -and $pr -eq 100) -and -not ($e -eq 0 -and $d -eq 0 -and $pr -eq 0)) {
-Set-ItemProperty -Path $p -Name 'EPP' -Value $e -Type DWord -Force
-Set-ItemProperty -Path $p -Name 'Demote' -Value $d -Type DWord -Force
-Set-ItemProperty -Path $p -Name 'Promote' -Value $pr -Type DWord -Force
+if ($null -ne $e -and $null -ne $d -and $null -ne $pr -and
+-not ($e -eq 0 -and $d -eq 100 -and $pr -eq 100) -and
+-not ($e -eq 0 -and $d -eq 0 -and $pr -eq 0)) {
+Set-UltixRegValue -Path $p -Name 'EPP' -Value $e -Type DWord -Module "Z7_Hardware"
+Set-UltixRegValue -Path $p -Name 'Demote' -Value $d -Type DWord -Module "Z7_Hardware"
+Set-UltixRegValue -Path $p -Name 'Promote' -Value $pr -Type DWord -Module "Z7_Hardware"
 }
 $tsCmd = "`$p='HKLM:\SOFTWARE\WinUltix\CPPC'; if(Test-Path `$p){ `$r=Get-ItemProperty `$p; if(`$null -ne `$r.EPP){powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP}; if(`$null -ne `$r.Demote){powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote}; if(`$null -ne `$r.Promote){powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote}; powercfg.exe /setactive SCHEME_CURRENT }; Unregister-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe' -Confirm:`$false -ErrorAction SilentlyContinue"
+Invoke-UltixStep -Command "Register-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe' -Trigger AtStartup,AtLogon -User 'NT AUTHORITY\SYSTEM'" -Action {
 $tsAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -Command `"$tsCmd`""
 $tsTriggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogon))
 $tsPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Action $tsAction -Trigger $tsTriggers -Principal $tsPrincipal -Force | Out-Null
-powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0
-powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100
-powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100
-powercfg.exe /setactive SCHEME_CURRENT
+} -SuccessOutput "Armed WinUltix_CPPC_Failsafe Dead Man's Switch" -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "0") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "0") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "100") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "100") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "100") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "100") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setactive", "SCHEME_CURRENT") -Module "Z7_Hardware"
 Write-GUI " -> Engaged Max CPPC (EPP 0%, Demote/Promote 100%). Dead Man's Switch armed."
 } else {
 $e = 50; $d = 40; $pr = 60
@@ -10890,7 +12434,9 @@ if (Test-Path $p) {
 $reg = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
 if ($null -ne $reg.EPP -and $null -ne $reg.Demote -and $null -ne $reg.Promote) {
 if ($reg.EPP -eq 0 -and $reg.Demote -eq 0 -and $reg.Promote -eq 0) {
-Remove-ItemProperty -Path $p -Name 'EPP', 'Demote', 'Promote' -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $p -Name 'EPP' -IgnoreMissing -Module "Z7_Hardware"
+Remove-UltixRegItem -Path $p -Name 'Demote' -IgnoreMissing -Module "Z7_Hardware"
+Remove-UltixRegItem -Path $p -Name 'Promote' -IgnoreMissing -Module "Z7_Hardware"
 } else {
 $e  = $reg.EPP
 $d  = $reg.Demote
@@ -10898,18 +12444,24 @@ $pr = $reg.Promote
 }
 }
 }
-powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 $e; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 $e
-powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 $d; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 $d
-powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c $pr; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c $pr
-powercfg.exe /setactive SCHEME_CURRENT
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "$e") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "$e") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "$d") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "$d") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "$pr") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "$pr") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setactive", "SCHEME_CURRENT") -Module "Z7_Hardware"
+Invoke-UltixStep -Command "Unregister-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe'" -Action {
 Unregister-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+} -SuccessOutput "Disarmed WinUltix_CPPC_Failsafe Scheduled Task" -Module "Z7_Hardware"
 Write-GUI " -> Released CPPC lock (Restored EPP: $e%, Demote: $d%, Promote: $pr%). Failsafe disarmed."
 }
 }
 function Clear-WHEALogs {
 Write-GUI " -> Clearing System Event Log (WHEA Records)..."
 try {
-& wevtutil.exe cl System 2>$null
+$ec = Invoke-UltixExe -FilePath "wevtutil.exe" -Arguments @("cl", "System") -Module "Z7_Hardware"
+if ($ec -ne 0) { throw "wevtutil exited with code $ec" }
 Write-GUI "    [OK] System log successfully wiped."
 } catch {
 Write-GUI "    [!] Failed to clear System log. Administrator privileges missing?"
@@ -10987,24 +12539,39 @@ if ($Operation -eq 'Apply') {
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue(" -> Optimizing: $($item.UIDisplayName)") }
 try {
 switch ($data.Type) {
-"GlobalRSS" { Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop }
-"GlobalRSC" { Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction Stop }
+"GlobalRSS" {
+Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled" -Action {
+Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop
+} -SuccessOutput "Enabled Global TCP RSS" -Module "Z7_Hardware"
+}
+"GlobalRSC" {
+Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled" -Action {
+Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction Stop
+} -SuccessOutput "Disabled Global TCP RSC" -Module "Z7_Hardware"
+}
 "TCP" {
 $path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
-New-ItemProperty -Path $path -Name "TcpAckFrequency" -Value 1 -PropertyType DWORD -Force -ErrorAction Stop | Out-Null
-New-ItemProperty -Path $path -Name "TCPNoDelay" -Value 1 -PropertyType DWORD -Force -ErrorAction Stop | Out-Null
+$tcpProps = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
+if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name "TcpAckFrequency" -ErrorAction SilentlyContinue).TcpAckFrequency) {
+$oldAck = if ($null -ne $tcpProps -and $null -ne $tcpProps.TcpAckFrequency) { [int]$tcpProps.TcpAckFrequency } else { -1 }
+Set-UltixRegValue -Path $bKey -Name "TcpAckFrequency" -Value $oldAck -Type DWord -Module "Z7_Hardware"
+}
+if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name "TCPNoDelay" -ErrorAction SilentlyContinue).TCPNoDelay) {
+$oldNod = if ($null -ne $tcpProps -and $null -ne $tcpProps.TCPNoDelay) { [int]$tcpProps.TCPNoDelay } else { -1 }
+Set-UltixRegValue -Path $bKey -Name "TCPNoDelay" -Value $oldNod -Type DWord -Module "Z7_Hardware"
+}
+Set-UltixRegValue -Path $path -Name "TcpAckFrequency" -Value 1 -Type DWord -Module "Z7_Hardware"
+Set-UltixRegValue -Path $path -Name "TCPNoDelay" -Value 1 -Type DWord -Module "Z7_Hardware"
 }
 "Power" {
-if (-not (Test-Path -LiteralPath $bKey)) { New-Item -Path $bKey -Force | Out-Null }
 if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities) {
 $oldPnp = (Get-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities
 if ($null -eq $oldPnp) { $oldPnp = -1 }
-Set-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Force
+Set-UltixRegValue -Path $bKey -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Module "Z7_Hardware"
 }
-Set-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Value 24 -Type DWord -Force -ErrorAction Stop
+Set-UltixRegValue -Path $data.RegPath -Name "PnPCapabilities" -Value 24 -Type DWord -Module "Z7_Hardware"
 }
 "NDIS" {
-if (-not (Test-Path -LiteralPath $bKey)) { New-Item -Path $bKey -Force | Out-Null }
 $targetProp = Get-NetAdapterAdvancedProperty -Name $name -ErrorAction SilentlyContinue |
 Where-Object { $_.RegistryKeyword -eq $data.Key } |
 Select-Object -First 1
@@ -11012,16 +12579,34 @@ if ($null -ne $targetProp) {
 $curVal = [string]($targetProp.RegistryValue | Select-Object -First 1)
 if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name $data.Key -ErrorAction SilentlyContinue).$($data.Key)) {
 if (-not [string]::IsNullOrWhiteSpace($curVal)) {
-Set-ItemProperty -LiteralPath $bKey -Name $data.Key -Value $curVal -Type String -Force
+Set-UltixRegValue -Path $bKey -Name $data.Key -Value $curVal -Type String -Module "Z7_Hardware"
 }
 }
+Invoke-UltixStep -Command "Set-NetAdapterAdvancedProperty -Name '$name' -RegistryKeyword '$($data.Key)' -RegistryValue '$($data.Value)' -NoRestart" -Action {
 $targetProp | Set-NetAdapterAdvancedProperty -RegistryValue $data.Value -NoRestart -ErrorAction Stop
+} -SuccessOutput "Enforced $($data.Key)=$($data.Value) on [$name]" -Module "Z7_Hardware"
 }
 }
-"RSS"  { Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue }
-"RSC"  { Disable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue }
-"LSO"  { Disable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue }
-"CSO"  { Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue }
+"RSS" {
+Invoke-UltixStep -Command "Enable-NetAdapterRss -Name '$name' -NoRestart" -Action {
+Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Enabled RSS on [$name]" -Module "Z7_Hardware"
+}
+"RSC" {
+Invoke-UltixStep -Command "Disable-NetAdapterRsc -Name '$name' -NoRestart" -Action {
+Disable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Disabled RSC on [$name]" -Module "Z7_Hardware"
+}
+"LSO" {
+Invoke-UltixStep -Command "Disable-NetAdapterLso -Name '$name' -NoRestart" -Action {
+Disable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Disabled LSO on [$name]" -Module "Z7_Hardware"
+}
+"CSO" {
+Invoke-UltixStep -Command "Enable-NetAdapterChecksumOffload -Name '$name' -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart" -Action {
+Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Enabled IPv4 Checksum Offload on [$name]" -Module "Z7_Hardware"
+}
 }
 } catch {
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to apply: $($item.UIDisplayName) ($($_.Exception.Message))") }
@@ -11030,24 +12615,51 @@ if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to apply: $(
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue(" -> Reverting to Default: $($item.UIDisplayName)") }
 try {
 switch ($data.Type) {
-"GlobalRSS" { Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop }
-"GlobalRSC" { Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Enabled -ErrorAction Stop }
+"GlobalRSS" {
+Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled" -Action {
+Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop
+} -SuccessOutput "Restored Global TCP RSS" -Module "Z7_Hardware"
+}
+"GlobalRSC" {
+Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Enabled" -Action {
+Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Enabled -ErrorAction Stop
+} -SuccessOutput "Restored Global TCP RSC" -Module "Z7_Hardware"
+}
 "TCP" {
 $path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
-Remove-ItemProperty -Path $path -Name "TcpAckFrequency" -Force -ErrorAction SilentlyContinue
-Remove-ItemProperty -Path $path -Name "TCPNoDelay" -Force -ErrorAction SilentlyContinue
+$bTcp = Get-ItemProperty -LiteralPath $bKey -ErrorAction SilentlyContinue
+if ($null -ne $bTcp -and $null -ne $bTcp.TcpAckFrequency) {
+if ($bTcp.TcpAckFrequency -eq -1 -or $bTcp.TcpAckFrequency -eq 4294967295) {
+Remove-UltixRegItem -Path $path -Name "TcpAckFrequency" -IgnoreMissing -Module "Z7_Hardware"
+} else {
+Set-UltixRegValue -Path $path -Name "TcpAckFrequency" -Value $bTcp.TcpAckFrequency -Type DWord -Module "Z7_Hardware"
+}
+Remove-UltixRegItem -Path $bKey -Name "TcpAckFrequency" -IgnoreMissing -Module "Z7_Hardware"
+} else {
+Remove-UltixRegItem -Path $path -Name "TcpAckFrequency" -IgnoreMissing -Module "Z7_Hardware"
+}
+if ($null -ne $bTcp -and $null -ne $bTcp.TCPNoDelay) {
+if ($bTcp.TCPNoDelay -eq -1 -or $bTcp.TCPNoDelay -eq 4294967295) {
+Remove-UltixRegItem -Path $path -Name "TCPNoDelay" -IgnoreMissing -Module "Z7_Hardware"
+} else {
+Set-UltixRegValue -Path $path -Name "TCPNoDelay" -Value $bTcp.TCPNoDelay -Type DWord -Module "Z7_Hardware"
+}
+Remove-UltixRegItem -Path $bKey -Name "TCPNoDelay" -IgnoreMissing -Module "Z7_Hardware"
+} else {
+Remove-UltixRegItem -Path $path -Name "TCPNoDelay" -IgnoreMissing -Module "Z7_Hardware"
+}
 }
 "Power" {
 $oldPnp = (Get-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities
 if ($null -ne $oldPnp) {
 if ($oldPnp -eq -1 -or $oldPnp -eq 4294967295) {
-Remove-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $data.RegPath -Name "PnPCapabilities" -IgnoreMissing -Module "Z7_Hardware"
 } else {
-Set-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Force -ErrorAction SilentlyContinue
+Set-UltixRegValue -Path $data.RegPath -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Module "Z7_Hardware"
 }
-Remove-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $bKey -Name "PnPCapabilities" -IgnoreMissing -Module "Z7_Hardware"
 } else {
-Set-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+Set-UltixRegValue -Path $data.RegPath -Name "PnPCapabilities" -Value 0 -Type DWord -Module "Z7_Hardware"
 }
 }
 "NDIS" {
@@ -11057,16 +12669,34 @@ $targetProp = Get-NetAdapterAdvancedProperty -Name $name -ErrorAction SilentlyCo
 Where-Object { $_.RegistryKeyword -eq $data.Key } |
 Select-Object -First 1
 if ($null -ne $targetProp) {
+Invoke-UltixStep -Command "Set-NetAdapterAdvancedProperty -Name '$name' -RegistryKeyword '$($data.Key)' -RegistryValue '$targetVal' -NoRestart" -Action {
 $targetProp | Set-NetAdapterAdvancedProperty -RegistryValue $targetVal -NoRestart -ErrorAction Stop
+} -SuccessOutput "Restored $($data.Key)=$targetVal on [$name]" -Module "Z7_Hardware"
 }
 if (Test-Path -LiteralPath $bKey) {
-Remove-ItemProperty -LiteralPath $bKey -Name $data.Key -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $bKey -Name $data.Key -IgnoreMissing -Module "Z7_Hardware"
 }
 }
-"RSS"  { Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue }
-"RSC"  { Enable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue }
-"LSO"  { Enable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue }
-"CSO"  { Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue }
+"RSS" {
+Invoke-UltixStep -Command "Enable-NetAdapterRss -Name '$name' -NoRestart" -Action {
+Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Restored RSS on [$name]" -Module "Z7_Hardware"
+}
+"RSC" {
+Invoke-UltixStep -Command "Enable-NetAdapterRsc -Name '$name' -NoRestart" -Action {
+Enable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Restored RSC on [$name]" -Module "Z7_Hardware"
+}
+"LSO" {
+Invoke-UltixStep -Command "Enable-NetAdapterLso -Name '$name' -NoRestart" -Action {
+Enable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Restored LSO on [$name]" -Module "Z7_Hardware"
+}
+"CSO" {
+Invoke-UltixStep -Command "Enable-NetAdapterChecksumOffload -Name '$name' -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart" -Action {
+Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue
+} -SuccessOutput "Restored IPv4 Checksum Offload on [$name]" -Module "Z7_Hardware"
+}
 }
 } catch {
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to revert: $($item.UIDisplayName) ($($_.Exception.Message))") }
@@ -11075,7 +12705,9 @@ if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to revert: $
 }
 $touchedAdapters = @($Items | ForEach-Object { $_.ActionData.AdapterName } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 foreach ($aName in $touchedAdapters) {
+Invoke-UltixStep -Command "Restart-NetAdapter -Name '$aName'" -Action {
 Restart-NetAdapter -Name $aName -ErrorAction SilentlyContinue
+} -SuccessOutput "Re-initialized adapter [$aName]" -Module "Z7_Hardware"
 }
 if ($null -ne $UltixSync) {
 $UltixSync.Logs.Enqueue(" -> Waiting for NDIS adapter re-initialization (2s)...")
@@ -11097,17 +12729,16 @@ $data = $item.ActionData
 Write-GUI " -> Configuring Timer Subsystem: $($item.UIDisplayName)"
 try {
 if ($data.Type -eq "Reg") {
-if (-not (Test-Path -LiteralPath $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
-Set-ItemProperty -LiteralPath $data.Path -Name $data.Name -Value $data.Value -Type DWord -Force -ErrorAction Stop
+Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Value -Type DWord -Module "Z7_Hardware"
 } elseif ($data.Type -eq "BCD") {
 $cmdArgs = $data.Cmd.Split(' ')
 if ($cmdArgs[0] -eq "useplatformclock" -and $cmdArgs[1] -eq "no") {
-$null = & bcdedit.exe /deletevalue "{current}" useplatformclock 2>&1
+$null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "useplatformclock") -Module "Z7_Hardware"
 } else {
-$null = & bcdedit.exe /set "{current}" $cmdArgs[0] $cmdArgs[1] 2>&1
+$null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/set", "{current}", $cmdArgs[0], $cmdArgs[1]) -Module "Z7_Hardware"
 }
 } elseif ($data.Type -eq "PNP") {
-$null = & pnputil.exe /disable-device "$($data.Instance)" 2>&1
+$null = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/disable-device", "$($data.Instance)") -Module "Z7_Hardware"
 if (-not [WinUltix.PnpTree]::IsDeviceDisabled($data.Instance)) {
 throw "pnputil failed to disable $($data.Instance)"
 }
@@ -11125,18 +12756,19 @@ $data = $item.ActionData
 Write-GUI " -> Configuring Subsystem: $($item.UIDisplayName)"
 try {
 if ($data.Type -eq "Reg") {
-if (-not (Test-Path -LiteralPath $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
-Set-ItemProperty -LiteralPath $data.Path -Name $data.Name -Value $data.Val -Type DWord -Force -ErrorAction Stop
+Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Val -Type DWord -Module "Z7_Hardware"
 } elseif ($data.Type -eq "MMAgent") {
 $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
 $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
-if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 -Module "Z7_Hardware" }
 try {
+Invoke-UltixStep -Command "Disable-MMAgent -MemoryCompression" -Action {
 Disable-MMAgent -MemoryCompression -ErrorAction Stop
+} -SuccessOutput "Disabled System Memory Compression" -Module "Z7_Hardware"
 } finally {
 if ($smStart -eq 4) {
-Stop-Service -Name "SysMain" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4
+Stop-UltixService -ServiceName "SysMain" -Module "Z7_Hardware"
+Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 -Module "Z7_Hardware"
 }
 }
 }
@@ -11183,11 +12815,10 @@ param([Parameter(Mandatory=$true)]$ProfileData)
 $affList = @($ProfileData.AffinityLasso)
 if ($affList.Count -gt 0) {
 $affPath = "HKCU:\Software\WinUltix\AffinityLasso"
-if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force | Out-Null }
 $affItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 foreach ($exe in $affList) {
 if ([string]::IsNullOrWhiteSpace($exe)) { continue }
-Set-ItemProperty -LiteralPath $affPath -Name $exe -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $affPath -Name $exe -Value 1 -Type DWord -Module "Z7_Hardware"
 $affItems.Add([PSCustomObject]@{
 ActionData = @{
 ExeName  = [string]$exe
@@ -11224,8 +12855,16 @@ if ($toApplyNvme.Count -gt 0) { Invoke-ApplyNVMeTweaks -SelectedItems $toApplyNv
 }
 if (@($hwLocks.GlobalNetwork).Count -gt 0) {
 foreach ($gNet in $hwLocks.GlobalNetwork) {
-if ($gNet -match "RSS") { Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction SilentlyContinue }
-if ($gNet -match "RSC") { Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction SilentlyContinue }
+if ($gNet -match "RSS") {
+Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled" -Action {
+Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction SilentlyContinue
+} -SuccessOutput "Enabled Global TCP RSS" -Module "Z7_Hardware"
+}
+if ($gNet -match "RSC") {
+Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled" -Action {
+Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction SilentlyContinue
+} -SuccessOutput "Disabled Global TCP RSC" -Module "Z7_Hardware"
+}
 }
 Write-GUI " -> Enforced Global TCP RSS/RSC offload profile."
 }
@@ -11292,8 +12931,7 @@ $btnAddExe.Add_Click({
 $exe = $txtCustom.Text.Trim()
 if ($exe -ne "" -and $exe -match "\.exe$") {
 $configPath = "HKCU:\Software\WinUltix\AffinityLasso"
-if (-not (Test-Path $configPath)) { New-Item -Path $configPath -Force | Out-Null }
-Set-ItemProperty -Path $configPath -Name $exe -Value 1 -Type DWord -Force | Out-Null
+Set-UltixRegValue -Path $configPath -Name $exe -Value 1 -Type DWord -Module "Z7_Hardware"
 $txtCustom.Text = ""
 &$refreshData
 } else { [System.Windows.Forms.MessageBox]::Show("Process must end with .exe", "Invalid Input") }
@@ -11577,6 +13215,31 @@ $e.NewValue = [System.Windows.Forms.CheckState]::Unchecked
 }
 })
 $sortSyncGuard = @{ SuppressCombo = $false }
+$sortByLive1sLoad = ({
+$listView.ListViewItemSorter = $null
+$sorted1s = @($listView.Items | Sort-Object -Descending {
+$m1s = [regex]::Match($_.SubItems[4].Text, '1s:\s*([0-9]+(?:\.[0-9]+)?)')
+if ($m1s.Success) { [double]$m1s.Groups[1].Value } else { -1.0 }
+}, {
+$mMax = [regex]::Match($_.SubItems[4].Text, 'Max:\s*([0-9]+)')
+if ($mMax.Success) { [double]$mMax.Groups[1].Value } else { 0.0 }
+})
+$orderChanged = ($sorted1s.Count -ne $listView.Items.Count)
+if (-not $orderChanged) {
+for ($idx = 0; $idx -lt $sorted1s.Count; $idx++) {
+if (-not [object]::ReferenceEquals($sorted1s[$idx], $listView.Items[$idx])) {
+$orderChanged = $true
+break
+}
+}
+}
+if ($orderChanged) {
+$listView.Items.Clear()
+foreach ($si in $sorted1s) { [void]$listView.Items.Add($si) }
+}
+$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::None
+$listView.ListViewItemSorter = $sorter
+}.GetNewClosure())
 $applySortMode = ({
 $listView.BeginUpdate()
 switch ($comboSort.SelectedIndex) {
@@ -11588,11 +13251,11 @@ foreach ($si in $sortedItems) { [void]$listView.Items.Add($si) }
 $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::None
 $listView.ListViewItemSorter = $sorter
 }
-1 { $sorter.ColumnToSort = 3;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
-2 { $sorter.ColumnToSort = 4;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
-3 { $sorter.ColumnToSort = -1; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
-4 { $sorter.ColumnToSort = 1;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
-5 { $sorter.ColumnToSort = 2;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
+1 { $sorter.ColumnToSort = 3; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
+2 { $sorter.ColumnToSort = 4; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
+3 { & $sortByLive1sLoad }
+4 { $sorter.ColumnToSort = 1; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
+5 { $sorter.ColumnToSort = 2; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
 }
 & $reapplyAllRowShading
 $listView.EndUpdate()
@@ -11613,6 +13276,8 @@ $listView.Items.RemoveAt($i)
 }
 & $reapplyAllRowShading
 $listView.EndUpdate()
+} else {
+& $applySortMode
 }
 }.GetNewClosure())
 $listView.Add_ColumnClick({
@@ -11770,6 +13435,8 @@ Modal          = $modal
 Label          = $lblDpcMonitor
 ListView       = $listView
 Sorter         = $sorter
+ComboSort      = $comboSort
+Sort1s         = $sortByLive1sLoad
 ChkKernel      = $chkShowKernel
 PciKeys        = $pciServiceKeys
 KernelCatalog  = $kernelRoleCatalog
@@ -11812,6 +13479,7 @@ $ctx.Label.Text += "`r`n$hdrTag | Idle (<0.1 $([char]0x00B5)s/s kernel driver IS
 }
 $lv = $ctx.ListView
 $st = $ctx.Sorter
+$cbSort = $ctx.ComboSort
 if ($null -ne $lv -and -not $lv.IsDisposed) {
 $existingKernelRows = @{}
 $addedKernelRow     = $false
@@ -11883,9 +13551,19 @@ $kLv.Tag = $kItemObj
 $addedKernelRow = $true
 }
 }
-if ($st.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None -and
-($st.ColumnToSort -in @(3, 4, -1) -or $addedKernelRow) -and
-[System.Windows.Forms.Control]::MouseButtons -eq [System.Windows.Forms.MouseButtons]::None) {
+if ([System.Windows.Forms.Control]::MouseButtons -eq [System.Windows.Forms.MouseButtons]::None) {
+if ($null -ne $cbSort -and $cbSort.SelectedIndex -eq 3 -and $null -ne $ctx.Sort1s) {
+$lv.BeginUpdate()
+& $ctx.Sort1s
+for ($r = 0; $r -lt $lv.Items.Count; $r++) {
+$it  = $lv.Items[$r]
+$dev = $it.Tag
+$svcKey = if ($null -ne $dev -and $dev.ServiceName) { $dev.ServiceName.ToLowerInvariant() } else { "pci" }
+& $ctx.StyleRow $it $r $drvLookup[$svcKey]
+}
+$lv.EndUpdate()
+} elseif ($st.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None -and
+($st.ColumnToSort -in @(3, 4) -or $addedKernelRow)) {
 $needsResort = $addedKernelRow
 if (-not $needsResort) {
 for ($i = 0; $i -lt ($lv.Items.Count - 1); $i++) {
@@ -11908,6 +13586,7 @@ $lv.EndUpdate()
 }
 }
 }
+}
 })
 $dpcTimer.Start()
 $btnSelRec.Tag = @{
@@ -11918,12 +13597,19 @@ ComboPrio  = $comboPrio
 $btnSelRec.Add_Click({
 $ctx = $this.Tag
 $lv  = $ctx.ListView
+$matchedRec = 0
 $lv.BeginUpdate()
 foreach ($lvItem in $lv.Items) {
 $dev = $lvItem.Tag
-$lvItem.Checked = ($null -ne $dev -and $dev.IsKernelOnly -ne $true -and [bool]$dev.IsRecommendedOffload)
+$shouldCheck = ($null -ne $dev -and $dev.IsKernelOnly -ne $true -and [bool]$dev.IsRecommendedOffload)
+$lvItem.Checked = $shouldCheck
+if ($shouldCheck) { $matchedRec++ }
 }
 $lv.EndUpdate()
+if ($matchedRec -eq 0) {
+[System.Windows.Forms.MessageBox]::Show("All primary GPU and Network controllers are already offloaded from Core 0.", "WinUltix - MSI & IRQ Enforcer") | Out-Null
+return
+}
 $ctx.ChkOffload.Checked = $true
 if ($ctx.ComboPrio.SelectedIndex -eq 0) { $ctx.ComboPrio.SelectedIndex = 1 }
 })
@@ -11961,8 +13647,7 @@ if ($listView.CheckedItems.Count -eq 0) {
 return
 }
 $changed = 0
-$bRoot = "HKCU:\Software\WinUltix\MSI_Backup"
-if (-not (Test-Path -LiteralPath $bRoot)) { New-Item -Path $bRoot -Force | Out-Null }
+$bRoot = "HKLM:\SOFTWARE\WinUltix\MSI_Backup"
 $prioSelection = [string]$comboPrio.SelectedItem
 $doOffload     = $chkOffloadCore0.Checked
 [byte[]]$offloadBytes = if ($doOffload) { &$getOffloadMaskBytes } else { $null }
@@ -11975,54 +13660,57 @@ $affPath = $dev.ActionData.AffinityPath
 $safeKey = &$getSafeBackupKeyName $msiPath
 $devBackupKey = "$bRoot\$safeKey"
 if (-not (Test-Path -LiteralPath $devBackupKey)) {
-New-Item -Path $devBackupKey -Force | Out-Null
-Set-ItemProperty -LiteralPath $devBackupKey -Name "DeviceName" -Value ([string]$dev.RawDeviceName) -Type String -Force
+Set-UltixRegValue -Path $devBackupKey -Name "DeviceName" -Value ([string]$dev.RawDeviceName) -Type String -Module "Z7_Hardware"
 $oldMsi = (Get-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -ErrorAction SilentlyContinue).MSISupported
 if ($null -eq $oldMsi) { $oldMsi = 255 }
-Set-ItemProperty -LiteralPath $devBackupKey -Name "MSISupported" -Value $oldMsi -Type DWord -Force
+Set-UltixRegValue -Path $devBackupKey -Name "MSISupported" -Value $oldMsi -Type DWord -Module "Z7_Hardware"
 if (Test-Path -LiteralPath $affPath) {
-Set-ItemProperty -LiteralPath $devBackupKey -Name "AffinityKeyExisted" -Value 1 -Type DWord -Force
+Set-UltixRegValue -Path $devBackupKey -Name "AffinityKeyExisted" -Value 1 -Type DWord -Module "Z7_Hardware"
 $affProps = Get-ItemProperty -LiteralPath $affPath -ErrorAction SilentlyContinue
 $oldPrio  = if ($null -ne $affProps.InterruptPriority) { $affProps.InterruptPriority } else { 255 }
 $oldPol   = if ($null -ne $affProps.DevicePolicy) { $affProps.DevicePolicy } else { 255 }
-Set-ItemProperty -LiteralPath $devBackupKey -Name "InterruptPriority" -Value $oldPrio -Type DWord -Force
-Set-ItemProperty -LiteralPath $devBackupKey -Name "DevicePolicy" -Value $oldPol -Type DWord -Force
+Set-UltixRegValue -Path $devBackupKey -Name "InterruptPriority" -Value $oldPrio -Type DWord -Module "Z7_Hardware"
+Set-UltixRegValue -Path $devBackupKey -Name "DevicePolicy" -Value $oldPol -Type DWord -Module "Z7_Hardware"
 if ($null -ne $affProps.AssignmentSetOverride) {
-Set-ItemProperty -LiteralPath $devBackupKey -Name "AssignmentSetOverride" -Value ([byte[]]$affProps.AssignmentSetOverride) -Type Binary -Force
+Set-UltixRegValue -Path $devBackupKey -Name "AssignmentSetOverride" -Value ([byte[]]$affProps.AssignmentSetOverride) -Type Binary -Module "Z7_Hardware"
 }
 } else {
-Set-ItemProperty -LiteralPath $devBackupKey -Name "AffinityKeyExisted" -Value 0 -Type DWord -Force
+Set-UltixRegValue -Path $devBackupKey -Name "AffinityKeyExisted" -Value 0 -Type DWord -Module "Z7_Hardware"
 }
 }
 $isStorageSpread = ($dev.DeviceRole -eq "Storage" -or $dev.DevicePolicy -eq 5)
 $applyBlock = {
-Set-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Value 1 -Type DWord -Force -ErrorAction Stop | Out-Null
+Set-UltixRegValue -Path $msiPath -Name "MSISupported" -Value 1 -Type DWord -Module "Z7_Hardware"
 if ($prioSelection -ne "Keep Current") {
-if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force -ErrorAction Stop | Out-Null }
 switch ($prioSelection) {
-"High (3)"            { Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value 3 -Type DWord -Force -ErrorAction Stop }
-"Normal (2)"          { Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value 2 -Type DWord -Force -ErrorAction Stop }
-"Low (1)"             { Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value 1 -Type DWord -Force -ErrorAction Stop }
-"Undefined (Default)" { Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Force -ErrorAction SilentlyContinue }
+"High (3)"            { Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value 3 -Type DWord -Module "Z7_Hardware" }
+"Normal (2)"          { Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value 2 -Type DWord -Module "Z7_Hardware" }
+"Low (1)"             { Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value 1 -Type DWord -Module "Z7_Hardware" }
+"Undefined (Default)" { Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware" }
 }
 }
-if ($doOffload -and $null -ne $offloadBytes) {
 if ($isStorageSpread) {
-Write-GUI "    [*] Preserved Multi-Queue 'Spread' policy on storage controller: $($dev.RawDeviceName)"
-} else {
-if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force -ErrorAction Stop | Out-Null }
-Set-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Value 4 -Type DWord -Force -ErrorAction Stop
-Set-ItemProperty -LiteralPath $affPath -Name "AssignmentSetOverride" -Value $offloadBytes -Type Binary -Force -ErrorAction Stop
+if ($dev.DevicePolicy -ne 5) {
+Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value 5 -Type DWord -Module "Z7_Hardware"
 }
+Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
+if ($doOffload) {
+Write-GUI "    [*] Enforced/preserved Multi-Queue 'Spread' (DevicePolicy=5) on storage controller: $($dev.RawDeviceName)"
+}
+} elseif ($doOffload -and $null -ne $offloadBytes) {
+Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value 4 -Type DWord -Module "Z7_Hardware"
+Set-UltixRegValue -Path $affPath -Name "AssignmentSetOverride" -Value $offloadBytes -Type Binary -Module "Z7_Hardware"
 }
 }
 try {
 try {
 & $applyBlock
 } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+Invoke-UltixStep -Command "Grant-UltixRegistryKeyAccess '$irqRoot'" -Action {
 Grant-UltixRegistryKeyAccess -RegistryPath $irqRoot
 Grant-UltixRegistryKeyAccess -RegistryPath $msiPath
 if (Test-Path -LiteralPath $affPath) { Grant-UltixRegistryKeyAccess -RegistryPath $affPath }
+} -SuccessOutput "Escalated TrustedInstaller ACL on PCI Interrupt Management" -Module "Z7_Hardware"
 & $applyBlock
 }
 Write-GUI " -> Configured IRQ/MSI policy: $($dev.RawDeviceName)"
@@ -12041,7 +13729,8 @@ if ($listView.CheckedItems.Count -eq 0) {
 [System.Windows.Forms.MessageBox]::Show("Check the PCI device(s) you want to restore to factory defaults.", "WinUltix - Restore MSI State") | Out-Null
 return
 }
-$bRoot = "HKCU:\Software\WinUltix\MSI_Backup"
+$bRoot       = "HKLM:\SOFTWARE\WinUltix\MSI_Backup"
+$legacyBRoot = "HKCU:\Software\WinUltix\MSI_Backup"
 foreach ($lvItem in $listView.CheckedItems) {
 $dev = $lvItem.Tag
 if ($null -eq $dev -or $dev.IsKernelOnly -eq $true) { continue }
@@ -12049,45 +13738,47 @@ $irqRoot = $dev.ActionData.IrqMgmtPath
 $msiPath = $dev.ActionData.Path
 $affPath = $dev.ActionData.AffinityPath
 $safeKey = &$getSafeBackupKeyName $msiPath
-$devBackupKey = "$bRoot\$safeKey"
+$devBackupKey = if (Test-Path -LiteralPath "$bRoot\$safeKey") { "$bRoot\$safeKey" } elseif (Test-Path -LiteralPath "$legacyBRoot\$safeKey") { "$legacyBRoot\$safeKey" } else { "$bRoot\$safeKey" }
 $revertBlock = {
 if (Test-Path -LiteralPath $devBackupKey) {
 $bProps = Get-ItemProperty -LiteralPath $devBackupKey -ErrorAction SilentlyContinue
 if ($null -ne $bProps.MSISupported) {
 if ($bProps.MSISupported -eq 255 -or $bProps.MSISupported -eq -1) {
-Remove-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $msiPath -Name "MSISupported" -IgnoreMissing -Module "Z7_Hardware"
 } else {
-Set-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Value $bProps.MSISupported -Type DWord -Force -ErrorAction Stop
+Set-UltixRegValue -Path $msiPath -Name "MSISupported" -Value $bProps.MSISupported -Type DWord -Module "Z7_Hardware"
 }
 }
 if ($bProps.AffinityKeyExisted -eq 0) {
-if (Test-Path -LiteralPath $affPath) { Remove-Item -LiteralPath $affPath -Recurse -Force -ErrorAction Stop }
+Remove-UltixRegItem -Path $affPath -IgnoreMissing -Module "Z7_Hardware"
 } elseif (Test-Path -LiteralPath $affPath) {
 if ($bProps.InterruptPriority -eq 255 -or $null -eq $bProps.InterruptPriority) {
-Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware"
 } else {
-Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value $bProps.InterruptPriority -Type DWord -Force -ErrorAction Stop
+Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value $bProps.InterruptPriority -Type DWord -Module "Z7_Hardware"
 }
 if ($bProps.DevicePolicy -eq 255 -or $null -eq $bProps.DevicePolicy) {
-Remove-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $affPath -Name "DevicePolicy" -IgnoreMissing -Module "Z7_Hardware"
 } else {
-Set-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Value $bProps.DevicePolicy -Type DWord -Force -ErrorAction Stop
+Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value $bProps.DevicePolicy -Type DWord -Module "Z7_Hardware"
 }
 if ($null -ne $bProps.AssignmentSetOverride) {
-Set-ItemProperty -LiteralPath $affPath -Name "AssignmentSetOverride" -Value ([byte[]]$bProps.AssignmentSetOverride) -Type Binary -Force -ErrorAction Stop
+Set-UltixRegValue -Path $affPath -Name "AssignmentSetOverride" -Value ([byte[]]$bProps.AssignmentSetOverride) -Type Binary -Module "Z7_Hardware"
 } else {
-Remove-ItemProperty -LiteralPath $affPath -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
 }
 }
-Remove-Item -LiteralPath $devBackupKey -Recurse -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $devBackupKey -IgnoreMissing -Module "Z7_Hardware"
 } elseif ($dev.DeviceRole -eq "Storage") {
-Set-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Value 1 -Type DWord -Force -ErrorAction Stop
-if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force -ErrorAction Stop | Out-Null }
-Set-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Value 5 -Type DWord -Force -ErrorAction Stop
-Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority", "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
+Set-UltixRegValue -Path $msiPath -Name "MSISupported" -Value 1 -Type DWord -Module "Z7_Hardware"
+Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value 5 -Type DWord -Module "Z7_Hardware"
+Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware"
+Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
 } else {
 if (Test-Path -LiteralPath $affPath) {
-Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority", "DevicePolicy", "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
+Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware"
+Remove-UltixRegItem -Path $affPath -Name "DevicePolicy" -IgnoreMissing -Module "Z7_Hardware"
+Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
 }
 }
 }
@@ -12095,9 +13786,11 @@ try {
 try {
 & $revertBlock
 } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+Invoke-UltixStep -Command "Grant-UltixRegistryKeyAccess '$irqRoot'" -Action {
 Grant-UltixRegistryKeyAccess -RegistryPath $irqRoot
 Grant-UltixRegistryKeyAccess -RegistryPath $msiPath
 if (Test-Path -LiteralPath $affPath) { Grant-UltixRegistryKeyAccess -RegistryPath $affPath }
+} -SuccessOutput "Escalated TrustedInstaller ACL on PCI Interrupt Management" -Module "Z7_Hardware"
 & $revertBlock
 }
 Write-GUI " -> Reverted IRQ/MSI state to factory defaults: $($dev.RawDeviceName)"
@@ -12126,6 +13819,7 @@ try {
 [void]$modal.ShowDialog($global:form)
 } finally {
 $dpcTimer.Stop()
+$dpcTimer.Tag = $null
 $dpcTimer.Dispose()
 try { [WinUltix.DpcDriverProfiler]::Stop() } catch { }
 $modal.Dispose()
@@ -12360,16 +14054,16 @@ $btnRevert = New-UltixButton -Parent $modal -Text "Restore Defaults" -X 208 -Y 2
 $btnRevert.Anchor = 'Bottom, Left'
 $btnRevert.Add_Click({
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
-Remove-ItemProperty -LiteralPath $regPath -Name "GlobalTimerResolutionRequests" -ErrorAction SilentlyContinue | Out-Null
-$null = & bcdedit.exe /deletevalue "{current}" disabledynamictick 2>&1
-$null = & bcdedit.exe /deletevalue "{current}" useplatformclock 2>&1
-$null = & bcdedit.exe /deletevalue "{current}" useplatformtick 2>&1
+Remove-UltixRegItem -Path $regPath -Name "GlobalTimerResolutionRequests" -IgnoreMissing -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "disabledynamictick") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "useplatformclock") -Module "Z7_Hardware"
+$null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "useplatformtick") -Module "Z7_Hardware"
 $hpetRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\ACPI\PNP0103"
 if (Test-Path -LiteralPath $hpetRoot) {
 foreach ($sub in (Get-ChildItem -LiteralPath $hpetRoot -ErrorAction SilentlyContinue)) {
 $hpetId = "ACPI\PNP0103\$($sub.PSChildName)"
 if ([WinUltix.PnpTree]::IsDeviceDisabled($hpetId)) {
-$null = & pnputil.exe /enable-device "$hpetId" 2>&1
+$null = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/enable-device", "$hpetId") -Module "Z7_Hardware"
 }
 }
 }
@@ -12381,13 +14075,17 @@ $btnTestPulse = New-UltixButton -Parent $modal -Text "Test 0.5ms Lock" -X 371 -Y
 $btnTestPulse.Anchor = 'Bottom, Left'
 $btnTestPulse.Add_Click({
 if (-not $testLockState.IsLocked) {
+Invoke-UltixStep -Command "[WinUltix.NtDll]::SetTimerResolution(5000, `$true)" -Action {
 [void][WinUltix.NtDll]::SetTimerResolution(5000, $true)
+} -SuccessOutput "Engaged 0.5ms (5000 x 100ns) kernel timer lock" -Module "Z7_Hardware"
 $testLockState.IsLocked = $true
 $this.Text = "Stop 0.5ms Test"
 $this.BackColor = [System.Drawing.Color]::FromArgb(255, 160, 90, 40)
 Write-GUI " -> Engaged live NtSetTimerResolution(5000) 0.5ms kernel clock test."
 } else {
+Invoke-UltixStep -Command "[WinUltix.NtDll]::SetTimerResolution(5000, `$false)" -Action {
 [void][WinUltix.NtDll]::SetTimerResolution(5000, $false)
+} -SuccessOutput "Released 0.5ms kernel timer lock" -Module "Z7_Hardware"
 $testLockState.IsLocked = $false
 $this.Text = "Test 0.5ms Lock"
 $this.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 110, 65)
@@ -12406,7 +14104,9 @@ try {
 [void]$modal.ShowDialog($global:form)
 } finally {
 if ($testLockState.IsLocked) {
+Invoke-UltixStep -Command "[WinUltix.NtDll]::SetTimerResolution(5000, `$false)" -Action {
 [void][WinUltix.NtDll]::SetTimerResolution(5000, $false)
+} -SuccessOutput "Released 0.5ms kernel timer lock on modal close" -Module "Z7_Hardware"
 Write-GUI " -> Released 0.5ms kernel clock test lock (Modal closed)."
 }
 $timerPoll.Stop()
@@ -12469,15 +14169,20 @@ $btnRevert.Add_Click({
 $modal.UseWaitCursor = $true
 [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
 try {
-Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters" -Name "DisableASPM" -Force -ErrorAction SilentlyContinue | Out-Null
-Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device" -Name "IdlePowerMode" -Force -ErrorAction SilentlyContinue | Out-Null
+Remove-UltixRegItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters" -Name "DisableASPM" -IgnoreMissing -Module "Z7_Hardware"
+Remove-UltixRegItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device" -Name "IdlePowerMode" -IgnoreMissing -Module "Z7_Hardware"
 $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
 $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
-if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 -Module "Z7_Hardware" }
 try {
+Invoke-UltixStep -Command "Enable-MMAgent -MemoryCompression" -Action {
 Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+} -SuccessOutput "Restored System Memory Compression" -Module "Z7_Hardware"
 } finally {
-if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 }
+if ($smStart -eq 4) {
+Stop-UltixService -ServiceName "SysMain" -Module "Z7_Hardware"
+Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 -Module "Z7_Hardware"
+}
 }
 } finally {
 $modal.UseWaitCursor = $false
@@ -12683,7 +14388,7 @@ if (`$res -eq "Yes") {
         `$d  = Get-Pcfg '4b92d758-5a24-4851-a470-815d78aee119'
         `$pr = Get-Pcfg '7b224883-b3cc-4d79-819f-8374152cbe7c'
         
-        if (`$null -ne `$e -and -not (`$e -eq 0 -and `$d -eq 100 -and `$pr -eq 100) -and -not (`$e -eq 0 -and `$d -eq 0 -and `$pr -eq 0)) {
+        if (`$null -ne `$e -and `$null -ne `$d -and `$null -ne `$pr -and -not (`$e -eq 0 -and `$d -eq 100 -and `$pr -eq 100) -and -not (`$e -eq 0 -and `$d -eq 0 -and `$pr -eq 0)) {
             Set-ItemProperty -LiteralPath `$p -Name 'EPP' -Value `$e -Type DWord -Force
             Set-ItemProperty -LiteralPath `$p -Name 'Demote' -Value `$d -Type DWord -Force
             Set-ItemProperty -LiteralPath `$p -Name 'Promote' -Value `$pr -Type DWord -Force
@@ -12740,16 +14445,20 @@ if (`$res -eq "Yes") {
 }
 "@
 try {
+$desktop = [Environment]::GetFolderPath("Desktop")
+$lnkPath = "$desktop\WinUltix Pre-Flight Mode.lnk"
+Invoke-UltixStep -Command "New-PreFlightShortcut '$lnkPath'" -Action {
 Set-Content -LiteralPath $ps1Path -Value $code -Encoding UTF8 -ErrorAction Stop
-$desktop  = [Environment]::GetFolderPath("Desktop")
 $WshShell = New-Object -ComObject WScript.Shell -ErrorAction Stop
-$Shortcut = $WshShell.CreateShortcut("$desktop\WinUltix Pre-Flight Mode.lnk")
+$Shortcut = $WshShell.CreateShortcut($lnkPath)
 $Shortcut.TargetPath = "powershell.exe"
 $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1Path`""
 $Shortcut.WindowStyle = 7
 $Shortcut.IconLocation = if (Test-Path -LiteralPath $icoPath) { "$icoPath, 0" } else { "shell32.dll, 137" }
 $Shortcut.Save()
+[void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Shortcut)
 [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($WshShell)
+} -SuccessOutput "Generated PreFlight.ps1 & Desktop shortcut ($($topo.Label))" -Module "Z7_Hardware"
 Write-GUI " -> Generated Pre-Flight shortcut on Desktop ($($topo.Label))."
 [System.Windows.Forms.MessageBox]::Show("Pre-Flight Shortcut generated on Desktop.", "Success")
 } catch {
@@ -12757,59 +14466,100 @@ Write-GUI " -> Generated Pre-Flight shortcut on Desktop ($($topo.Label))."
 }
 }
 function Get-UsbTopologyMap {
-param([switch]$IncludeRawHubs)
+param([bool]$IncludeRawHubs = $false)
 $controllers = [System.Collections.Generic.List[PSCustomObject]]::new()
-[int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
-[uint64]$core0Mask  = if ($coreMasks.Count -ge 1) { [uint64]$coreMasks[0] } else { 3 }
-[uint64]$core1Mask  = if ($coreMasks.Count -ge 2) { [uint64]$coreMasks[1] } else { 12 }
-$pciRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\PCI"
-if (-not (Test-Path -LiteralPath $pciRoot)) { return @() }
-foreach ($venKey in (Get-ChildItem -LiteralPath $pciRoot -ErrorAction SilentlyContinue)) {
-foreach ($instKey in (Get-ChildItem -LiteralPath $venKey.PSPath -ErrorAction SilentlyContinue)) {
-$props = Get-ItemProperty -LiteralPath $instKey.PSPath -Name "Service", "FriendlyName", "DeviceDesc", "LocationInformation" -ErrorAction SilentlyContinue
-if ($null -eq $props -or $props.Service -notmatch '^(?i)(USBXHCI|USB4|usbehci)$') { continue }
-$instanceId = "PCI\$($venKey.PSChildName)\$($instKey.PSChildName)"
+$nativeCores = @([WinUltix.CpuTopology]::GetProcessorCores())
+[int64[]]$coreMasks = if ($nativeCores.Count -gt 0) {
+@($nativeCores | ForEach-Object { [int64]$_.Mask })
+} else {
+@([int64]3, [int64]12)
+}
+[uint64]$core0Mask = if ($coreMasks.Count -ge 1) { [BitConverter]::ToUInt64([BitConverter]::GetBytes([int64]$coreMasks[0]), 0) } else { 3 }
+[uint64]$core1Mask = if ($coreMasks.Count -ge 2) { [BitConverter]::ToUInt64([BitConverter]::GetBytes([int64]$coreMasks[1]), 0) } else { 12 }
+$pciRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum\PCI", $false)
+$enumRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum", $false)
+if ($null -eq $pciRoot) {
+if ($null -ne $enumRoot) { $enumRoot.Dispose() }
+return @()
+}
+try {
+foreach ($venName in $pciRoot.GetSubKeyNames()) {
+$venKey = $pciRoot.OpenSubKey($venName, $false)
+if ($null -eq $venKey) { continue }
+try {
+foreach ($instName in $venKey.GetSubKeyNames()) {
+$instKey = $venKey.OpenSubKey($instName, $false)
+if ($null -eq $instKey) { continue }
+try {
+$svcVal = [string]$instKey.GetValue("Service", "")
+if ($svcVal -notmatch '^(?i)(USBXHCI|USB4|usbehci)$') { continue }
+$instanceId = "PCI\$venName\$instName"
 if ([WinUltix.PnpTree]::GetDeviceConfigStatus($instanceId) -ne 0) { continue }
-$rawCtrlName = if ([string]$props.DeviceDesc -match '^@usbxhci\.inf,') { $props.DeviceDesc } elseif ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
+$rawDescAttr = [string]$instKey.GetValue("DeviceDesc", "")
+$rawFriendly = [string]$instKey.GetValue("FriendlyName", "")
+$rawCtrlName = if ($rawDescAttr -match '^@usbxhci\.inf,') { $rawDescAttr } elseif (-not [string]::IsNullOrWhiteSpace($rawFriendly)) { $rawFriendly } else { $rawDescAttr }
 $ctrlName    = Format-UltixDeviceName -RawName $rawCtrlName
 $parents = @([WinUltix.PnpTree]::GetParentChain($instanceId))
 $pciBridgeHops = @($parents | Where-Object { $_ -like "PCI\*" }).Count
-$routingBadge = if ($venKey.PSChildName -match 'DEV_43[A-F0-9]{2}' -or $ctrlName -match '(?i)Chipset') {
+$routingBadge = if ($venName -match 'DEV_43[A-F0-9]{2}' -or $ctrlName -match '(?i)Chipset') {
 if ($pciBridgeHops -ge 3) { "[CHIPSET PCH (Daisy-Chained / $pciBridgeHops Hops)]" }
 else { "[CHIPSET PCH ($pciBridgeHops PCIe Hops)]" }
+} elseif ($venName -match 'VEN_8086' -and $pciBridgeHops -eq 0 -and $ctrlName -notmatch '(?i)(USB4|Thunderbolt)') {
+"[INTEL PCH INTEGRATED (DMI Link - 0 Bridge Hops)]"
 } elseif ($pciBridgeHops -le 1) {
-"[CPU DIRECT SoC LANES (1 PCIe Hop - Lowest Latency)]"
+$hopTxt = if ($pciBridgeHops -eq 1) { "1 PCIe Hop" } else { "0 Bridge Hops" }
+"[CPU DIRECT SoC LANES ($hopTxt - Lowest Latency)]"
 } else {
-"[SECONDARY BRIDGE ($pciBridgeHops PCIe Hops)]"
+"[SECONDARY / PCH BRIDGE ($pciBridgeHops PCIe Hops)]"
 }
-$msiPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
-$affPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\Affinity Policy"
-$msiOn   = ((Get-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -ErrorAction SilentlyContinue).MSISupported -eq 1)
-$affProps = Get-ItemProperty -LiteralPath $affPath -ErrorAction SilentlyContinue
-$irqTag  = "Core 0 (Default)"
-if ($null -ne $affProps -and $affProps.DevicePolicy -eq 4 -and $null -ne $affProps.AssignmentSetOverride) {
+$msiOn = $false
+$msiKey = $instKey.OpenSubKey("Device Parameters\Interrupt Management\MessageSignaledInterruptProperties", $false)
+if ($null -ne $msiKey) {
+try { $msiOn = ($msiKey.GetValue("MSISupported", $null) -eq 1) } finally { $msiKey.Dispose() }
+}
+$irqTag = "Core 0 (Default)"
+$affKey = $instKey.OpenSubKey("Device Parameters\Interrupt Management\Affinity Policy", $false)
+if ($null -ne $affKey) {
+try {
+$devPol = $affKey.GetValue("DevicePolicy", $null)
+$rawMaskObj = $affKey.GetValue("AssignmentSetOverride", $null)
+if ($devPol -eq 4 -and $null -ne $rawMaskObj) {
 [uint64]$mVal = 0
-for ($b = 0; $b -lt [math]::Min(8, $affProps.AssignmentSetOverride.Length); $b++) {
-$mVal = $mVal -bor ([uint64]$affProps.AssignmentSetOverride[$b] -shl ($b * 8))
+if ($rawMaskObj -is [byte[]]) {
+for ($b = 0; $b -lt [math]::Min(8, $rawMaskObj.Length); $b++) {
+$mVal = $mVal -bor ([uint64]$rawMaskObj[$b] -shl ($b * 8))
 }
+} elseif ($rawMaskObj -is [int] -or $rawMaskObj -is [long] -or $rawMaskObj -is [uint32] -or $rawMaskObj -is [uint64]) {
+$mVal = [BitConverter]::ToUInt64([BitConverter]::GetBytes([int64]$rawMaskObj), 0)
+}
+if ($mVal -gt 0) {
 $cHint = if ($mVal -eq $core1Mask) { " (C1 Offloaded)" } elseif (($mVal -band $core0Mask) -ne 0) { " (C0)" } else { "" }
 $irqTag = "0x$($mVal.ToString('X'))$cHint"
+}
+}
+} finally {
+$affKey.Dispose()
+}
 }
 $descendants  = @([WinUltix.PnpTree]::GetDescendants($instanceId))
 $endpoints    = [System.Collections.Generic.List[PSCustomObject]]::new()
 $hubNames     = [System.Collections.Generic.List[string]]::new()
-$hasMouse     = $false
-$hasAudio     = $false
-$hasStorage   = $false
-$hasVr        = $false
-$mouseLabel   = ""
-$conflictList = [System.Collections.Generic.List[string]]::new()
+$hasMouse            = $false
+$hasAudio            = $false
+$hasStorage          = $false
+$hasVr               = $false
+$hasThrottledStorage = $false
+$throttledLabel      = ""
+$mouseLabel          = ""
+$conflictList        = [System.Collections.Generic.List[string]]::new()
+$seenEpKeys          = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $rootHubInfo  = $null
 $hubSpeedMap  = @{}
 $physDevices  = [System.Collections.Generic.List[PSCustomObject]]::new()
 $currentPhys  = $null
 foreach ($entry in $descendants) {
 $parts = $entry -split '\|', 2
+if ($parts.Count -lt 2) { continue }
 $depth = [int]$parts[0]
 $devId = $parts[1]
 foreach ($staleDepth in @($hubSpeedMap.Keys)) {
@@ -12817,23 +14567,38 @@ if ($staleDepth -ge $depth) {
 [void]$hubSpeedMap.Remove($staleDepth)
 }
 }
+if ($devId -match '^(?i)(BTHENUM|BTHLE|SWD|MMDEVAPI)\\') { continue }
+if ([WinUltix.PnpTree]::GetDeviceConfigStatus($devId) -ne 0) { continue }
 if ($devId -match '^USB\\ROOT_HUB') {
 $rootHubInfo = [WinUltix.UsbProberV2]::ProbeHub($devId)
-$hubSpeedMap[$depth] = $rootHubInfo.PortSpeeds
+$hubSpeedMap[$depth] = if ($null -ne $rootHubInfo -and $null -ne $rootHubInfo.PortSpeeds) { $rootHubInfo.PortSpeeds } else { @{} }
 continue
 }
-if ($devId -match '^(?i)(BTHENUM|BTHLE|SWD|MMDEVAPI)\\') { continue }
-$regNode = "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId"
-$dProps  = Get-ItemProperty -LiteralPath $regNode -Name "FriendlyName", "DeviceDesc", "Service", "Class", "Address", "LocationInformation" -ErrorAction SilentlyContinue
-if ($null -eq $dProps) { continue }
-$rawDName = if ([string]$dProps.DeviceDesc -match '^@(usb|input|keyboard|msmouse|usbhub3|hidclass|hidserv)\.inf,') { $dProps.DeviceDesc } elseif ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
+if ($null -eq $enumRoot) { continue }
+$dKey = $enumRoot.OpenSubKey($devId, $false)
+if ($null -eq $dKey) { continue }
+$dRawDesc = ""
+$dFriend  = ""
+$dSvc     = ""
+$dCls     = ""
+$dLoc     = ""
+$dAddrObj = $null
+try {
+$dRawDesc = [string]$dKey.GetValue("DeviceDesc", "")
+$dFriend  = [string]$dKey.GetValue("FriendlyName", "")
+$dSvc     = [string]$dKey.GetValue("Service", "")
+$dCls     = [string]$dKey.GetValue("Class", "")
+$dLoc     = [string]$dKey.GetValue("LocationInformation", "")
+$dAddrObj = $dKey.GetValue("Address", $null)
+} finally {
+$dKey.Dispose()
+}
+$rawDName = if ($dRawDesc -match '^@(usb|input|keyboard|msmouse|usbhub3|hidclass|hidserv)\.inf,') { $dRawDesc } elseif (-not [string]::IsNullOrWhiteSpace($dFriend)) { $dFriend } else { $dRawDesc }
 $dName    = Format-UltixDeviceName -RawName $rawDName
-$dSvc     = [string]$dProps.Service
-$dCls     = [string]$dProps.Class
-$busDesc  = [WinUltix.UsbProberV2]::GetBusReportedDesc($devId)
+$busDesc  = if ($devId -match '^USB\\') { [WinUltix.UsbProberV2]::GetBusReportedDesc($devId) } else { "" }
 if ($dSvc -match '^(?i)(USBHUB3|usbhub)$') {
 $subHub = [WinUltix.UsbProberV2]::ProbeHub($devId)
-$hubSpeedMap[$depth] = $subHub.PortSpeeds
+$hubSpeedMap[$depth] = if ($null -ne $subHub -and $null -ne $subHub.PortSpeeds) { $subHub.PortSpeeds } else { @{} }
 }
 $parentHubDepth = $depth - 1
 $isDirectChildOfHub = $hubSpeedMap.ContainsKey($parentHubDepth)
@@ -12844,14 +14609,19 @@ $devId -notmatch '(?i)&MI_' -and
 (-not [string]::IsNullOrWhiteSpace($dSvc))
 )
 if ($isPhysicalUsbNode) {
-$portNum = if ($null -ne $dProps.Address -and $dProps.Address -gt 0) {
-[int]$dProps.Address
-} elseif ($dProps.LocationInformation -match 'Port_#0*(\d+)') {
+$rawAddr = 0L
+if ($null -ne $dAddrObj) {
+try { $rawAddr = [int64]$dAddrObj } catch { $rawAddr = 0L }
+}
+$portNum = if ($rawAddr -ge 1 -and $rawAddr -le 255) {
+[int]$rawAddr
+} elseif ($dLoc -match 'Port_#0*(\d+)') {
 [int]$matches[1]
 } else { 0 }
 $negSpeed = ""
-if ($portNum -gt 0 -and $hubSpeedMap[$parentHubDepth].ContainsKey($portNum)) {
-$negSpeed = $hubSpeedMap[$parentHubDepth][$portNum]
+$parentSpeedTable = $hubSpeedMap[$parentHubDepth]
+if ($portNum -gt 0 -and $null -ne $parentSpeedTable -and $parentSpeedTable.ContainsKey($portNum)) {
+$negSpeed = [string]$parentSpeedTable[$portNum]
 }
 $currentPhys = [PSCustomObject]@{
 Depth       = $depth
@@ -12943,7 +14713,15 @@ if ($isHub)             { $role = "[USB HUB]" }
 elseif ($isOnboardMcu)  { $role = "[ONBOARD MCU]"; $activeSvc = "Internal PCB RGB - Idle" }
 elseif ($isBt)          { $role = "[BLUETOOTH]" }
 elseif ($isCardReader)  { $role = "[CARD READER]" }
-elseif ($isStorage)     { $role = "[STORAGE]";     $hasStorage = $true; $conflictList.Add("Storage: $bestName") }
+elseif ($isStorage) {
+$role = "[STORAGE]"
+$hasStorage = $true
+$conflictList.Add("Storage: $bestName")
+if ($phys.LinkSpeed -match '(?i)(High-Speed|Full-Speed|480\s*Mbps|12\s*Mbps|USB\s*2\.0)') {
+$hasThrottledStorage = $true
+$throttledLabel = "$bestName ($($phys.LinkSpeed))"
+}
+}
 elseif ($isVr)          { $role = "[VR / HMD]";    $hasVr      = $true }
 elseif ($isAudio)       { $role = "[AUDIO / DAC]"; $hasAudio   = $true; $conflictList.Add("DAC: $bestName") }
 elseif ($isCam)         { $role = "[VIDEO / CAM]"; $hasAudio   = $true; $conflictList.Add("Cam: $bestName") }
@@ -12959,7 +14737,13 @@ $activeSvc = "kbdhid"
 }
 }
 elseif ($hasMou) { $role = "[MOUSE / HID]"; $activeSvc = "mouhid"; $hasMouse = $true; $mouseLabel = $bestName }
-elseif ($hasKbd) { $role = "[KEYBOARD]";    $activeSvc = "kbdhid" }
+elseif ($isWirelessRx -and -not $hasKbd) {
+$role       = "[MOUSE / HID]"
+$activeSvc  = "2.4GHz Wireless Rx"
+$hasMouse   = $true
+$mouseLabel = $bestName
+}
+elseif ($hasKbd) { $role = "[KEYBOARD]"; $activeSvc = "kbdhid" }
 elseif ($phys.Children | Where-Object { $_.Class -eq "HIDClass" -or $_.Service -eq "HidUsb" }) {
 $role      = "[HID / INPUT]"
 $activeSvc = "HidUsb"
@@ -12972,6 +14756,8 @@ if ($isHub) {
 $hubNames.Add($bestName)
 if (-not $IncludeRawHubs) { continue }
 }
+$dedupKey = "$role|$bestName|$($phys.PortNumber)|$($phys.Depth)"
+if (-not $seenEpKeys.Add($dedupKey)) { continue }
 $endpoints.Add([PSCustomObject]@{
 Role       = $role
 Name       = "$bestName$portBadge"
@@ -12990,10 +14776,10 @@ Service    = "0% DMA Load"
 Depth      = 99
 })
 }
-$portMapSummary = if ($venKey.PSChildName -match 'DEV_15B8') {
+$portMapSummary = if ($venName -match 'DEV_15B8') {
 "1 Internal SoC Line (USB 2.0 480 Mbps - Unrouted on Desktop PCB)"
 } elseif ($null -ne $rootHubInfo -and $rootHubInfo.TotalPorts -gt 0) {
-$ssLabel = if ($ctrlName -match '(?i)(USB4|40G)' -or $venKey.PSChildName -match 'DEV_2426') {
+$ssLabel = if ($ctrlName -match '(?i)(USB4|40G)' -or $venName -match 'DEV_2426') {
 "USB4 40 Gbps"
 } elseif ($rootHubInfo.SsPlusPorts -gt 0 -or $ctrlName -match '(?i)(3\.2|3\.1)') {
 "USB 3.x SuperSpeed (5/10/20 Gbps)"
@@ -13013,8 +14799,11 @@ $severity     = "Red"
 } elseif (($hasMouse -or $hasVr) -and $routingBadge -match "CHIPSET") {
 $statusAdvice = "[*] Notice: Latency-sensitive Mouse/VR is on Chipset PCH instead of CPU Direct lanes"
 $severity     = "Yellow"
+} elseif ($hasThrottledStorage) {
+$statusAdvice = "[*] Notice: USB Storage [$throttledLabel] is running at USB 2.0 speed - move to a SuperSpeed port/cable"
+$severity     = "Yellow"
 } elseif ($endpoints.Count -eq 0) {
-if ($venKey.PSChildName -match 'DEV_15B8') {
+if ($venName -match 'DEV_15B8') {
 $statusAdvice = "[Internal SoC USB 2.0 Node - Unrouted on Desktop PCB]"
 } else {
 $statusAdvice = "[Idle Root Hub - Free Ports Available]"
@@ -13033,7 +14822,30 @@ Endpoints      = @($endpoints)
 Advice         = $statusAdvice
 Severity       = $severity
 })
+} catch {
+$controllers.Add([PSCustomObject]@{
+ControllerName = "PCI\$venName\$instName"
+InstanceId     = "PCI\$venName\$instName"
+RoutingBadge   = "[PROBE WARNING]"
+PortSummary    = "Controller probe error: $($_.Exception.Message)"
+PciHops        = 99
+MsiEnabled     = $false
+IrqAffinity    = "Unknown"
+Endpoints      = @()
+Advice         = "[!] Failed to enumerate this USB controller node"
+Severity       = "Yellow"
+})
+} finally {
+$instKey.Dispose()
 }
+}
+} finally {
+$venKey.Dispose()
+}
+}
+} finally {
+$pciRoot.Dispose()
+if ($null -ne $enumRoot) { $enumRoot.Dispose() }
 }
 return @($controllers | Sort-Object PciHops, ControllerName)
 }
@@ -13077,59 +14889,8 @@ $rtbMap.SelectionLength = 0
 $rtbMap.SelectionColor  = $Color
 $rtbMap.AppendText($Text)
 }.GetNewClosure())
-$renderTopology = ({
-$rtbMap.Clear()
-& $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
-& $appendColored "QUICK WIRING GUIDE & HOW TO READ THIS TOPOLOGY MAP:`r`n" ([System.Drawing.Color]::Gold)
-& $appendColored "  1. [CPU DIRECT SoC] : Wired straight to CPU silicon (1 Hop). Best for 4K/8KHz Mice & VR.`r`n" ([System.Drawing.Color]::Cyan)
-& $appendColored "  2. [CHIPSET PCH]    : Routed via motherboard chipset. Ideal for USB Audio DACs, Keyboards & Drives.`r`n" ([System.Drawing.Color]::LightSkyBlue)
-& $appendColored "  3. XHCI Isolation   : NEVER share one controller between an 8KHz Mouse and an Audio DAC or USB Drive.`r`n" ([System.Drawing.Color]::LightGreen)
-& $appendColored "  4. Logical Lines    : Every physical USB 3.x port contains 2 logical lines (1x SuperSpeed + 1x USB 2.0).`r`n" ([System.Drawing.Color]::Silver)
-& $appendColored "  5. Onboard Hubs/MCU : Passive PCB splitters (ASM107x) & static RGB (AURA) do NOT disturb Audio DACs.`r`n" ([System.Drawing.Color]::DarkGray)
-$map = Get-UsbTopologyMap -IncludeRawHubs:($chkShowHubs.Checked)
-$idx = 0
-foreach ($ctrl in $map) {
-$idx++
-$hdrColor = if ($ctrl.RoutingBadge -match "CPU DIRECT") { [System.Drawing.Color]::Cyan } else { [System.Drawing.Color]::LightSkyBlue }
-& $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
-& $appendColored "CONTROLLER #$idx : $($ctrl.ControllerName)`r`n" $hdrColor
-& $appendColored "  PCIe Routing : $($ctrl.RoutingBadge)`r`n" $hdrColor
-& $appendColored "  PCI ID & IRQ : $($ctrl.InstanceId) | MSI: $(if($ctrl.MsiEnabled){'ON'}else{'OFF'}) | IRQ: $($ctrl.IrqAffinity)`r`n" ([System.Drawing.Color]::Silver)
-& $appendColored "  Root Hub Map : $($ctrl.PortSummary)`r`n" ([System.Drawing.Color]::LightSkyBlue)
-$advColor = switch ($ctrl.Severity) {
-"Red"    { [System.Drawing.Color]::OrangeRed; break }
-"Yellow" { [System.Drawing.Color]::Gold;      break }
-"Green"  { [System.Drawing.Color]::LightGreen; break }
-default  { [System.Drawing.Color]::DarkGray;  break }
-}
-& $appendColored "  Assessment   : $($ctrl.Advice)`r`n" $advColor
-if ($ctrl.Endpoints.Count -gt 0) {
-& $appendColored "  Connected Endpoints:`r`n" ([System.Drawing.Color]::White)
-foreach ($ep in $ctrl.Endpoints) {
-$epColor = switch -Wildcard ($ep.Role) {
-"*MOUSE*"   { [System.Drawing.Color]::LightGreen; break }
-"*AUDIO*"   { [System.Drawing.Color]::Violet;     break }
-"*VR*"      { [System.Drawing.Color]::Cyan;       break }
-"*STORAGE*" { [System.Drawing.Color]::Orange;     break }
-"*ONBOARD*" { [System.Drawing.Color]::DarkGray;   break }
-"*HUB*"     { [System.Drawing.Color]::DarkGray;   break }
-default     { [System.Drawing.Color]::LightGray;  break }
-}
-& $appendColored ("    +-- {0,-15} {1} ({2})`r`n" -f $ep.Role, $ep.Name, $ep.Service) $epColor
-}
-} else {
-& $appendColored "    +-- (No active external USB endpoints attached)`r`n" ([System.Drawing.Color]::DarkGray)
-}
-& $appendColored "`r`n" ([System.Drawing.Color]::LightGray)
-}
-$rtbMap.SelectionStart = 0
-$rtbMap.ScrollToCaret()
-}.GetNewClosure())
-&$renderTopology
-$chkShowHubs.Add_CheckedChanged({ &$renderTopology }.GetNewClosure())
 $btnRefresh = New-UltixButton -Parent $modal -Text "Rescan USB Tree (Live)" -X 15 -Y 590 -Width 200 -Height 35 -RGB @(60, 100, 150)
 $btnRefresh.Anchor = 'Bottom, Left'
-$btnRefresh.Add_Click({ &$renderTopology }.GetNewClosure())
 $btnExportLog = New-UltixButton -Parent $modal -Text "Print Map to Main Log" -X 225 -Y 590 -Width 200 -Height 35 -RGB @(50, 110, 70)
 $btnExportLog.Anchor = 'Bottom, Left'
 $btnExportLog.Add_Click({
@@ -13144,7 +14905,87 @@ Write-GUI ""
 $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 790 -Y 590 -Width 120 -Height 35 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Right'
 $btnClose.DialogResult = "Cancel"
+$modal.CancelButton = $btnClose
+$renderTopologyAsync = ({
+$ctxModal  = $modal
+$ctxRtb    = $rtbMap
+$ctxChk    = $chkShowHubs
+$ctxAppend = $appendColored
+$ctxCtrls  = @($btnRefresh, $btnExportLog, $chkShowHubs)
+if ($null -eq $ctxModal -or $ctxModal.IsDisposed -or $null -eq $ctxRtb -or $ctxRtb.IsDisposed) { return }
+$ctxRtb.Clear()
+& $ctxAppend "Probing USB XHCI controllers, PCIe bridge hops & IOCTL root-hub port speeds in background..." ([System.Drawing.Color]::LightSkyBlue)
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$sb = (Get-Command -Name Get-UsbTopologyMap).ScriptBlock
+$onScanError = ({
+param([string]$ErrMsg)
+$sw.Stop()
+if ($null -eq $ctxModal -or $ctxModal.IsDisposed -or $null -eq $ctxRtb -or $ctxRtb.IsDisposed) { return }
+$ctxRtb.Clear()
+& $ctxAppend "[ERROR] USB XHCI Topology scan failed:`r`n$ErrMsg`r`n" ([System.Drawing.Color]::OrangeRed)
+}.GetNewClosure())
+Invoke-AsyncTask -ScriptBlock $sb -Arguments @($ctxChk.Checked) -ControlsToDisable $ctxCtrls -OnError $onScanError -OnComplete ({
+param($output)
+$sw.Stop()
+Update-Progress 0
+if ($null -eq $ctxModal -or $ctxModal.IsDisposed -or $null -eq $ctxRtb -or $ctxRtb.IsDisposed) { return }
+$ctxRtb.Clear()
+$scanMs = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
+& $ctxAppend "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+& $ctxAppend ("QUICK WIRING GUIDE & HOW TO READ THIS TOPOLOGY MAP (Scan Time: {0:0.0} ms):`r`n" -f $scanMs) ([System.Drawing.Color]::Gold)
+& $ctxAppend "  1. [CPU DIRECT SoC] : Wired straight to CPU silicon (1 Hop). Best for 4K/8KHz Mice & VR.`r`n" ([System.Drawing.Color]::Cyan)
+& $ctxAppend "  2. [CHIPSET / DMI]  : Routed via motherboard chipset. Ideal for USB Audio DACs, Keyboards & Drives.`r`n" ([System.Drawing.Color]::LightSkyBlue)
+& $ctxAppend "  3. XHCI Isolation   : NEVER share one controller between an 8KHz Mouse and an Audio DAC or USB Drive.`r`n" ([System.Drawing.Color]::LightGreen)
+& $ctxAppend "  4. Logical Lines    : Every physical USB 3.x port contains 2 logical lines (1x SuperSpeed + 1x USB 2.0).`r`n" ([System.Drawing.Color]::Silver)
+& $ctxAppend "  5. Onboard Hubs/MCU : Passive PCB splitters (ASM107x) & static RGB (AURA) do NOT disturb Audio DACs.`r`n" ([System.Drawing.Color]::DarkGray)
+$map = @($output | Where-Object { $null -ne $_ })
+if ($map.Count -eq 0) {
+& $ctxAppend "`r`n[!] No active USB XHCI/EHCI controllers detected.`r`n" ([System.Drawing.Color]::Orange)
+return
+}
+$idx = 0
+foreach ($ctrl in $map) {
+$idx++
+$hdrColor = if ($ctrl.RoutingBadge -match "CPU DIRECT") { [System.Drawing.Color]::Cyan } else { [System.Drawing.Color]::LightSkyBlue }
+& $ctxAppend "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+& $ctxAppend "CONTROLLER #$idx : $($ctrl.ControllerName)`r`n" $hdrColor
+& $ctxAppend "  PCIe Routing : $($ctrl.RoutingBadge)`r`n" $hdrColor
+& $ctxAppend "  PCI ID & IRQ : $($ctrl.InstanceId) | MSI: $(if($ctrl.MsiEnabled){'ON'}else{'OFF'}) | IRQ: $($ctrl.IrqAffinity)`r`n" ([System.Drawing.Color]::Silver)
+& $ctxAppend "  Root Hub Map : $($ctrl.PortSummary)`r`n" ([System.Drawing.Color]::LightSkyBlue)
+$advColor = switch ($ctrl.Severity) {
+"Red"    { [System.Drawing.Color]::OrangeRed; break }
+"Yellow" { [System.Drawing.Color]::Gold;      break }
+"Green"  { [System.Drawing.Color]::LightGreen; break }
+default  { [System.Drawing.Color]::DarkGray;  break }
+}
+& $ctxAppend "  Assessment   : $($ctrl.Advice)`r`n" $advColor
+if ($ctrl.Endpoints.Count -gt 0) {
+& $ctxAppend "  Connected Endpoints:`r`n" ([System.Drawing.Color]::White)
+foreach ($ep in $ctrl.Endpoints) {
+$epColor = switch -Wildcard ($ep.Role) {
+"*MOUSE*"   { [System.Drawing.Color]::LightGreen; break }
+"*AUDIO*"   { [System.Drawing.Color]::Violet;     break }
+"*VR*"      { [System.Drawing.Color]::Cyan;       break }
+"*STORAGE*" { [System.Drawing.Color]::Orange;     break }
+"*ONBOARD*" { [System.Drawing.Color]::DarkGray;   break }
+"*HUB*"     { [System.Drawing.Color]::DarkGray;   break }
+default     { [System.Drawing.Color]::LightGray;  break }
+}
+& $ctxAppend ("    +-- {0,-15} {1} ({2})`r`n" -f $ep.Role, $ep.Name, $ep.Service) $epColor
+}
+} else {
+& $ctxAppend "    +-- (No active external USB endpoints attached)`r`n" ([System.Drawing.Color]::DarkGray)
+}
+& $ctxAppend "`r`n" ([System.Drawing.Color]::LightGray)
+}
+$ctxRtb.SelectionStart = 0
+$ctxRtb.ScrollToCaret()
+}.GetNewClosure())
+}.GetNewClosure())
+$chkShowHubs.Add_CheckedChanged({ &$renderTopologyAsync }.GetNewClosure())
+$btnRefresh.Add_Click({ &$renderTopologyAsync }.GetNewClosure())
 $modal.Controls.AddRange(@($lblDesc, $rtbMap, $chkShowHubs))
+&$renderTopologyAsync
 try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 function Get-QuantumSchedulerInfo {
@@ -13247,13 +15088,13 @@ $btnApply = New-UltixButton -Parent $modal -Text "Apply Selected Quantum (Live)"
 $btnApply.Add_Click({
 if ($listBox.SelectedIndex -lt 0) { return }
 $sel = $profiles[$listBox.SelectedIndex]
-Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value $sel.Value -Type DWord -Force
+Set-UltixRegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value $sel.Value -Type DWord -Module "Z7_Hardware"
 Write-GUI " -> [LIVE QUANTUM] Enforced Win32PrioritySeparation = $($sel.Hex) ($($sel.Value) dec) [$($sel.Name)]"
 &$refreshInfo
 }.GetNewClosure())
 $btnReset = New-UltixButton -Parent $modal -Text "Restore Factory (0x02)" -X 320 -Y 425 -Width 215 -Height 38 -RGB @(60, 100, 150)
 $btnReset.Add_Click({
-Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 2 -Type DWord -Force
+Set-UltixRegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 2 -Type DWord -Module "Z7_Hardware"
 Write-GUI " -> [LIVE QUANTUM] Restored factory Win32PrioritySeparation = 0x02 (2 dec)."
 &$refreshInfo
 }.GetNewClosure())
@@ -13476,7 +15317,7 @@ $global:tabControl.Size = New-Object System.Drawing.Size(410, 700)
 $global:tabControl.Anchor = 'Top, Bottom, Left'
 $global:progBar = New-Object WinUltix.DarkProgressBar
 $global:progBar.Location = New-Object System.Drawing.Point(440, 724)
-$global:progBar.Size = New-Object System.Drawing.Size(406, 28)
+$global:progBar.Size = New-Object System.Drawing.Size(258, 28)
 $global:progBar.Minimum = 0
 $global:progBar.Maximum = 100
 $global:progBar.Anchor = 'Bottom, Left, Right'
@@ -13488,6 +15329,35 @@ Initialize-Z5UI -TabControl $global:tabControl
 Initialize-Z6UI -TabControl $global:tabControl
 Initialize-Z7UI -TabControl $global:tabControl
 $footerFont = Get-UltixFont -Role "FooterButton"
+$global:btnExpertConsole = New-Object System.Windows.Forms.Button
+$global:btnExpertConsole.Text = "[ Expert: OFF ]"
+$global:btnExpertConsole.UseMnemonic = $false
+$global:btnExpertConsole.Location = New-Object System.Drawing.Point(708, 724)
+$global:btnExpertConsole.Size = New-Object System.Drawing.Size(138, 28)
+$global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
+$global:btnExpertConsole.ForeColor = [System.Drawing.Color]::LightGray
+$global:btnExpertConsole.FlatStyle = "Flat"
+$global:btnExpertConsole.Anchor = 'Bottom, Right'
+$global:btnExpertConsole.AccessibleName = "FooterButton"
+$global:btnExpertConsole.Font = Get-UltixFittedFont -Control $global:btnExpertConsole -Role "FooterButton"
+$global:btnExpertConsole.Add_MouseEnter({ Show-Description "Toggles the live Win32 Expert Console window exposing exact PowerShell commands, registry writes, and exit codes in real time (independent of blocking modals)." })
+$global:btnExpertConsole.Add_MouseLeave({ Restore-Log })
+$global:btnExpertConsole.Add_Click({
+$isNowOpen = [WinUltix.ExpertConsole]::Toggle()
+if ($isNowOpen) {
+$global:btnExpertConsole.Text = "[ Expert: ON ]"
+$global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 165, 85, 15)
+$global:btnExpertConsole.ForeColor = [System.Drawing.Color]::White
+$global:btnExpertConsole.Update()
+Write-UltixExpertCommand -CommandText "Expert Command & Output Stream attached (PID: $PID | Console Host Active)" -Module "SYSTEM"
+Write-UltixExpertResult -OutputText "[TIP] Drag mouse to select text and press Enter or Ctrl+C to copy. QuickEdit pause is disabled." -ExitCode 0 -Module "SYSTEM"
+} else {
+$global:btnExpertConsole.Text = "[ Expert: OFF ]"
+$global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
+$global:btnExpertConsole.ForeColor = [System.Drawing.Color]::LightGray
+$global:btnExpertConsole.Update()
+}
+})
 $global:btnFontDec = New-Object System.Windows.Forms.Button
 $global:btnFontDec.Text = "A-"
 $global:btnFontDec.UseMnemonic = $false
@@ -13529,10 +15399,14 @@ $btnExportLog.AccessibleName = "FooterButton"
 $btnExportLog.Font = Get-UltixFittedFont -Control $btnExportLog -Role "FooterButton"
 $btnExportLog.Add_Click({
 if ($global:infoBox.Text.Length -gt 0) {
+try {
 $desktop = [Environment]::GetFolderPath("Desktop")
-$logPath = "$desktop\WinUltix_Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-$global:infoBox.Text | Out-File -FilePath $logPath -Encoding UTF8
+$logPath = Join-Path $desktop "WinUltix_Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+[System.IO.File]::WriteAllText($logPath, $global:infoBox.Text, [System.Text.UTF8Encoding]::new($false))
 Write-GUI "-> Log successfully exported to: $logPath"
+} catch {
+Write-GUI "  [ERROR] Failed to export log: $($_.Exception.Message)"
+}
 } else {
 [System.Windows.Forms.MessageBox]::Show("Log is empty.", "Export Failed")
 }
@@ -13666,7 +15540,7 @@ $btnImportProfile.Add_MouseEnter({ Show-Description "Imports and enforces a prev
 $btnImportProfile.Add_MouseLeave({ Restore-Log })
 $btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
 $global:form.Controls.AddRange(@(
-$global:btnFontDec, $global:btnFontInc, $btnClearLog, $btnExportLog, $global:progBar,
+$global:btnExpertConsole, $global:btnFontDec, $global:btnFontInc, $btnClearLog, $btnExportLog, $global:progBar,
 $btnCredits, $btnExportProfile, $btnImportProfile,
 $global:descBox, $global:tabControl, $global:infoBox
 ))
@@ -13695,7 +15569,22 @@ Update-DNSLabel
 try {
 [void]$global:form.ShowDialog()
 } finally {
+if ($null -ne $global:UltixActiveTasks) {
+foreach ($task in @($global:UltixActiveTasks)) {
+try { if ($null -ne $task.Timer) { $task.Timer.Stop(); $task.Timer.Dispose() } } catch { }
+try { if ($null -ne $task.PS) { $task.PS.Stop(); $task.PS.Dispose() } } catch { }
+try { if ($null -ne $task.Runspace) { $task.Runspace.Close(); $task.Runspace.Dispose() } } catch { }
+}
+$global:UltixActiveTasks.Clear()
+}
+try { [WinUltix.ExpertConsole]::SetVisible($false) } catch { }
 $global:form.Dispose()
+if ($null -ne $global:UltixFontCache) {
+foreach ($fObj in $global:UltixFontCache.Values) {
+if ($null -ne $fObj) { try { $fObj.Dispose() } catch { } }
+}
+$global:UltixFontCache.Clear()
+}
 if ($null -ne $global:UltixHighResLogo) {
 $global:UltixHighResLogo.Dispose()
 $global:UltixHighResLogo = $null

@@ -13,7 +13,7 @@ if (-not $isAdmin) {
     return
 }
 
-$Global:AppVersion = "v3.14"
+$Global:AppVersion = "v3.19"
 
 # ------------------------------------------
 # 1. MODULE LOADING (ARCHITECTURE MANIFESTS)
@@ -105,7 +105,7 @@ $global:tabControl.Anchor = 'Top, Bottom, Left'
 
 $global:progBar = New-Object WinUltix.DarkProgressBar
 $global:progBar.Location = New-Object System.Drawing.Point(440, 724)
-$global:progBar.Size = New-Object System.Drawing.Size(406, 28)
+$global:progBar.Size = New-Object System.Drawing.Size(258, 28)
 $global:progBar.Minimum = 0
 $global:progBar.Maximum = 100
 $global:progBar.Anchor = 'Bottom, Left, Right'
@@ -125,6 +125,36 @@ Initialize-Z7UI -TabControl $global:tabControl
 # 4. GLOBAL FOOTER BUTTONS
 # ------------------------------------------
 $footerFont = Get-UltixFont -Role "FooterButton"
+
+$global:btnExpertConsole = New-Object System.Windows.Forms.Button
+$global:btnExpertConsole.Text = "[ Expert: OFF ]"
+$global:btnExpertConsole.UseMnemonic = $false
+$global:btnExpertConsole.Location = New-Object System.Drawing.Point(708, 724)
+$global:btnExpertConsole.Size = New-Object System.Drawing.Size(138, 28)
+$global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
+$global:btnExpertConsole.ForeColor = [System.Drawing.Color]::LightGray
+$global:btnExpertConsole.FlatStyle = "Flat"
+$global:btnExpertConsole.Anchor = 'Bottom, Right'
+$global:btnExpertConsole.AccessibleName = "FooterButton"
+$global:btnExpertConsole.Font = Get-UltixFittedFont -Control $global:btnExpertConsole -Role "FooterButton"
+$global:btnExpertConsole.Add_MouseEnter({ Show-Description "Toggles the live Win32 Expert Console window exposing exact PowerShell commands, registry writes, and exit codes in real time (independent of blocking modals)." })
+$global:btnExpertConsole.Add_MouseLeave({ Restore-Log })
+$global:btnExpertConsole.Add_Click({
+    $isNowOpen = [WinUltix.ExpertConsole]::Toggle()
+    if ($isNowOpen) {
+        $global:btnExpertConsole.Text = "[ Expert: ON ]"
+        $global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 165, 85, 15)
+        $global:btnExpertConsole.ForeColor = [System.Drawing.Color]::White
+        $global:btnExpertConsole.Update()
+        Write-UltixExpertCommand -CommandText "Expert Command & Output Stream attached (PID: $PID | Console Host Active)" -Module "SYSTEM"
+        Write-UltixExpertResult -OutputText "[TIP] Drag mouse to select text and press Enter or Ctrl+C to copy. QuickEdit pause is disabled." -ExitCode 0 -Module "SYSTEM"
+    } else {
+        $global:btnExpertConsole.Text = "[ Expert: OFF ]"
+        $global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
+        $global:btnExpertConsole.ForeColor = [System.Drawing.Color]::LightGray
+        $global:btnExpertConsole.Update()
+    }
+})
 
 $global:btnFontDec = New-Object System.Windows.Forms.Button
 $global:btnFontDec.Text = "A-"
@@ -169,10 +199,14 @@ $btnExportLog.AccessibleName = "FooterButton"
 $btnExportLog.Font = Get-UltixFittedFont -Control $btnExportLog -Role "FooterButton"
 $btnExportLog.Add_Click({ 
     if ($global:infoBox.Text.Length -gt 0) { 
-        $desktop = [Environment]::GetFolderPath("Desktop")
-        $logPath = "$desktop\WinUltix_Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-        $global:infoBox.Text | Out-File -FilePath $logPath -Encoding UTF8
-        Write-GUI "-> Log successfully exported to: $logPath" 
+        try {
+            $desktop = [Environment]::GetFolderPath("Desktop")
+            $logPath = Join-Path $desktop "WinUltix_Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+            [System.IO.File]::WriteAllText($logPath, $global:infoBox.Text, [System.Text.UTF8Encoding]::new($false))
+            Write-GUI "-> Log successfully exported to: $logPath" 
+        } catch {
+            Write-GUI "  [ERROR] Failed to export log: $($_.Exception.Message)"
+        }
     } else { 
         [System.Windows.Forms.MessageBox]::Show("Log is empty.", "Export Failed") 
     } 
@@ -300,7 +334,7 @@ $btnExportProfile.FlatStyle = "Flat"
 $btnExportProfile.Anchor = 'Bottom, Left'
 $btnExportProfile.AccessibleName = "FooterButton"
 $btnExportProfile.Font = Get-UltixFittedFont -Control $btnExportProfile -Role "FooterButton"
-$btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, Quantum Scheduler, Power & Display settings, USB Guard, SRP locks, Services, and Hardware locks into a portable JSON snapshot." })
+$btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, Start Menu layout, DNS/DoH profile, Quantum Scheduler, Power & Display settings, USB Guard, SRP locks, Services, and Hardware locks into a portable JSON snapshot." })
 $btnExportProfile.Add_MouseLeave({ Restore-Log })
 $btnExportProfile.Add_Click({ Export-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
 
@@ -320,7 +354,7 @@ $btnImportProfile.Add_MouseLeave({ Restore-Log })
 $btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
 
 $global:form.Controls.AddRange(@(
-    $global:btnFontDec, $global:btnFontInc, $btnClearLog, $btnExportLog, $global:progBar, 
+    $global:btnExpertConsole, $global:btnFontDec, $global:btnFontInc, $btnClearLog, $btnExportLog, $global:progBar, 
     $btnCredits, $btnExportProfile, $btnImportProfile, 
     $global:descBox, $global:tabControl, $global:infoBox
 ))
@@ -355,7 +389,22 @@ Update-DNSLabel
 try {
     [void]$global:form.ShowDialog()
 } finally {
+    if ($null -ne $global:UltixActiveTasks) {
+        foreach ($task in @($global:UltixActiveTasks)) {
+            try { if ($null -ne $task.Timer) { $task.Timer.Stop(); $task.Timer.Dispose() } } catch { }
+            try { if ($null -ne $task.PS) { $task.PS.Stop(); $task.PS.Dispose() } } catch { }
+            try { if ($null -ne $task.Runspace) { $task.Runspace.Close(); $task.Runspace.Dispose() } } catch { }
+        }
+        $global:UltixActiveTasks.Clear()
+    }
+    try { [WinUltix.ExpertConsole]::SetVisible($false) } catch { }
     $global:form.Dispose()
+    if ($null -ne $global:UltixFontCache) {
+        foreach ($fObj in $global:UltixFontCache.Values) {
+            if ($null -ne $fObj) { try { $fObj.Dispose() } catch { } }
+        }
+        $global:UltixFontCache.Clear()
+    }
     if ($null -ne $global:UltixHighResLogo) {
         $global:UltixHighResLogo.Dispose()
         $global:UltixHighResLogo = $null

@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z1_CLEANUP.PS1 - CLEANUP MODULE (v3.14)
+# Z1_CLEANUP.PS1 - CLEANUP MODULE
 # Z1_Cleanup: Deep disk & orphan hygiene (WU/CBS cache, Temp/Dumps, 3rd-party/GPU shader caches, Event Logs, DriverStore OEM INF Sweeper, Windows Installer MSI/MSP Sweeper, Surgical Registry Orphan Sweeper, Ghost Services, and NTFS Recycle Bin).
 # ==========================================
 
@@ -371,15 +371,17 @@ function Invoke-InteractiveCleanup {
                 if ($rule.Type -eq "EventLogs") {
                     $channels = @(wevtutil.exe el 2>$null)
                     $totalCh  = $channels.Count
-                    $chIdx    = 0
-
-                    foreach ($ch in $channels) {
-                        $chIdx++
-                        if ($null -ne $UltixSync -and $totalCh -gt 0 -and ($chIdx % 20 -eq 0)) {
-                            $UltixSync.Progress = [int](($chIdx / $totalCh) * 100)
+                    Invoke-UltixStep -Command "wevtutil.exe el | ForEach-Object { wevtutil.exe cl `"`$_`" } # Target: $totalCh channels" -Action {
+                        $chIdx = 0
+                        foreach ($ch in $channels) {
+                            $chIdx++
+                            if ($null -ne $UltixSync -and $totalCh -gt 0 -and ($chIdx % 20 -eq 0)) {
+                                $UltixSync.Progress = [int](($chIdx / $totalCh) * 100)
+                            }
+                            & wevtutil.exe cl "$ch" 2>$null
                         }
-                        & wevtutil.exe cl "$ch" 2>$null
-                    }
+                        "Cleared $totalCh Event Viewer channel(s)"
+                    } -Module "Z1_Cleanup"
                     if ($null -ne $UltixSync) {
                         $UltixSync.Logs.Enqueue("    [OK] Cleared $totalCh Event Viewer channel(s).")
                     }
@@ -387,10 +389,13 @@ function Invoke-InteractiveCleanup {
                 elseif ($rule.Type -eq "RecycleBin") {
                     $path = $rule.Path
                     if (Test-Path -LiteralPath $path) {
-                        Grant-UltixDirectoryAdminAccess -TargetPath "$path\*"
-                        Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                        }
+                        Invoke-UltixStep -Command "icacls.exe `"$path\*`" /setowner `"*S-1-5-32-544`" /T /C /Q; Remove-Item -LiteralPath `"$path\*`" -Recurse -Force" -Action {
+                            Grant-UltixDirectoryAdminAccess -TargetPath "$path\*"
+                            Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                            }
+                            "Purged NTFS Recycle Bin: $path"
+                        } -Module "Z1_Cleanup"
                     }
                 }
                 elseif ($rule.Type -eq "Files") {
@@ -415,34 +420,45 @@ function Invoke-InteractiveCleanup {
                         # Capture initial service states and stop running instances
                         foreach ($svcName in $servicesToManage) {
                             $svcObj = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-                            if ($null -ne $svcObj -and $svcObj.Status -eq 'Running') {
-                                $runningServices.Add($svcName)
-                                Stop-Service -Name $svcName -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                            if ($null -ne $svcObj) {
+                                $isSvcRunning = ($svcObj.Status -eq 'Running')
+                                $svcObj.Dispose()
+                                if ($isSvcRunning) {
+                                    $runningServices.Add($svcName)
+                                    Stop-UltixService -ServiceName $svcName -Module "Z1_Cleanup"
+                                }
                             }
                         }
 
                         # Release CBS.log file handle held by background TiWorker.exe process
                         if ($svcGroup -eq "CBS") {
-                            Stop-Process -Name "TiWorker" -Force -ErrorAction SilentlyContinue
-                            Start-Sleep -Milliseconds 300
+                            if ((Stop-UltixProcess -Name @("TiWorker") -Module "Z1_Cleanup") -gt 0) {
+                                Start-Sleep -Milliseconds 300
+                            }
                         }
 
                         foreach ($tPath in $targetPaths) {
                             if ([string]::IsNullOrWhiteSpace($tPath) -or -not (Test-Path -LiteralPath $tPath)) { continue }
 
                             if (Test-Path -LiteralPath $tPath -PathType Leaf) {
-                                Remove-Item -LiteralPath $tPath -Force -ErrorAction SilentlyContinue
+                                Invoke-UltixStep -Command "Remove-Item -LiteralPath '$tPath' -Force" -Action {
+                                    Remove-Item -LiteralPath $tPath -Force -ErrorAction SilentlyContinue
+                                } -SuccessOutput "Deleted file: $tPath" -Module "Z1_Cleanup"
                             } else {
-                                Get-ChildItem -LiteralPath $tPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                                    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                                }
+                                Invoke-UltixStep -Command "Remove-Item -LiteralPath '$tPath\*' -Recurse -Force" -Action {
+                                    Get-ChildItem -LiteralPath $tPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                                        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                                    }
+                                } -SuccessOutput "Emptied directory: $tPath" -Module "Z1_Cleanup"
                             }
                         }
                     } finally {
                         # Symmetrically restore only services that were running prior to cleanup (excluding TrustedInstaller demand service)
                         foreach ($svcName in $runningServices) {
                             if ($svcName -ne "TrustedInstaller") {
-                                Start-Service -Name $svcName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                                Invoke-UltixStep -Command "Start-Service -Name '$svcName'" -Action {
+                                    Start-Service -Name $svcName -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                                } -SuccessOutput "Service '$svcName' restored" -Module "Z1_Cleanup"
                             }
                         }
                     }
@@ -556,11 +572,79 @@ function Get-DriverStoreOrphans_Worker {
         }
     }
 
-    if ($null -ne $UltixSync) { $UltixSync.Progress = 60 }
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 55 }
 
-    # 4. Map oemXX.inf -> FileRepository folder paths via HKLM\SYSTEM\DriverDatabase\DriverPackages + directory fallback
+    # 3b. Protect active V3/V4 Print Subsystem drivers referenced under Control\Print\Environments
+    $activePrintFolders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $printEnvRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Control\Print\Environments", $false)
+    if ($null -ne $printEnvRoot) {
+        try {
+            foreach ($archName in $printEnvRoot.GetSubKeyNames()) {
+                $driversRoot = $printEnvRoot.OpenSubKey("$archName\Drivers", $false)
+                if ($null -eq $driversRoot) { continue }
+                try {
+                    foreach ($verName in $driversRoot.GetSubKeyNames()) {
+                        $verKey = $driversRoot.OpenSubKey($verName, $false)
+                        if ($null -eq $verKey) { continue }
+                        try {
+                            foreach ($prnDrvName in $verKey.GetSubKeyNames()) {
+                                $prnKey = $verKey.OpenSubKey($prnDrvName, $false)
+                                if ($null -eq $prnKey) { continue }
+                                try {
+                                    $pInf = [string]$prnKey.GetValue("InfPath", "")
+                                    if ($pInf -match '(?i)\b(oem\d+\.inf)\b') {
+                                        [void]$activeOemInfs.Add($matches[1].ToLowerInvariant())
+                                    } elseif ($pInf -match '(?i)\\DriverStore\\FileRepository\\([^\\]+)') {
+                                        [void]$activePrintFolders.Add($matches[1])
+                                    }
+                                } finally {
+                                    $prnKey.Dispose()
+                                }
+                            }
+                        } finally {
+                            $verKey.Dispose()
+                        }
+                    }
+                } finally {
+                    $driversRoot.Dispose()
+                }
+            }
+        } finally {
+            $printEnvRoot.Dispose()
+        }
+    }
+
+    if ($null -ne $UltixSync) { $UltixSync.Progress = 65 }
+
+    # 4. Map oemXX.inf -> FileRepository folder paths via DriverInfFiles (1:1 Users-readable) + DriverPackages fallback
     $repoBase  = "$env:SystemRoot\System32\DriverStore\FileRepository"
     $oemToRepo = @{}
+
+    $drvInfRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\DriverDatabase\DriverInfFiles", $false)
+    if ($null -ne $drvInfRoot) {
+        try {
+            foreach ($infKeyName in $drvInfRoot.GetSubKeyNames()) {
+                if ($infKeyName -notmatch '^(?i)(oem\d+\.inf)$') { continue }
+                $infKey = $drvInfRoot.OpenSubKey($infKeyName, $false)
+                if ($null -eq $infKey) { continue }
+                try {
+                    $pkgFolder = [string]$infKey.GetValue("", "")
+                    if (-not [string]::IsNullOrWhiteSpace($pkgFolder)) {
+                        $oemKey = $matches[1].ToLowerInvariant()
+                        $oemToRepo[$oemKey] = Join-Path $repoBase $pkgFolder.Trim()
+                        if ($activePrintFolders.Contains($pkgFolder.Trim())) {
+                            [void]$activeOemInfs.Add($oemKey)
+                        }
+                    }
+                } finally {
+                    $infKey.Dispose()
+                }
+            }
+        } finally {
+            $drvInfRoot.Dispose()
+        }
+    }
+
     $drvDbRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\DriverDatabase\DriverPackages", $false)
     if ($null -ne $drvDbRoot) {
         try {
@@ -570,7 +654,13 @@ function Get-DriverStoreOrphans_Worker {
                 try {
                     $oemVal = [string]$pkgKey.GetValue("", "")
                     if ($oemVal -match '^(?i)(oem\d+\.inf)$') {
-                        $oemToRepo[$matches[1].ToLowerInvariant()] = Join-Path $repoBase $pkgName
+                        $oemKey = $matches[1].ToLowerInvariant()
+                        if (-not $oemToRepo.ContainsKey($oemKey)) {
+                            $oemToRepo[$oemKey] = Join-Path $repoBase $pkgName
+                        }
+                        if ($activePrintFolders.Contains($pkgName)) {
+                            [void]$activeOemInfs.Add($oemKey)
+                        }
                     }
                 } catch {
                 } finally {
@@ -582,7 +672,7 @@ function Get-DriverStoreOrphans_Worker {
         }
     }
 
-    # 5. Parse pnputil.exe /enum-drivers in a 100% locale-independent manner (supports MM/dd/yyyy, dd.MM.yyyy, yyyy-MM-dd)
+    # 5. Parse pnputil.exe /enum-drivers in a 100% locale-independent manner
     $rawPnp = (pnputil.exe /enum-drivers 2>$null) -join "`n"
     $blocks = $rawPnp -split "(?:\r?\n){2,}"
     $parsedDrivers = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -601,20 +691,22 @@ function Get-DriverStoreOrphans_Worker {
             $val = ($ln -split ':\s*', 2)[1].Trim()
             if ([string]::IsNullOrWhiteSpace($val) -or $val -eq $oemInf) { continue }
             elseif ($val -match '^\{[0-9a-fA-F\-]{36}\}$') { continue }
-            elseif ($origInf -eq "Unknown.inf" -and $val -match '(?i)^[a-z0-9_\-\.]+\.inf$') { $origInf = $val }
-            elseif ($val -match '^\d{1,4}[/\.\-]\d{1,2}[/\.\-]\d{1,4}\s+[\d\.]+$') { $verDate = $val }
+            elseif ($origInf -eq "Unknown.inf" -and $val -match '(?i)^[^\\/:*?"<>|]+\.inf$') { $origInf = $val }
+            elseif ($val -match '^\d{1,4}[/\.\-\s]+\d{1,2}[/\.\-\s]+\d{1,4}\.?\s+[\d\.]+$') { $verDate = $val }
             elseif ([string]::IsNullOrEmpty($provider))  { $provider  = $val }
             elseif ([string]::IsNullOrEmpty($className)) { $className = $val }
         }
 
+        $repoDir = $oemToRepo[$oemInf]
+        if ($origInf -eq "Unknown.inf" -and -not [string]::IsNullOrWhiteSpace($repoDir)) {
+            $folderLeaf = [System.IO.Path]::GetFileName($repoDir)
+            if ($folderLeaf -match '(?i)^(.+?\.inf)_[^_]+_[0-9a-f]{16}$') {
+                $origInf = $matches[1]
+            }
+        }
+
         if ([string]::IsNullOrEmpty($provider))  { $provider  = "Unknown" }
         if ([string]::IsNullOrEmpty($className)) { $className = "System" }
-
-        $repoDir = $oemToRepo[$oemInf]
-        if ([string]::IsNullOrWhiteSpace($repoDir) -and $origInf -ne "Unknown.inf") {
-            $cand = Get-ChildItem -LiteralPath $repoBase -Filter "$($origInf)_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($null -ne $cand) { $repoDir = $cand.FullName }
-        }
 
         $bytes  = if (-not [string]::IsNullOrWhiteSpace($repoDir) -and [System.IO.Directory]::Exists($repoDir)) { Get-UltixFastSize -TargetPaths @($repoDir) } else { 0 }
         $sizeMB = [math]::Round($bytes / 1MB, 2)
@@ -712,8 +804,8 @@ function Show-DriverStoreSweeper {
                 if ($drv.IsLocked) { continue }
 
                 $UltixSync.Logs.Enqueue(" -> Deleting DriverStore package: $($drv.OemInf) ($($drv.OriginalInf) - $($drv.SizeDisplay.Trim()))...")
-                $null = pnputil.exe /delete-driver $drv.OemInf 2>&1
-                if ($LASTEXITCODE -eq 0) {
+                $pnpExit = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/delete-driver", $drv.OemInf) -Module "Z1_Cleanup"
+                if ($pnpExit -eq 0) {
                     $freedMB += $drv.SizeMB
                     $UltixSync.Logs.Enqueue("    [OK] Purged $($drv.OemInf) from DriverStore.")
                 } else {
@@ -870,6 +962,39 @@ function Get-InstallerOrphans_Worker {
         }
     }
 
+    # Cross-check per-user Uninstall keys across all loaded HKEY_USERS\<SID> hives
+    foreach ($prof in (Get-UltixUserProfiles)) {
+        if (-not $prof.IsHiveLoaded -or $prof.SID -notmatch '^S-1-5-21-') { continue }
+        foreach ($uRel in @("Software\Microsoft\Windows\CurrentVersion\Uninstall", "Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
+            $uUserRoot = [Microsoft.Win32.Registry]::Users.OpenSubKey("$($prof.SID)\$uRel", $false)
+            if ($null -eq $uUserRoot) { continue }
+            try {
+                foreach ($uName in $uUserRoot.GetSubKeyNames()) {
+                    $uKey = $uUserRoot.OpenSubKey($uName, $false)
+                    if ($null -eq $uKey) { continue }
+                    try {
+                        $lp = [string]$uKey.GetValue("LocalPackage", "")
+                        if (-not [string]::IsNullOrWhiteSpace($lp)) {
+                            $leaf = [System.IO.Path]::GetFileName($lp.Trim()).ToLowerInvariant()
+                            if (-not $activePackages.ContainsKey($leaf)) {
+                                $dn  = [string]$uKey.GetValue("DisplayName", "")
+                                $pub = [string]$uKey.GetValue("Publisher", "")
+                                $activePackages[$leaf] = [PSCustomObject]@{
+                                    ProductName = if (-not [string]::IsNullOrWhiteSpace($dn))  { $dn }  else { $uName }
+                                    Publisher   = if (-not [string]::IsNullOrWhiteSpace($pub)) { $pub } else { "Installed User App" }
+                                }
+                            }
+                        }
+                    } finally {
+                        $uKey.Dispose()
+                    }
+                }
+            } finally {
+                $uUserRoot.Dispose()
+            }
+        }
+    }
+
     if ($null -ne $UltixSync) { $UltixSync.Progress = 40 }
 
     # 2. Enumerate C:\Windows\Installer (*.msi, *.msp) and inspect orphaned metadata via COM SummaryInformation
@@ -878,63 +1003,65 @@ function Get-InstallerOrphans_Worker {
 
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     $wiCom = $null
-    try { $wiCom = New-Object -ComObject WindowsInstaller.Installer -ErrorAction SilentlyContinue } catch { }
+    try {
+        try { $wiCom = New-Object -ComObject WindowsInstaller.Installer -ErrorAction SilentlyContinue } catch { }
 
-    $totalFiles = [math]::Max(1, $files.Count)
-    $idx = 0
+        $totalFiles = [math]::Max(1, $files.Count)
+        $idx = 0
 
-    foreach ($file in $files) {
-        $idx++
-        if ($null -ne $UltixSync -and ($idx % 15 -eq 0 -or $idx -eq $totalFiles)) {
-            $UltixSync.Progress = 40 + [int](($idx / $totalFiles) * 55)
-        }
+        foreach ($file in $files) {
+            $idx++
+            if ($null -ne $UltixSync -and ($idx % 15 -eq 0 -or $idx -eq $totalFiles)) {
+                $UltixSync.Progress = 40 + [int](($idx / $totalFiles) * 55)
+            }
 
-        $leafLower = $file.Name.ToLowerInvariant()
-        $sizeMB    = [math]::Round($file.Length / 1MB, 2)
-        if ($sizeMB -lt 0.05) { continue }
+            $leafLower = $file.Name.ToLowerInvariant()
+            $sizeMB    = [math]::Round($file.Length / 1MB, 2)
+            if ($sizeMB -lt 0.05) { continue }
 
-        $isActive = $activePackages.ContainsKey($leafLower)
-        $prodName = "Orphaned Installer Package"
-        $pubName  = "Unknown Vendor"
+            $isActive = $activePackages.ContainsKey($leafLower)
+            $prodName = "Orphaned Installer Package"
+            $pubName  = "Unknown Vendor"
 
-        if ($isActive) {
-            $prodName = $activePackages[$leafLower].ProductName
-            $pubName  = $activePackages[$leafLower].Publisher
-        } elseif ($null -ne $wiCom) {
-            $sumInfo = $null
-            try {
-                $sumInfo = $wiCom.SummaryInformation($file.FullName, 0)
-                $subj = [string]$sumInfo.Property(3)
-                $auth = [string]$sumInfo.Property(4)
-                if (-not [string]::IsNullOrWhiteSpace($subj)) { $prodName = $subj.Trim() }
-                if (-not [string]::IsNullOrWhiteSpace($auth)) { $pubName  = $auth.Trim() }
-            } catch {
-            } finally {
-                if ($null -ne $sumInfo) {
-                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($sumInfo)
+            if ($isActive) {
+                $prodName = $activePackages[$leafLower].ProductName
+                $pubName  = $activePackages[$leafLower].Publisher
+            } elseif ($null -ne $wiCom) {
+                $sumInfo = $null
+                try {
+                    $sumInfo = $wiCom.SummaryInformation($file.FullName, 0)
+                    $subj = [string]$sumInfo.Property(3)
+                    $auth = [string]$sumInfo.Property(4)
+                    if (-not [string]::IsNullOrWhiteSpace($subj)) { $prodName = $subj.Trim() }
+                    if (-not [string]::IsNullOrWhiteSpace($auth)) { $pubName  = $auth.Trim() }
+                } catch {
+                } finally {
+                    if ($null -ne $sumInfo) {
+                        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($sumInfo)
+                    }
                 }
             }
+
+            $statusTag = if ($isActive) { "[ACTIVE - LOCKED]" } else { "[ORPHAN / SAFE]" }
+
+            $results.Add([PSCustomObject]@{
+                FileName      = $file.Name
+                Status        = $statusTag
+                SizeMB        = $sizeMB
+                SizeDisplay = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $sizeMB)
+                ProductName   = $prodName
+                Publisher     = $pubName
+                FullPath      = $file.FullName
+                IsDirectory   = $false
+                IsLocked      = $isActive
+                IsDetected    = (-not $isActive)
+                UIDisplayName = "$($file.Name) ($prodName | $pubName) [ $sizeMB MB ]"
+            })
         }
-
-        $statusTag = if ($isActive) { "[ACTIVE - LOCKED]" } else { "[ORPHAN / SAFE]" }
-
-        $results.Add([PSCustomObject]@{
-            FileName      = $file.Name
-            Status        = $statusTag
-            SizeMB        = $sizeMB
-            SizeDisplay = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,7:0.00} MB", $sizeMB)
-            ProductName   = $prodName
-            Publisher     = $pubName
-            FullPath      = $file.FullName
-            IsDirectory   = $false
-            IsLocked      = $isActive
-            IsDetected    = (-not $isActive)
-            UIDisplayName = "$($file.Name) ($prodName | $pubName) [ $sizeMB MB ]"
-        })
-    }
-
-    if ($null -ne $wiCom) {
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wiCom)
+    } finally {
+        if ($null -ne $wiCom) {
+            [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($wiCom)
+        }
     }
 
     # 3. Check $PatchCache$\Managed baseline cache folder
@@ -1033,15 +1160,19 @@ function Show-InstallerSweeper {
 
                 try {
                     if ($pkg.IsDirectory) {
+                        Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$($pkg.FullPath)\*' -Recurse -Force" -Module "Z1_Cleanup"
                         Get-ChildItem -LiteralPath $pkg.FullPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
                             Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
                         }
+                        Write-UltixExpertResult -OutputText "Purged $($pkg.FullPath) ($($pkg.SizeDisplay.Trim()))" -ExitCode 0 -Module "Z1_Cleanup"
                         $freedMB += $pkg.SizeMB
                         $UltixSync.Logs.Enqueue("    [OK] Purged Windows Installer `$PatchCache`$ ($($pkg.SizeDisplay.Trim())).")
                     } elseif (Test-Path -LiteralPath $pkg.FullPath -PathType Leaf) {
+                        Write-UltixExpertCommand -CommandText "Remove-Item -LiteralPath '$($pkg.FullPath)' -Force" -Module "Z1_Cleanup"
                         $fItem = Get-Item -LiteralPath $pkg.FullPath -Force -ErrorAction SilentlyContinue
                         if ($null -ne $fItem) { $fItem.Attributes = 'Normal' }
                         Remove-Item -LiteralPath $pkg.FullPath -Force -ErrorAction Stop
+                        Write-UltixExpertResult -OutputText "Deleted $($pkg.FileName) ($($pkg.SizeDisplay.Trim()))" -ExitCode 0 -Module "Z1_Cleanup"
                         $freedMB += $pkg.SizeMB
                         $UltixSync.Logs.Enqueue("    [OK] Deleted orphaned $($pkg.FileName) ($($pkg.ProductName) - $($pkg.SizeDisplay.Trim())).")
                     }
@@ -1074,6 +1205,7 @@ function Get-RegistryOrphans_Worker {
         param([string]$RawPath, [switch]$IsDirectory)
         if ([string]::IsNullOrWhiteSpace($RawPath)) { return $false }
         $clean = [System.Environment]::ExpandEnvironmentVariables($RawPath.Trim().Trim('"')).Trim()
+        $clean = $clean -replace '^(\\\\\?\\|\\\?\?\\)', ''
         if ($clean -notmatch '^([a-zA-Z]):\\') { return $false }
 
         $driveLetter = $matches[1]
@@ -1260,13 +1392,21 @@ function Get-RegistryOrphans_Worker {
                 }
 
                 if (Test-IsOrphanedDiskPath -RawPath $exePath) {
+                    $extraProps = @{}
+                    foreach ($pName in $sub.Property) {
+                        if (-not [string]::IsNullOrEmpty($pName)) {
+                            $extraProps[$pName] = [string]$sub.GetValue($pName)
+                        }
+                    }
+                    $cleanRegPath = $sub.PSPath -replace '^Microsoft\.PowerShell\.Core\\', ''
                     $orphans.Add([PSCustomObject]@{
                         Category      = "[App Paths]"
                         TargetName    = $sub.PSChildName
                         MissingPath   = $exePath
-                        RegPath       = $sub.PSPath
+                        RegPath       = $cleanRegPath
                         ValueName     = "(Default)"
                         RawValueData  = $defVal
+                        SubValues     = $extraProps
                         ValueKind     = "String"
                         EntryType     = "SubKey"
                         IsDetected    = $true
@@ -1359,26 +1499,51 @@ function Show-RegistryOrphanSweeper {
                 foreach ($entry in $bData) {
                     if ($null -eq $entry -or [string]::IsNullOrWhiteSpace($entry.RegPath)) { continue }
                     if ($entry.EntryType -eq "SubKey") {
-                        if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
-                        Set-Item -LiteralPath $entry.RegPath -Value ([string]$entry.RawValueData) -Force -ErrorAction SilentlyContinue
+                        Set-UltixRegValue -Path $entry.RegPath -Name "(Default)" -Value ([string]$entry.RawValueData) -Type String -Module "Z1_Cleanup"
+                        if ($entry.PSObject.Properties.Match("SubValues").Count -gt 0 -and $null -ne $entry.SubValues) {
+                            foreach ($sp in $entry.SubValues.PSObject.Properties) {
+                                Set-UltixRegValue -Path $entry.RegPath -Name $sp.Name -Value ([string]$sp.Value) -Type String -Module "Z1_Cleanup"
+                            }
+                        }
                         $restored++
                     } else {
                         if (-not (Test-Path -LiteralPath $entry.RegPath)) { New-Item -Path $entry.RegPath -Force | Out-Null }
                         $kind = if ($entry.PSObject.Properties.Match("ValueKind").Count -gt 0 -and $entry.ValueKind) { [string]$entry.ValueKind } else { "String" }
                         $regItem = Get-Item -LiteralPath $entry.RegPath -ErrorAction SilentlyContinue
                         if ($null -ne $regItem) {
-                            $wKey = $regItem.OpenSubKey("", $true)
-                            $regItem.Dispose()
+                            $wKey = $null
+                            try {
+                                $wKey = $regItem.OpenSubKey("", $true)
+                            } catch {
+                                Grant-UltixRegistryKeyAccess -RegistryPath $entry.RegPath
+                                try { $wKey = $regItem.OpenSubKey("", $true) } catch { }
+                            } finally {
+                                $regItem.Dispose()
+                            }
                             if ($null -ne $wKey) {
                                 try {
                                     if ($kind -eq "Binary" -and -not [string]::IsNullOrWhiteSpace($entry.RawValueData)) {
                                         [byte[]]$bytes = [Convert]::FromBase64String([string]$entry.RawValueData)
-                                        $wKey.SetValue([string]$entry.ValueName, $bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
+                                        Invoke-UltixStep -Command "Set-ItemProperty -LiteralPath '$($entry.RegPath)' -Name '$($entry.ValueName)' -Type Binary -Force" -Action {
+                                            $wKey.SetValue([string]$entry.ValueName, $bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
+                                        } -SuccessOutput "Restored Binary value '$($entry.ValueName)'" -Module "Z1_Cleanup"
                                     } elseif ($kind -eq "DWord") {
-                                        $dw = if ($entry.RawValueData -match '^\d+$') { [int]$entry.RawValueData } else { 1 }
-                                        $wKey.SetValue([string]$entry.ValueName, $dw, [Microsoft.Win32.RegistryValueKind]::DWord)
+                                        $dw = 1
+                                        if ($entry.RawValueData -match '^-?\d+$') {
+                                            $parsed64 = [int64]$entry.RawValueData
+                                            $dw = if ($parsed64 -gt [int]::MaxValue) {
+                                                [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$parsed64), 0)
+                                            } else {
+                                                [int]$parsed64
+                                            }
+                                        }
+                                        Invoke-UltixStep -Command "Set-ItemProperty -LiteralPath '$($entry.RegPath)' -Name '$($entry.ValueName)' -Value $dw -Type DWord -Force" -Action {
+                                            $wKey.SetValue([string]$entry.ValueName, $dw, [Microsoft.Win32.RegistryValueKind]::DWord)
+                                        } -SuccessOutput "Restored DWord value '$($entry.ValueName)' = $dw" -Module "Z1_Cleanup"
                                     } else {
-                                        $wKey.SetValue([string]$entry.ValueName, [string]$entry.RawValueData, [Microsoft.Win32.RegistryValueKind]::String)
+                                        Invoke-UltixStep -Command "Set-ItemProperty -LiteralPath '$($entry.RegPath)' -Name '$($entry.ValueName)' -Type String -Force" -Action {
+                                            $wKey.SetValue([string]$entry.ValueName, [string]$entry.RawValueData, [Microsoft.Win32.RegistryValueKind]::String)
+                                        } -SuccessOutput "Restored String value '$($entry.ValueName)'" -Module "Z1_Cleanup"
                                     }
                                     $restored++
                                 } finally {
@@ -1444,17 +1609,31 @@ function Show-RegistryOrphanSweeper {
                 try {
                     if ($item.EntryType -eq "SubKey") {
                         if (Test-Path -LiteralPath $item.RegPath) {
-                            Remove-Item -LiteralPath $item.RegPath -Recurse -Force -ErrorAction Stop
+                            try {
+                                Remove-UltixRegItem -Path $item.RegPath -Module "Z1_Cleanup"
+                            } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+                                Grant-UltixRegistryKeyAccess -RegistryPath $item.RegPath
+                                Remove-UltixRegItem -Path $item.RegPath -Module "Z1_Cleanup"
+                            }
                             $removed++
                         }
                     } else {
                         $regItem = Get-Item -LiteralPath $item.RegPath -ErrorAction Stop
                         if ($null -ne $regItem) {
-                            $wKey = $regItem.OpenSubKey("", $true)
-                            $regItem.Dispose()
+                            $wKey = $null
+                            try {
+                                $wKey = $regItem.OpenSubKey("", $true)
+                            } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+                                Grant-UltixRegistryKeyAccess -RegistryPath $item.RegPath
+                                $wKey = $regItem.OpenSubKey("", $true)
+                            } finally {
+                                $regItem.Dispose()
+                            }
                             if ($null -ne $wKey) {
                                 try {
-                                    $wKey.DeleteValue([string]$item.ValueName, $true)
+                                    Invoke-UltixStep -Command "Remove-ItemProperty -LiteralPath '$($item.RegPath)' -Name '$($item.ValueName)' -Force" -Action {
+                                        $wKey.DeleteValue([string]$item.ValueName, $true)
+                                    } -SuccessOutput "Deleted value '$($item.ValueName)'" -Module "Z1_Cleanup"
                                     $removed++
                                 } finally {
                                     $wKey.Dispose()
@@ -1462,7 +1641,11 @@ function Show-RegistryOrphanSweeper {
                             }
                         }
                     }
-                } catch { }
+                } catch {
+                    if ($null -ne $UltixSync) {
+                        $UltixSync.Logs.Enqueue("    [!] Access denied / skipped ($($item.TargetName)): $($_.Exception.Message)")
+                    }
+                }
             }
             return [PSCustomObject]@{
                 RemovedCount = $removed
@@ -1482,6 +1665,7 @@ function Show-RegistryOrphanSweeper {
 # Z1: GHOST SERVICES & DRIVERS SWEEPER
 # ------------------------------------------
 function Get-GhostServicesState {
+    Add-Type -AssemblyName System.ServiceProcess -ErrorAction SilentlyContinue
     $ghosts = [System.Collections.Generic.List[PSCustomObject]]::new()
     
     $readyDrives = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1490,8 +1674,27 @@ function Get-GhostServicesState {
     }
 
     $runningNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    [System.ServiceProcess.ServiceController]::GetServices() | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.ServiceName) }
-    [System.ServiceProcess.ServiceController]::GetDevices()  | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { [void]$runningNames.Add($_.ServiceName) }
+    $allSvcs = @([System.ServiceProcess.ServiceController]::GetServices())
+    try {
+        foreach ($sc in $allSvcs) {
+            if ($sc.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+                [void]$runningNames.Add($sc.ServiceName)
+            }
+        }
+    } finally {
+        foreach ($sc in $allSvcs) { if ($null -ne $sc) { $sc.Dispose() } }
+    }
+
+    $allDevs = @([System.ServiceProcess.ServiceController]::GetDevices())
+    try {
+        foreach ($dv in $allDevs) {
+            if ($dv.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+                [void]$runningNames.Add($dv.ServiceName)
+            }
+        }
+    } finally {
+        foreach ($dv in $allDevs) { if ($null -ne $dv) { $dv.Dispose() } }
+    }
 
     $svcRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services", $false)
     if ($null -eq $svcRoot) { return $ghosts }
@@ -1602,7 +1805,8 @@ function Remove-GhostServices {
                 $UltixSync.Progress = [int](($current / $total) * 100)
                 $UltixSync.Logs.Enqueue(" -> Removing Ghost Service: $($item.Name)")
             }
-            Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($item.Name)" -Recurse -Force -ErrorAction SilentlyContinue
+            $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($item.Name)"
+            Remove-UltixRegItem -Path $svcRegPath -IgnoreMissing -Module "Z1_Cleanup"
         }
     } -OnComplete ({
         param($nullOut)

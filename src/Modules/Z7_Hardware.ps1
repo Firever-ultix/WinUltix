@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z7_HARDWARE.PS1 - HARDWARE & DIAGNOSTICS MODULE (v3.14)
+# Z7_HARDWARE.PS1 - HARDWARE & DIAGNOSTICS MODULE
 # Z7_Hardware: Low-level hardware & latency cockpit (Topology-Aware Affinity Lasso, CPPC Unhider + Dead Man's Switch, Pre-Flight Shortcut, Quantum Scheduler Matrix, MSI & Core 0 IRQ Offload, 0.5ms TSC Timer, USB XHCI Topology Mapper, NVMe/PCIe locks, NDIS/TCP Tuner, WHEA Decoder, and 1Hz DPC Monitor).
 # ==========================================
 
@@ -49,15 +49,15 @@ function Get-CPUTopologyProfile {
 
     $profileResult = $null
 
-    # Case 1: Intel Hybrid Architecture (P+E Cores detected via EfficiencyClass)
+    # Case 1: Intel Hybrid Architecture (P+E / LP-E Cores detected via EfficiencyClass)
     if ($nativeCores.Count -ge 6) {
         $effClasses = @($nativeCores | Select-Object -ExpandProperty EfficiencyClass -Unique | Sort-Object)
         if ($effClasses.Count -gt 1) {
-            $minEff = $effClasses[0]
+            $maxEff = $effClasses[$effClasses.Count - 1]
             [int64]$eCoreMask = 0
             $eCoreCount = 0
             foreach ($c in $nativeCores) {
-                if ($c.EfficiencyClass -eq $minEff) {
+                if ($c.EfficiencyClass -lt $maxEff) {
                     $eCoreMask = $eCoreMask -bor $c.Mask
                     $eCoreCount++
                 }
@@ -93,6 +93,7 @@ function Get-CPUTopologyProfile {
 
             $targetDomain = if ($isAsymmetricX3D) { $smallestL3 } else { $nativeCaches[$nativeCaches.Count - 1] }
             $tailMask = [WinUltix.CpuTopology]::GetTailThreadsMask($targetDomain.Mask, 4)
+            if ($tailMask -eq 0) { $tailMask = $targetDomain.Mask }
             $l3MB = [math]::Round($targetDomain.SizeBytes / 1MB, 0)
             $labelStr = if ($isAsymmetricX3D) { "AMD Dual-CCD X3D" } else { "AMD Dual-CCD" }
             $profileResult = [PSCustomObject]@{
@@ -411,7 +412,7 @@ function Get-HardwareState_Affinity {
                 try { $priority = $activeProc.PriorityClass.ToString() } catch { $priority = "Protected" }
 
                 $isLockedNow = $false
-                try { $isLockedNow = ($activeProc.ProcessorAffinity -eq $targetMask) } catch { }
+                try { $isLockedNow = ($activeProc.ProcessorAffinity.ToInt64() -eq $targetMask.ToInt64()) } catch { }
 
                 $statusTag = if ($isLockedNow) { "[LOCKED]  " } else { "[RUNNING] " }
                 $listRunning.Add([PSCustomObject]@{
@@ -478,55 +479,6 @@ function Get-HardwareState_CPPC {
         })
     }
     return @($results)
-}
-
-function Grant-UltixRegistryKeyAccess {
-    param([Parameter(Mandatory=$true)][string]$RegistryPath)
-    $subKeyPath = $RegistryPath -replace '^(?i)(HKLM:\\|Registry::HKEY_LOCAL_MACHINE\\)', ''
-    if ([string]::IsNullOrWhiteSpace($subKeyPath)) { return }
-
-    try {
-        [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeTakeOwnershipPrivilege")
-        [WinUltix.PrivilegeEnabler]::EnablePrivilege("SeRestorePrivilege")
-        $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-
-        $keyOwn = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-            $subKeyPath,
-            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-            [System.Security.AccessControl.RegistryRights]::TakeOwnership
-        )
-        if ($null -ne $keyOwn) {
-            try {
-                $aclOwn = $keyOwn.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
-                $aclOwn.SetOwner($adminSid)
-                $keyOwn.SetAccessControl($aclOwn)
-            } finally {
-                $keyOwn.Dispose()
-            }
-        }
-
-        $keyAcl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-            $subKeyPath,
-            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-            [System.Security.AccessControl.RegistryRights]::ChangePermissions
-        )
-        if ($null -ne $keyAcl) {
-            try {
-                $acl = $keyAcl.GetAccessControl()
-                $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-                    $adminSid,
-                    [System.Security.AccessControl.RegistryRights]::FullControl,
-                    ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
-                    [System.Security.AccessControl.PropagationFlags]::None,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-                $acl.SetAccessRule($rule)
-                $keyAcl.SetAccessControl($acl)
-            } finally {
-                $keyAcl.Dispose()
-            }
-        }
-    } catch { }
 }
 
 function Get-HardwareState_IRQ {
@@ -898,9 +850,48 @@ function Get-HardwareState_IRQ {
 function Get-HardwareState_WHEA {
     if ($null -ne $UltixSync) { $UltixSync.Progress = 10 }
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-    
-    [int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
+
+    # Self-contained physical core mask resolution (safe inside background Runspaces)
+    $nativeCores = @([WinUltix.CpuTopology]::GetProcessorCores())
+    [int64[]]$coreMasks = if ($nativeCores.Count -gt 0) {
+        @($nativeCores | ForEach-Object { [int64]$_.Mask })
+    } else {
+        $lpTotal = [Environment]::ProcessorCount
+        $fbList = [System.Collections.Generic.List[int64]]::new()
+        for ($i = 0; $i -lt $lpTotal; $i += 2) {
+            $m = ([int64]1 -shl $i)
+            if (($i + 1) -lt $lpTotal) { $m = $m -bor ([int64]1 -shl ($i + 1)) }
+            $fbList.Add($m)
+        }
+        @($fbList)
+    }
     $coreCount = $coreMasks.Count
+
+    # Build exact hardware APIC ID -> Windows Logical Processor index map from kernel HAL registry
+    $apicToLp = @{}
+    $cpuRegRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("HARDWARE\DESCRIPTION\System\CentralProcessor", $false)
+    if ($null -ne $cpuRegRoot) {
+        try {
+            foreach ($lpKeyName in $cpuRegRoot.GetSubKeyNames()) {
+                if ($lpKeyName -notmatch '^\d+$') { continue }
+                $lpSub = $cpuRegRoot.OpenSubKey($lpKeyName, $false)
+                if ($null -ne $lpSub) {
+                    try {
+                        $hwApic = $lpSub.GetValue("~ApicId", $null)
+                        if ($null -eq $hwApic) { $hwApic = $lpSub.GetValue("InitialApicId", $null) }
+                        if ($null -eq $hwApic) { $hwApic = $lpSub.GetValue("ApicId", $null) }
+                        if ($null -ne $hwApic) {
+                            $apicToLp[[int]$hwApic] = [int]$lpKeyName
+                        }
+                    } finally {
+                        $lpSub.Dispose()
+                    }
+                }
+            }
+        } finally {
+            $cpuRegRoot.Dispose()
+        }
+    }
 
     try {
         if ($null -ne $UltixSync) { $UltixSync.Progress = 25 }
@@ -931,7 +922,8 @@ function Get-HardwareState_WHEA {
             }
 
             if ($apicId -match '^\d+$') {
-                $lpIdx = [int]$apicId
+                $rawApic = [int]$apicId
+                $lpIdx = if ($apicToLp.ContainsKey($rawApic)) { $apicToLp[$rawApic] } else { $rawApic }
                 $matchedCore = -1
                 if ($lpIdx -ge 0 -and $lpIdx -lt 63) {
                     $threadBit = ([int64]1 -shl $lpIdx)
@@ -943,7 +935,7 @@ function Get-HardwareState_WHEA {
                     }
                 }
                 if ($matchedCore -ge 0) {
-                    $coreInfo = "(Core $matchedCore)"
+                    $coreInfo = "(Core $matchedCore / LP#$lpIdx)"
                 } else {
                     $coreInfo = "(LP#$lpIdx)"
                 }
@@ -956,6 +948,8 @@ function Get-HardwareState_WHEA {
                 $humanReadable = "[IF/SoC] Interconnect Error -> FCLK unstable or VSOC/VDDG too low!" 
             } elseif ($id -eq 47) { 
                 $humanReadable = "[RAM] Memory Controller -> tREFI/tRFC too tight or VDDQ too low!" 
+            } elseif ($id -in @(1, 17)) {
+                $humanReadable = "[PCIe] Bus/Link Error -> Check GPU/NVMe PCIe Gen speed, riser, or ASPM!"
             } else {
                 if ($msg -match "Error Type:\s*(.+?)\r?\n") { $humanReadable = $matches[1] }
             }
@@ -1196,29 +1190,31 @@ function Set-AppAffinity {
 
     $topo = Get-CPUTopologyProfile
     $targetMask = $topo.Mask
+    $maskHex = "0x$($targetMask.ToInt64().ToString('X'))"
 
     $configPath = "HKCU:\Software\WinUltix\AffinityLasso"
-    if (-not (Test-Path -LiteralPath $configPath)) { New-Item -Path $configPath -Force -ErrorAction SilentlyContinue | Out-Null }
 
     foreach ($item in $SelectedItems) {
         $exeName  = $item.ActionData.ExeName
         $procName = $item.ActionData.ProcName
         
-        Set-ItemProperty -LiteralPath $configPath -Name $exeName -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-UltixRegValue -Path $configPath -Name $exeName -Value 1 -Type DWord -Module "Z7_Hardware"
 
         if ($Execute) {
             $procs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
             if ($procs.Count -gt 0) {
                 try {
                     Write-GUI " -> Live Locking ($($topo.CoreDesc)): $exeName ($($procs.Count) instances)"
-                    foreach ($p in $procs) {
-                        try { 
-                            $p.ProcessorAffinity = $targetMask 
-                            $p.PriorityClass     = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
-                        } catch {
-                            Write-GUI "    [!] Access denied: PID $($p.Id) (System lock)"
+                    Invoke-UltixStep -Command "Set-ProcessAffinity '$exeName' -Mask $maskHex -Priority BelowNormal" -Action {
+                        foreach ($p in $procs) {
+                            try { 
+                                $p.ProcessorAffinity = $targetMask 
+                                $p.PriorityClass     = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+                            } catch {
+                                Write-GUI "    [!] Access denied: PID $($p.Id) (System lock)"
+                            }
                         }
-                    }
+                    } -SuccessOutput "Locked $($procs.Count) instance(s) of $exeName to $maskHex" -Module "Z7_Hardware"
                 } finally {
                     foreach ($p in $procs) { if ($null -ne $p) { $p.Dispose() } }
                 }
@@ -1239,13 +1235,14 @@ function Remove-AppAffinity {
     $lpCount        = [Environment]::ProcessorCount
     $fullMaskVal    = if ($lpCount -ge 64) { -1 } else { ([int64]1 -shl $lpCount) - 1 }
     $systemAffinity = [System.IntPtr]$fullMaskVal
+    $sysMaskHex     = "0x$($systemAffinity.ToInt64().ToString('X'))"
 
     foreach ($item in $SelectedItems) {
         $exeName  = $item.ActionData.ExeName
         $procName = $item.ActionData.ProcName
         
         if (-not $KeepConfig -and (Test-Path -LiteralPath $configPath)) { 
-            Remove-ItemProperty -LiteralPath $configPath -Name $exeName -Force -ErrorAction SilentlyContinue 
+            Remove-UltixRegItem -Path $configPath -Name $exeName -IgnoreMissing -Module "Z7_Hardware"
         }
 
         if ($Execute) {
@@ -1264,12 +1261,14 @@ function Remove-AppAffinity {
 
                     if ($needsUnlock) {
                         Write-GUI " -> Releasing CPU Restraints: $exeName"
-                        foreach ($p in $procs) { 
-                            try { 
-                                $p.ProcessorAffinity = $systemAffinity 
-                                $p.PriorityClass     = [System.Diagnostics.ProcessPriorityClass]::Normal
-                            } catch { } 
-                        }
+                        Invoke-UltixStep -Command "Reset-ProcessAffinity '$exeName' -Mask $sysMaskHex -Priority Normal" -Action {
+                            foreach ($p in $procs) { 
+                                try { 
+                                    $p.ProcessorAffinity = $systemAffinity 
+                                    $p.PriorityClass     = [System.Diagnostics.ProcessPriorityClass]::Normal
+                                } catch { } 
+                            }
+                        } -SuccessOutput "Restored full CPU affinity ($sysMaskHex) for $exeName" -Module "Z7_Hardware"
                     }
                 } finally {
                     foreach ($p in $procs) { if ($null -ne $p) { $p.Dispose() } }
@@ -1289,7 +1288,7 @@ function Invoke-ApplyCPPC {
         $rule = $item.ActionData
         Write-GUI " -> Unlocking Visibility: $($rule.UIDisplayName)"
         try {
-            Set-ItemProperty -Path $rule.Path -Name $rule.Name -Value $rule.Expected -Type DWord -Force -ErrorAction Stop | Out-Null
+            Set-UltixRegValue -Path $rule.Path -Name $rule.Name -Value $rule.Expected -Type DWord -Module "Z7_Hardware"
         } catch { Write-GUI "    [!] Failed to unhide: $($rule.UIDisplayName)" }
     }
 }
@@ -1299,28 +1298,34 @@ function Set-UltixCPPCState {
     $p = 'HKLM:\SOFTWARE\WinUltix\CPPC'
 
     if ($Mode -eq 'Engage') {
-        if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
         $e  = Get-UltixPowerAcIndex -SettingGuid '36687f9e-e3a5-4dbf-b1dc-15eb381c6863' -IncludeHidden
         $d  = Get-UltixPowerAcIndex -SettingGuid '4b92d758-5a24-4851-a470-815d78aee119' -IncludeHidden
         $pr = Get-UltixPowerAcIndex -SettingGuid '7b224883-b3cc-4d79-819f-8374152cbe7c' -IncludeHidden
 
-        # Only archive when current values are neither already Engaged (0/100/100) nor corrupted all-zeros (0/0/0)
-        if ($null -ne $e -and -not ($e -eq 0 -and $d -eq 100 -and $pr -eq 100) -and -not ($e -eq 0 -and $d -eq 0 -and $pr -eq 0)) {
-            Set-ItemProperty -Path $p -Name 'EPP' -Value $e -Type DWord -Force
-            Set-ItemProperty -Path $p -Name 'Demote' -Value $d -Type DWord -Force
-            Set-ItemProperty -Path $p -Name 'Promote' -Value $pr -Type DWord -Force
+        # Only archive when all 3 values are valid and neither already Engaged (0/100/100) nor corrupted all-zeros (0/0/0)
+        if ($null -ne $e -and $null -ne $d -and $null -ne $pr -and
+            -not ($e -eq 0 -and $d -eq 100 -and $pr -eq 100) -and
+            -not ($e -eq 0 -and $d -eq 0 -and $pr -eq 0)) {
+            Set-UltixRegValue -Path $p -Name 'EPP' -Value $e -Type DWord -Module "Z7_Hardware"
+            Set-UltixRegValue -Path $p -Name 'Demote' -Value $d -Type DWord -Module "Z7_Hardware"
+            Set-UltixRegValue -Path $p -Name 'Promote' -Value $pr -Type DWord -Module "Z7_Hardware"
         }
 
         $tsCmd = "`$p='HKLM:\SOFTWARE\WinUltix\CPPC'; if(Test-Path `$p){ `$r=Get-ItemProperty `$p; if(`$null -ne `$r.EPP){powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 `$r.EPP}; if(`$null -ne `$r.Demote){powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 `$r.Demote}; if(`$null -ne `$r.Promote){powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c `$r.Promote}; powercfg.exe /setactive SCHEME_CURRENT }; Unregister-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe' -Confirm:`$false -ErrorAction SilentlyContinue"
-        $tsAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -Command `"$tsCmd`""
-        $tsTriggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogon))
-        $tsPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        Register-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Action $tsAction -Trigger $tsTriggers -Principal $tsPrincipal -Force | Out-Null
+        Invoke-UltixStep -Command "Register-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe' -Trigger AtStartup,AtLogon -User 'NT AUTHORITY\SYSTEM'" -Action {
+            $tsAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -Command `"$tsCmd`""
+            $tsTriggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogon))
+            $tsPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Action $tsAction -Trigger $tsTriggers -Principal $tsPrincipal -Force | Out-Null
+        } -SuccessOutput "Armed WinUltix_CPPC_Failsafe Dead Man's Switch" -Module "Z7_Hardware"
 
-        powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 0
-        powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 100
-        powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c 100
-        powercfg.exe /setactive SCHEME_CURRENT
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "0") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "0") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "100") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "100") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "100") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "100") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setactive", "SCHEME_CURRENT") -Module "Z7_Hardware"
         Write-GUI " -> Engaged Max CPPC (EPP 0%, Demote/Promote 100%). Dead Man's Switch armed."
     } else {
         $e = 50; $d = 40; $pr = 60
@@ -1329,7 +1334,9 @@ function Set-UltixCPPCState {
             if ($null -ne $reg.EPP -and $null -ne $reg.Demote -and $null -ne $reg.Promote) {
                 # Self-heal if previous regex bug stored 0/0/0 into backup key
                 if ($reg.EPP -eq 0 -and $reg.Demote -eq 0 -and $reg.Promote -eq 0) {
-                    Remove-ItemProperty -Path $p -Name 'EPP', 'Demote', 'Promote' -Force -ErrorAction SilentlyContinue
+                    Remove-UltixRegItem -Path $p -Name 'EPP' -IgnoreMissing -Module "Z7_Hardware"
+                    Remove-UltixRegItem -Path $p -Name 'Demote' -IgnoreMissing -Module "Z7_Hardware"
+                    Remove-UltixRegItem -Path $p -Name 'Promote' -IgnoreMissing -Module "Z7_Hardware"
                 } else {
                     $e  = $reg.EPP
                     $d  = $reg.Demote
@@ -1337,12 +1344,17 @@ function Set-UltixCPPCState {
                 }
             }
         }
-        powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 $e; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 36687f9e-e3a5-4dbf-b1dc-15eb381c6863 $e
-        powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 $d; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 4b92d758-5a24-4851-a470-815d78aee119 $d
-        powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c $pr; powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 7b224883-b3cc-4d79-819f-8374152cbe7c $pr
-        powercfg.exe /setactive SCHEME_CURRENT
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "$e") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "36687f9e-e3a5-4dbf-b1dc-15eb381c6863", "$e") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "$d") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "4b92d758-5a24-4851-a470-815d78aee119", "$d") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "$pr") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "7b224883-b3cc-4d79-819f-8374152cbe7c", "$pr") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setactive", "SCHEME_CURRENT") -Module "Z7_Hardware"
         
-        Unregister-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        Invoke-UltixStep -Command "Unregister-ScheduledTask -TaskName 'WinUltix_CPPC_Failsafe'" -Action {
+            Unregister-ScheduledTask -TaskName "WinUltix_CPPC_Failsafe" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        } -SuccessOutput "Disarmed WinUltix_CPPC_Failsafe Scheduled Task" -Module "Z7_Hardware"
         Write-GUI " -> Released CPPC lock (Restored EPP: $e%, Demote: $d%, Promote: $pr%). Failsafe disarmed."
     }
 }
@@ -1350,7 +1362,8 @@ function Set-UltixCPPCState {
 function Clear-WHEALogs {
     Write-GUI " -> Clearing System Event Log (WHEA Records)..."
     try {
-        & wevtutil.exe cl System 2>$null
+        $ec = Invoke-UltixExe -FilePath "wevtutil.exe" -Arguments @("cl", "System") -Module "Z7_Hardware"
+        if ($ec -ne 0) { throw "wevtutil exited with code $ec" }
         Write-GUI "    [OK] System log successfully wiped."
     } catch { 
         Write-GUI "    [!] Failed to clear System log. Administrator privileges missing?" 
@@ -1444,24 +1457,39 @@ function Start-NetworkOptimizationAsync {
                 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue(" -> Optimizing: $($item.UIDisplayName)") }
                 try {
                     switch ($data.Type) {
-                        "GlobalRSS" { Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop }
-                        "GlobalRSC" { Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction Stop }
+                        "GlobalRSS" {
+                            Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled" -Action {
+                                Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop
+                            } -SuccessOutput "Enabled Global TCP RSS" -Module "Z7_Hardware"
+                        }
+                        "GlobalRSC" {
+                            Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled" -Action {
+                                Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction Stop
+                            } -SuccessOutput "Disabled Global TCP RSC" -Module "Z7_Hardware"
+                        }
                         "TCP" {
                             $path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
-                            New-ItemProperty -Path $path -Name "TcpAckFrequency" -Value 1 -PropertyType DWORD -Force -ErrorAction Stop | Out-Null
-                            New-ItemProperty -Path $path -Name "TCPNoDelay" -Value 1 -PropertyType DWORD -Force -ErrorAction Stop | Out-Null 
+                            $tcpProps = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
+                            if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name "TcpAckFrequency" -ErrorAction SilentlyContinue).TcpAckFrequency) {
+                                $oldAck = if ($null -ne $tcpProps -and $null -ne $tcpProps.TcpAckFrequency) { [int]$tcpProps.TcpAckFrequency } else { -1 }
+                                Set-UltixRegValue -Path $bKey -Name "TcpAckFrequency" -Value $oldAck -Type DWord -Module "Z7_Hardware"
+                            }
+                            if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name "TCPNoDelay" -ErrorAction SilentlyContinue).TCPNoDelay) {
+                                $oldNod = if ($null -ne $tcpProps -and $null -ne $tcpProps.TCPNoDelay) { [int]$tcpProps.TCPNoDelay } else { -1 }
+                                Set-UltixRegValue -Path $bKey -Name "TCPNoDelay" -Value $oldNod -Type DWord -Module "Z7_Hardware"
+                            }
+                            Set-UltixRegValue -Path $path -Name "TcpAckFrequency" -Value 1 -Type DWord -Module "Z7_Hardware"
+                            Set-UltixRegValue -Path $path -Name "TCPNoDelay" -Value 1 -Type DWord -Module "Z7_Hardware"
                         }
                         "Power" {
-                            if (-not (Test-Path -LiteralPath $bKey)) { New-Item -Path $bKey -Force | Out-Null }
                             if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities) {
                                 $oldPnp = (Get-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities
                                 if ($null -eq $oldPnp) { $oldPnp = -1 }
-                                Set-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Force
+                                Set-UltixRegValue -Path $bKey -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Module "Z7_Hardware"
                             }
-                            Set-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Value 24 -Type DWord -Force -ErrorAction Stop
+                            Set-UltixRegValue -Path $data.RegPath -Name "PnPCapabilities" -Value 24 -Type DWord -Module "Z7_Hardware"
                         }
                         "NDIS" {
-                            if (-not (Test-Path -LiteralPath $bKey)) { New-Item -Path $bKey -Force | Out-Null }
                             $targetProp = Get-NetAdapterAdvancedProperty -Name $name -ErrorAction SilentlyContinue |
                                 Where-Object { $_.RegistryKeyword -eq $data.Key } |
                                 Select-Object -First 1
@@ -1470,16 +1498,34 @@ function Start-NetworkOptimizationAsync {
                                 $curVal = [string]($targetProp.RegistryValue | Select-Object -First 1)
                                 if ($null -eq (Get-ItemProperty -LiteralPath $bKey -Name $data.Key -ErrorAction SilentlyContinue).$($data.Key)) {
                                     if (-not [string]::IsNullOrWhiteSpace($curVal)) {
-                                        Set-ItemProperty -LiteralPath $bKey -Name $data.Key -Value $curVal -Type String -Force
+                                        Set-UltixRegValue -Path $bKey -Name $data.Key -Value $curVal -Type String -Module "Z7_Hardware"
                                     }
                                 }
-                                $targetProp | Set-NetAdapterAdvancedProperty -RegistryValue $data.Value -NoRestart -ErrorAction Stop
+                                Invoke-UltixStep -Command "Set-NetAdapterAdvancedProperty -Name '$name' -RegistryKeyword '$($data.Key)' -RegistryValue '$($data.Value)' -NoRestart" -Action {
+                                    $targetProp | Set-NetAdapterAdvancedProperty -RegistryValue $data.Value -NoRestart -ErrorAction Stop
+                                } -SuccessOutput "Enforced $($data.Key)=$($data.Value) on [$name]" -Module "Z7_Hardware"
                             }
                         }
-                        "RSS"  { Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue }
-                        "RSC"  { Disable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue }
-                        "LSO"  { Disable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue }
-                        "CSO"  { Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue }
+                        "RSS" {
+                            Invoke-UltixStep -Command "Enable-NetAdapterRss -Name '$name' -NoRestart" -Action {
+                                Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Enabled RSS on [$name]" -Module "Z7_Hardware"
+                        }
+                        "RSC" {
+                            Invoke-UltixStep -Command "Disable-NetAdapterRsc -Name '$name' -NoRestart" -Action {
+                                Disable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Disabled RSC on [$name]" -Module "Z7_Hardware"
+                        }
+                        "LSO" {
+                            Invoke-UltixStep -Command "Disable-NetAdapterLso -Name '$name' -NoRestart" -Action {
+                                Disable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Disabled LSO on [$name]" -Module "Z7_Hardware"
+                        }
+                        "CSO" {
+                            Invoke-UltixStep -Command "Enable-NetAdapterChecksumOffload -Name '$name' -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart" -Action {
+                                Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Enabled IPv4 Checksum Offload on [$name]" -Module "Z7_Hardware"
+                        }
                     }
                 } catch {
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to apply: $($item.UIDisplayName) ($($_.Exception.Message))") }
@@ -1488,24 +1534,52 @@ function Start-NetworkOptimizationAsync {
                 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue(" -> Reverting to Default: $($item.UIDisplayName)") }
                 try {
                     switch ($data.Type) {
-                        "GlobalRSS" { Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop }
-                        "GlobalRSC" { Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Enabled -ErrorAction Stop }
+                        "GlobalRSS" {
+                            Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled" -Action {
+                                Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop
+                            } -SuccessOutput "Restored Global TCP RSS" -Module "Z7_Hardware"
+                        }
+                        "GlobalRSC" {
+                            Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Enabled" -Action {
+                                Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Enabled -ErrorAction Stop
+                            } -SuccessOutput "Restored Global TCP RSC" -Module "Z7_Hardware"
+                        }
                         "TCP" {
                             $path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
-                            Remove-ItemProperty -Path $path -Name "TcpAckFrequency" -Force -ErrorAction SilentlyContinue
-                            Remove-ItemProperty -Path $path -Name "TCPNoDelay" -Force -ErrorAction SilentlyContinue
+                            $bTcp = Get-ItemProperty -LiteralPath $bKey -ErrorAction SilentlyContinue
+                            if ($null -ne $bTcp -and $null -ne $bTcp.TcpAckFrequency) {
+                                if ($bTcp.TcpAckFrequency -eq -1 -or $bTcp.TcpAckFrequency -eq 4294967295) {
+                                    Remove-UltixRegItem -Path $path -Name "TcpAckFrequency" -IgnoreMissing -Module "Z7_Hardware"
+                                } else {
+                                    Set-UltixRegValue -Path $path -Name "TcpAckFrequency" -Value $bTcp.TcpAckFrequency -Type DWord -Module "Z7_Hardware"
+                                }
+                                Remove-UltixRegItem -Path $bKey -Name "TcpAckFrequency" -IgnoreMissing -Module "Z7_Hardware"
+                            } else {
+                                Remove-UltixRegItem -Path $path -Name "TcpAckFrequency" -IgnoreMissing -Module "Z7_Hardware"
+                            }
+
+                            if ($null -ne $bTcp -and $null -ne $bTcp.TCPNoDelay) {
+                                if ($bTcp.TCPNoDelay -eq -1 -or $bTcp.TCPNoDelay -eq 4294967295) {
+                                    Remove-UltixRegItem -Path $path -Name "TCPNoDelay" -IgnoreMissing -Module "Z7_Hardware"
+                                } else {
+                                    Set-UltixRegValue -Path $path -Name "TCPNoDelay" -Value $bTcp.TCPNoDelay -Type DWord -Module "Z7_Hardware"
+                                }
+                                Remove-UltixRegItem -Path $bKey -Name "TCPNoDelay" -IgnoreMissing -Module "Z7_Hardware"
+                            } else {
+                                Remove-UltixRegItem -Path $path -Name "TCPNoDelay" -IgnoreMissing -Module "Z7_Hardware"
+                            }
                         }
                         "Power" {
                             $oldPnp = (Get-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities
                             if ($null -ne $oldPnp) {
                                 if ($oldPnp -eq -1 -or $oldPnp -eq 4294967295) {
-                                    Remove-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Force -ErrorAction SilentlyContinue
+                                    Remove-UltixRegItem -Path $data.RegPath -Name "PnPCapabilities" -IgnoreMissing -Module "Z7_Hardware"
                                 } else {
-                                    Set-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Force -ErrorAction SilentlyContinue
+                                    Set-UltixRegValue -Path $data.RegPath -Name "PnPCapabilities" -Value $oldPnp -Type DWord -Module "Z7_Hardware"
                                 }
-                                Remove-ItemProperty -LiteralPath $bKey -Name "PnPCapabilities" -Force -ErrorAction SilentlyContinue
+                                Remove-UltixRegItem -Path $bKey -Name "PnPCapabilities" -IgnoreMissing -Module "Z7_Hardware"
                             } else {
-                                Set-ItemProperty -LiteralPath $data.RegPath -Name "PnPCapabilities" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                                Set-UltixRegValue -Path $data.RegPath -Name "PnPCapabilities" -Value 0 -Type DWord -Module "Z7_Hardware"
                             }
                         }
                         "NDIS" {
@@ -1516,16 +1590,34 @@ function Start-NetworkOptimizationAsync {
                                 Select-Object -First 1
 
                             if ($null -ne $targetProp) {
-                                $targetProp | Set-NetAdapterAdvancedProperty -RegistryValue $targetVal -NoRestart -ErrorAction Stop
+                                Invoke-UltixStep -Command "Set-NetAdapterAdvancedProperty -Name '$name' -RegistryKeyword '$($data.Key)' -RegistryValue '$targetVal' -NoRestart" -Action {
+                                    $targetProp | Set-NetAdapterAdvancedProperty -RegistryValue $targetVal -NoRestart -ErrorAction Stop
+                                } -SuccessOutput "Restored $($data.Key)=$targetVal on [$name]" -Module "Z7_Hardware"
                             }
                             if (Test-Path -LiteralPath $bKey) {
-                                Remove-ItemProperty -LiteralPath $bKey -Name $data.Key -Force -ErrorAction SilentlyContinue
+                                Remove-UltixRegItem -Path $bKey -Name $data.Key -IgnoreMissing -Module "Z7_Hardware"
                             }
                         }
-                        "RSS"  { Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue }
-                        "RSC"  { Enable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue }
-                        "LSO"  { Enable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue }
-                        "CSO"  { Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue }
+                        "RSS" {
+                            Invoke-UltixStep -Command "Enable-NetAdapterRss -Name '$name' -NoRestart" -Action {
+                                Enable-NetAdapterRss -Name $name -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Restored RSS on [$name]" -Module "Z7_Hardware"
+                        }
+                        "RSC" {
+                            Invoke-UltixStep -Command "Enable-NetAdapterRsc -Name '$name' -NoRestart" -Action {
+                                Enable-NetAdapterRsc -Name $name -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Restored RSC on [$name]" -Module "Z7_Hardware"
+                        }
+                        "LSO" {
+                            Invoke-UltixStep -Command "Enable-NetAdapterLso -Name '$name' -NoRestart" -Action {
+                                Enable-NetAdapterLso -Name $name -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Restored LSO on [$name]" -Module "Z7_Hardware"
+                        }
+                        "CSO" {
+                            Invoke-UltixStep -Command "Enable-NetAdapterChecksumOffload -Name '$name' -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart" -Action {
+                                Enable-NetAdapterChecksumOffload -Name $name -IpIPv4 -TcpIPv4 -UdpIPv4 -NoRestart -ErrorAction SilentlyContinue
+                            } -SuccessOutput "Restored IPv4 Checksum Offload on [$name]" -Module "Z7_Hardware"
+                        }
                     }
                 } catch {
                     if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [!] Failed to revert: $($item.UIDisplayName) ($($_.Exception.Message))") }
@@ -1535,7 +1627,9 @@ function Start-NetworkOptimizationAsync {
 
         $touchedAdapters = @($Items | ForEach-Object { $_.ActionData.AdapterName } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
         foreach ($aName in $touchedAdapters) {
-            Restart-NetAdapter -Name $aName -ErrorAction SilentlyContinue
+            Invoke-UltixStep -Command "Restart-NetAdapter -Name '$aName'" -Action {
+                Restart-NetAdapter -Name $aName -ErrorAction SilentlyContinue
+            } -SuccessOutput "Re-initialized adapter [$aName]" -Module "Z7_Hardware"
         }
 
         if ($null -ne $UltixSync) {
@@ -1561,17 +1655,16 @@ function Invoke-ApplyTimerTweaks {
         
         try {
             if ($data.Type -eq "Reg") {
-                if (-not (Test-Path -LiteralPath $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
-                Set-ItemProperty -LiteralPath $data.Path -Name $data.Name -Value $data.Value -Type DWord -Force -ErrorAction Stop
+                Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Value -Type DWord -Module "Z7_Hardware"
             } elseif ($data.Type -eq "BCD") {
                 $cmdArgs = $data.Cmd.Split(' ')
                 if ($cmdArgs[0] -eq "useplatformclock" -and $cmdArgs[1] -eq "no") {
-                    $null = & bcdedit.exe /deletevalue "{current}" useplatformclock 2>&1
+                    $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "useplatformclock") -Module "Z7_Hardware"
                 } else {
-                    $null = & bcdedit.exe /set "{current}" $cmdArgs[0] $cmdArgs[1] 2>&1
+                    $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/set", "{current}", $cmdArgs[0], $cmdArgs[1]) -Module "Z7_Hardware"
                 }
             } elseif ($data.Type -eq "PNP") {
-                $null = & pnputil.exe /disable-device "$($data.Instance)" 2>&1
+                $null = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/disable-device", "$($data.Instance)") -Module "Z7_Hardware"
                 if (-not [WinUltix.PnpTree]::IsDeviceDisabled($data.Instance)) {
                     throw "pnputil failed to disable $($data.Instance)"
                 }
@@ -1592,18 +1685,19 @@ function Invoke-ApplyNVMeTweaks {
         
         try {
             if ($data.Type -eq "Reg") {
-                if (-not (Test-Path -LiteralPath $data.Path)) { New-Item -Path $data.Path -Force -ErrorAction Stop | Out-Null }
-                Set-ItemProperty -LiteralPath $data.Path -Name $data.Name -Value $data.Val -Type DWord -Force -ErrorAction Stop
+                Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Val -Type DWord -Module "Z7_Hardware"
             } elseif ($data.Type -eq "MMAgent") {
                 $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
                 $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
-                if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+                if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 -Module "Z7_Hardware" }
                 try {
-                    Disable-MMAgent -MemoryCompression -ErrorAction Stop
+                    Invoke-UltixStep -Command "Disable-MMAgent -MemoryCompression" -Action {
+                        Disable-MMAgent -MemoryCompression -ErrorAction Stop
+                    } -SuccessOutput "Disabled System Memory Compression" -Module "Z7_Hardware"
                 } finally {
                     if ($smStart -eq 4) {
-                        Stop-Service -Name "SysMain" -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                        Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4
+                        Stop-UltixService -ServiceName "SysMain" -Module "Z7_Hardware"
+                        Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 -Module "Z7_Hardware"
                     }
                 }
             }
@@ -1659,12 +1753,11 @@ function Import-UltixHardwareSnapshot {
     $affList = @($ProfileData.AffinityLasso)
     if ($affList.Count -gt 0) {
         $affPath = "HKCU:\Software\WinUltix\AffinityLasso"
-        if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force | Out-Null }
 
         $affItems = [System.Collections.Generic.List[PSCustomObject]]::new()
         foreach ($exe in $affList) {
             if ([string]::IsNullOrWhiteSpace($exe)) { continue }
-            Set-ItemProperty -LiteralPath $affPath -Name $exe -Value 1 -Type DWord -Force
+            Set-UltixRegValue -Path $affPath -Name $exe -Value 1 -Type DWord -Module "Z7_Hardware"
             $affItems.Add([PSCustomObject]@{
                 ActionData = @{
                     ExeName  = [string]$exe
@@ -1707,8 +1800,16 @@ function Import-UltixHardwareSnapshot {
 
     if (@($hwLocks.GlobalNetwork).Count -gt 0) {
         foreach ($gNet in $hwLocks.GlobalNetwork) {
-            if ($gNet -match "RSS") { Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction SilentlyContinue }
-            if ($gNet -match "RSC") { Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction SilentlyContinue }
+            if ($gNet -match "RSS") {
+                Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled" -Action {
+                    Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction SilentlyContinue
+                } -SuccessOutput "Enabled Global TCP RSS" -Module "Z7_Hardware"
+            }
+            if ($gNet -match "RSC") {
+                Invoke-UltixStep -Command "Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled" -Action {
+                    Set-NetOffloadGlobalSetting -ReceiveSegmentCoalescing Disabled -ErrorAction SilentlyContinue
+                } -SuccessOutput "Disabled Global TCP RSC" -Module "Z7_Hardware"
+            }
         }
         Write-GUI " -> Enforced Global TCP RSS/RSC offload profile."
     }
@@ -1789,8 +1890,7 @@ function Show-AffinityModal {
         $exe = $txtCustom.Text.Trim()
         if ($exe -ne "" -and $exe -match "\.exe$") {
             $configPath = "HKCU:\Software\WinUltix\AffinityLasso"
-            if (-not (Test-Path $configPath)) { New-Item -Path $configPath -Force | Out-Null }
-            Set-ItemProperty -Path $configPath -Name $exe -Value 1 -Type DWord -Force | Out-Null
+            Set-UltixRegValue -Path $configPath -Name $exe -Value 1 -Type DWord -Module "Z7_Hardware"
             $txtCustom.Text = ""
             &$refreshData 
         } else { [System.Windows.Forms.MessageBox]::Show("Process must end with .exe", "Invalid Input") }
@@ -2121,6 +2221,34 @@ function Show-MsiModal {
 
     $sortSyncGuard = @{ SuppressCombo = $false }
 
+    $sortByLive1sLoad = ({
+        $listView.ListViewItemSorter = $null
+        $sorted1s = @($listView.Items | Sort-Object -Descending {
+            $m1s = [regex]::Match($_.SubItems[4].Text, '1s:\s*([0-9]+(?:\.[0-9]+)?)')
+            if ($m1s.Success) { [double]$m1s.Groups[1].Value } else { -1.0 }
+        }, {
+            $mMax = [regex]::Match($_.SubItems[4].Text, 'Max:\s*([0-9]+)')
+            if ($mMax.Success) { [double]$mMax.Groups[1].Value } else { 0.0 }
+        })
+
+        $orderChanged = ($sorted1s.Count -ne $listView.Items.Count)
+        if (-not $orderChanged) {
+            for ($idx = 0; $idx -lt $sorted1s.Count; $idx++) {
+                if (-not [object]::ReferenceEquals($sorted1s[$idx], $listView.Items[$idx])) {
+                    $orderChanged = $true
+                    break
+                }
+            }
+        }
+
+        if ($orderChanged) {
+            $listView.Items.Clear()
+            foreach ($si in $sorted1s) { [void]$listView.Items.Add($si) }
+        }
+        $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::None
+        $listView.ListViewItemSorter = $sorter
+    }.GetNewClosure())
+
     $applySortMode = ({
         $listView.BeginUpdate()
         switch ($comboSort.SelectedIndex) {
@@ -2132,11 +2260,11 @@ function Show-MsiModal {
                 $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::None
                 $listView.ListViewItemSorter = $sorter
             }
-            1 { $sorter.ColumnToSort = 3;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
-            2 { $sorter.ColumnToSort = 4;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
-            3 { $sorter.ColumnToSort = -1; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
-            4 { $sorter.ColumnToSort = 1;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
-            5 { $sorter.ColumnToSort = 2;  $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
+            1 { $sorter.ColumnToSort = 3; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
+            2 { $sorter.ColumnToSort = 4; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Descending; $listView.Sort() }
+            3 { & $sortByLive1sLoad }
+            4 { $sorter.ColumnToSort = 1; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
+            5 { $sorter.ColumnToSort = 2; $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending;  $listView.Sort() }
         }
         & $reapplyAllRowShading
         $listView.EndUpdate()
@@ -2159,6 +2287,8 @@ function Show-MsiModal {
             }
             & $reapplyAllRowShading
             $listView.EndUpdate()
+        } else {
+            & $applySortMode
         }
     }.GetNewClosure())
 
@@ -2332,6 +2462,8 @@ function Show-MsiModal {
         Label          = $lblDpcMonitor
         ListView       = $listView
         Sorter         = $sorter
+        ComboSort      = $comboSort
+        Sort1s         = $sortByLive1sLoad
         ChkKernel      = $chkShowKernel
         PciKeys        = $pciServiceKeys
         KernelCatalog  = $kernelRoleCatalog
@@ -2379,6 +2511,7 @@ function Show-MsiModal {
 
         $lv = $ctx.ListView
         $st = $ctx.Sorter
+        $cbSort = $ctx.ComboSort
         if ($null -ne $lv -and -not $lv.IsDisposed) {
             $existingKernelRows = @{}
             $addedKernelRow     = $false
@@ -2460,21 +2593,10 @@ function Show-MsiModal {
                 }
             }
 
-            if ($st.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None -and
-                ($st.ColumnToSort -in @(3, 4, -1) -or $addedKernelRow) -and
-                [System.Windows.Forms.Control]::MouseButtons -eq [System.Windows.Forms.MouseButtons]::None) {
-                $needsResort = $addedKernelRow
-                if (-not $needsResort) {
-                    for ($i = 0; $i -lt ($lv.Items.Count - 1); $i++) {
-                        if ($st.Compare($lv.Items[$i], $lv.Items[$i + 1]) -gt 0) {
-                            $needsResort = $true
-                            break
-                        }
-                    }
-                }
-                if ($needsResort) {
+            if ([System.Windows.Forms.Control]::MouseButtons -eq [System.Windows.Forms.MouseButtons]::None) {
+                if ($null -ne $cbSort -and $cbSort.SelectedIndex -eq 3 -and $null -ne $ctx.Sort1s) {
                     $lv.BeginUpdate()
-                    $lv.Sort()
+                    & $ctx.Sort1s
                     for ($r = 0; $r -lt $lv.Items.Count; $r++) {
                         $it  = $lv.Items[$r]
                         $dev = $it.Tag
@@ -2482,6 +2604,28 @@ function Show-MsiModal {
                         & $ctx.StyleRow $it $r $drvLookup[$svcKey]
                     }
                     $lv.EndUpdate()
+                } elseif ($st.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None -and
+                    ($st.ColumnToSort -in @(3, 4) -or $addedKernelRow)) {
+                    $needsResort = $addedKernelRow
+                    if (-not $needsResort) {
+                        for ($i = 0; $i -lt ($lv.Items.Count - 1); $i++) {
+                            if ($st.Compare($lv.Items[$i], $lv.Items[$i + 1]) -gt 0) {
+                                $needsResort = $true
+                                break
+                            }
+                        }
+                    }
+                    if ($needsResort) {
+                        $lv.BeginUpdate()
+                        $lv.Sort()
+                        for ($r = 0; $r -lt $lv.Items.Count; $r++) {
+                            $it  = $lv.Items[$r]
+                            $dev = $it.Tag
+                            $svcKey = if ($null -ne $dev -and $dev.ServiceName) { $dev.ServiceName.ToLowerInvariant() } else { "pci" }
+                            & $ctx.StyleRow $it $r $drvLookup[$svcKey]
+                        }
+                        $lv.EndUpdate()
+                    }
                 }
             }
         }
@@ -2496,12 +2640,19 @@ function Show-MsiModal {
     $btnSelRec.Add_Click({
         $ctx = $this.Tag
         $lv  = $ctx.ListView
+        $matchedRec = 0
         $lv.BeginUpdate()
         foreach ($lvItem in $lv.Items) {
             $dev = $lvItem.Tag
-            $lvItem.Checked = ($null -ne $dev -and $dev.IsKernelOnly -ne $true -and [bool]$dev.IsRecommendedOffload)
+            $shouldCheck = ($null -ne $dev -and $dev.IsKernelOnly -ne $true -and [bool]$dev.IsRecommendedOffload)
+            $lvItem.Checked = $shouldCheck
+            if ($shouldCheck) { $matchedRec++ }
         }
         $lv.EndUpdate()
+        if ($matchedRec -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("All primary GPU and Network controllers are already offloaded from Core 0.", "WinUltix - MSI & IRQ Enforcer") | Out-Null
+            return
+        }
         $ctx.ChkOffload.Checked = $true
         if ($ctx.ComboPrio.SelectedIndex -eq 0) { $ctx.ComboPrio.SelectedIndex = 1 }
     })
@@ -2542,8 +2693,7 @@ function Show-MsiModal {
             return
         }
         $changed = 0
-        $bRoot = "HKCU:\Software\WinUltix\MSI_Backup"
-        if (-not (Test-Path -LiteralPath $bRoot)) { New-Item -Path $bRoot -Force | Out-Null }
+        $bRoot = "HKLM:\SOFTWARE\WinUltix\MSI_Backup"
         $prioSelection = [string]$comboPrio.SelectedItem
         $doOffload     = $chkOffloadCore0.Checked
         [byte[]]$offloadBytes = if ($doOffload) { &$getOffloadMaskBytes } else { $null }
@@ -2558,51 +2708,52 @@ function Show-MsiModal {
             $devBackupKey = "$bRoot\$safeKey"
             
             if (-not (Test-Path -LiteralPath $devBackupKey)) {
-                New-Item -Path $devBackupKey -Force | Out-Null
-                Set-ItemProperty -LiteralPath $devBackupKey -Name "DeviceName" -Value ([string]$dev.RawDeviceName) -Type String -Force
+                Set-UltixRegValue -Path $devBackupKey -Name "DeviceName" -Value ([string]$dev.RawDeviceName) -Type String -Module "Z7_Hardware"
                 $oldMsi = (Get-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -ErrorAction SilentlyContinue).MSISupported
                 if ($null -eq $oldMsi) { $oldMsi = 255 }
-                Set-ItemProperty -LiteralPath $devBackupKey -Name "MSISupported" -Value $oldMsi -Type DWord -Force
+                Set-UltixRegValue -Path $devBackupKey -Name "MSISupported" -Value $oldMsi -Type DWord -Module "Z7_Hardware"
 
                 if (Test-Path -LiteralPath $affPath) {
-                    Set-ItemProperty -LiteralPath $devBackupKey -Name "AffinityKeyExisted" -Value 1 -Type DWord -Force
+                    Set-UltixRegValue -Path $devBackupKey -Name "AffinityKeyExisted" -Value 1 -Type DWord -Module "Z7_Hardware"
                     $affProps = Get-ItemProperty -LiteralPath $affPath -ErrorAction SilentlyContinue
                     $oldPrio  = if ($null -ne $affProps.InterruptPriority) { $affProps.InterruptPriority } else { 255 }
                     $oldPol   = if ($null -ne $affProps.DevicePolicy) { $affProps.DevicePolicy } else { 255 }
-                    Set-ItemProperty -LiteralPath $devBackupKey -Name "InterruptPriority" -Value $oldPrio -Type DWord -Force
-                    Set-ItemProperty -LiteralPath $devBackupKey -Name "DevicePolicy" -Value $oldPol -Type DWord -Force
+                    Set-UltixRegValue -Path $devBackupKey -Name "InterruptPriority" -Value $oldPrio -Type DWord -Module "Z7_Hardware"
+                    Set-UltixRegValue -Path $devBackupKey -Name "DevicePolicy" -Value $oldPol -Type DWord -Module "Z7_Hardware"
                     if ($null -ne $affProps.AssignmentSetOverride) {
-                        Set-ItemProperty -LiteralPath $devBackupKey -Name "AssignmentSetOverride" -Value ([byte[]]$affProps.AssignmentSetOverride) -Type Binary -Force
+                        Set-UltixRegValue -Path $devBackupKey -Name "AssignmentSetOverride" -Value ([byte[]]$affProps.AssignmentSetOverride) -Type Binary -Module "Z7_Hardware"
                     }
                 } else {
-                    Set-ItemProperty -LiteralPath $devBackupKey -Name "AffinityKeyExisted" -Value 0 -Type DWord -Force
+                    Set-UltixRegValue -Path $devBackupKey -Name "AffinityKeyExisted" -Value 0 -Type DWord -Module "Z7_Hardware"
                 }
             }
 
             $isStorageSpread = ($dev.DeviceRole -eq "Storage" -or $dev.DevicePolicy -eq 5)
 
             $applyBlock = {
-                Set-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Value 1 -Type DWord -Force -ErrorAction Stop | Out-Null
+                Set-UltixRegValue -Path $msiPath -Name "MSISupported" -Value 1 -Type DWord -Module "Z7_Hardware"
 
                 if ($prioSelection -ne "Keep Current") {
-                    if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force -ErrorAction Stop | Out-Null }
                     switch ($prioSelection) {
-                        "High (3)"            { Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value 3 -Type DWord -Force -ErrorAction Stop }
-                        "Normal (2)"          { Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value 2 -Type DWord -Force -ErrorAction Stop }
-                        "Low (1)"             { Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value 1 -Type DWord -Force -ErrorAction Stop }
-                        "Undefined (Default)" { Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Force -ErrorAction SilentlyContinue }
+                        "High (3)"            { Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value 3 -Type DWord -Module "Z7_Hardware" }
+                        "Normal (2)"          { Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value 2 -Type DWord -Module "Z7_Hardware" }
+                        "Low (1)"             { Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value 1 -Type DWord -Module "Z7_Hardware" }
+                        "Undefined (Default)" { Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware" }
                     }
                 }
 
                 # Protect Multi-Queue NVMe/SATA controllers from losing 'Spread' (DevicePolicy = 5)
-                if ($doOffload -and $null -ne $offloadBytes) {
-                    if ($isStorageSpread) {
-                        Write-GUI "    [*] Preserved Multi-Queue 'Spread' policy on storage controller: $($dev.RawDeviceName)"
-                    } else {
-                        if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force -ErrorAction Stop | Out-Null }
-                        Set-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Value 4 -Type DWord -Force -ErrorAction Stop
-                        Set-ItemProperty -LiteralPath $affPath -Name "AssignmentSetOverride" -Value $offloadBytes -Type Binary -Force -ErrorAction Stop
+                if ($isStorageSpread) {
+                    if ($dev.DevicePolicy -ne 5) {
+                        Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value 5 -Type DWord -Module "Z7_Hardware"
                     }
+                    Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
+                    if ($doOffload) {
+                        Write-GUI "    [*] Enforced/preserved Multi-Queue 'Spread' (DevicePolicy=5) on storage controller: $($dev.RawDeviceName)"
+                    }
+                } elseif ($doOffload -and $null -ne $offloadBytes) {
+                    Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value 4 -Type DWord -Module "Z7_Hardware"
+                    Set-UltixRegValue -Path $affPath -Name "AssignmentSetOverride" -Value $offloadBytes -Type Binary -Module "Z7_Hardware"
                 }
             }
 
@@ -2610,9 +2761,11 @@ function Show-MsiModal {
                 try {
                     & $applyBlock
                 } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
-                    Grant-UltixRegistryKeyAccess -RegistryPath $irqRoot
-                    Grant-UltixRegistryKeyAccess -RegistryPath $msiPath
-                    if (Test-Path -LiteralPath $affPath) { Grant-UltixRegistryKeyAccess -RegistryPath $affPath }
+                    Invoke-UltixStep -Command "Grant-UltixRegistryKeyAccess '$irqRoot'" -Action {
+                        Grant-UltixRegistryKeyAccess -RegistryPath $irqRoot
+                        Grant-UltixRegistryKeyAccess -RegistryPath $msiPath
+                        if (Test-Path -LiteralPath $affPath) { Grant-UltixRegistryKeyAccess -RegistryPath $affPath }
+                    } -SuccessOutput "Escalated TrustedInstaller ACL on PCI Interrupt Management" -Module "Z7_Hardware"
                     & $applyBlock
                 }
                 Write-GUI " -> Configured IRQ/MSI policy: $($dev.RawDeviceName)"
@@ -2632,7 +2785,8 @@ function Show-MsiModal {
             [System.Windows.Forms.MessageBox]::Show("Check the PCI device(s) you want to restore to factory defaults.", "WinUltix - Restore MSI State") | Out-Null
             return
         }
-        $bRoot = "HKCU:\Software\WinUltix\MSI_Backup"
+        $bRoot       = "HKLM:\SOFTWARE\WinUltix\MSI_Backup"
+        $legacyBRoot = "HKCU:\Software\WinUltix\MSI_Backup"
         foreach ($lvItem in $listView.CheckedItems) {
             $dev = $lvItem.Tag
             if ($null -eq $dev -or $dev.IsKernelOnly -eq $true) { continue }
@@ -2640,50 +2794,52 @@ function Show-MsiModal {
             $msiPath = $dev.ActionData.Path
             $affPath = $dev.ActionData.AffinityPath
             $safeKey = &$getSafeBackupKeyName $msiPath
-            $devBackupKey = "$bRoot\$safeKey"
+            $devBackupKey = if (Test-Path -LiteralPath "$bRoot\$safeKey") { "$bRoot\$safeKey" } elseif (Test-Path -LiteralPath "$legacyBRoot\$safeKey") { "$legacyBRoot\$safeKey" } else { "$bRoot\$safeKey" }
 
             $revertBlock = {
                 if (Test-Path -LiteralPath $devBackupKey) {
                     $bProps = Get-ItemProperty -LiteralPath $devBackupKey -ErrorAction SilentlyContinue
                     if ($null -ne $bProps.MSISupported) {
                         if ($bProps.MSISupported -eq 255 -or $bProps.MSISupported -eq -1) {
-                            Remove-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Force -ErrorAction SilentlyContinue
+                            Remove-UltixRegItem -Path $msiPath -Name "MSISupported" -IgnoreMissing -Module "Z7_Hardware"
                         } else {
-                            Set-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Value $bProps.MSISupported -Type DWord -Force -ErrorAction Stop
+                            Set-UltixRegValue -Path $msiPath -Name "MSISupported" -Value $bProps.MSISupported -Type DWord -Module "Z7_Hardware"
                         }
                     }
 
                     if ($bProps.AffinityKeyExisted -eq 0) {
-                        if (Test-Path -LiteralPath $affPath) { Remove-Item -LiteralPath $affPath -Recurse -Force -ErrorAction Stop }
+                        Remove-UltixRegItem -Path $affPath -IgnoreMissing -Module "Z7_Hardware"
                     } elseif (Test-Path -LiteralPath $affPath) {
                         if ($bProps.InterruptPriority -eq 255 -or $null -eq $bProps.InterruptPriority) {
-                            Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Force -ErrorAction SilentlyContinue
+                            Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware"
                         } else {
-                            Set-ItemProperty -LiteralPath $affPath -Name "InterruptPriority" -Value $bProps.InterruptPriority -Type DWord -Force -ErrorAction Stop
+                            Set-UltixRegValue -Path $affPath -Name "InterruptPriority" -Value $bProps.InterruptPriority -Type DWord -Module "Z7_Hardware"
                         }
 
                         if ($bProps.DevicePolicy -eq 255 -or $null -eq $bProps.DevicePolicy) {
-                            Remove-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Force -ErrorAction SilentlyContinue
+                            Remove-UltixRegItem -Path $affPath -Name "DevicePolicy" -IgnoreMissing -Module "Z7_Hardware"
                         } else {
-                            Set-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Value $bProps.DevicePolicy -Type DWord -Force -ErrorAction Stop
+                            Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value $bProps.DevicePolicy -Type DWord -Module "Z7_Hardware"
                         }
 
                         if ($null -ne $bProps.AssignmentSetOverride) {
-                            Set-ItemProperty -LiteralPath $affPath -Name "AssignmentSetOverride" -Value ([byte[]]$bProps.AssignmentSetOverride) -Type Binary -Force -ErrorAction Stop
+                            Set-UltixRegValue -Path $affPath -Name "AssignmentSetOverride" -Value ([byte[]]$bProps.AssignmentSetOverride) -Type Binary -Module "Z7_Hardware"
                         } else {
-                            Remove-ItemProperty -LiteralPath $affPath -Name "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
+                            Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
                         }
                     }
-                    Remove-Item -LiteralPath $devBackupKey -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-UltixRegItem -Path $devBackupKey -IgnoreMissing -Module "Z7_Hardware"
                 } elseif ($dev.DeviceRole -eq "Storage") {
                     # Factory state for modern NVMe/SATA controllers is MSI=1 + DevicePolicy=5 (Spread across all cores)
-                    Set-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -Value 1 -Type DWord -Force -ErrorAction Stop
-                    if (-not (Test-Path -LiteralPath $affPath)) { New-Item -Path $affPath -Force -ErrorAction Stop | Out-Null }
-                    Set-ItemProperty -LiteralPath $affPath -Name "DevicePolicy" -Value 5 -Type DWord -Force -ErrorAction Stop
-                    Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority", "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
+                    Set-UltixRegValue -Path $msiPath -Name "MSISupported" -Value 1 -Type DWord -Module "Z7_Hardware"
+                    Set-UltixRegValue -Path $affPath -Name "DevicePolicy" -Value 5 -Type DWord -Module "Z7_Hardware"
+                    Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware"
+                    Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
                 } else {
                     if (Test-Path -LiteralPath $affPath) {
-                        Remove-ItemProperty -LiteralPath $affPath -Name "InterruptPriority", "DevicePolicy", "AssignmentSetOverride" -Force -ErrorAction SilentlyContinue
+                        Remove-UltixRegItem -Path $affPath -Name "InterruptPriority" -IgnoreMissing -Module "Z7_Hardware"
+                        Remove-UltixRegItem -Path $affPath -Name "DevicePolicy" -IgnoreMissing -Module "Z7_Hardware"
+                        Remove-UltixRegItem -Path $affPath -Name "AssignmentSetOverride" -IgnoreMissing -Module "Z7_Hardware"
                     }
                 }
             }
@@ -2692,9 +2848,11 @@ function Show-MsiModal {
                 try {
                     & $revertBlock
                 } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
-                    Grant-UltixRegistryKeyAccess -RegistryPath $irqRoot
-                    Grant-UltixRegistryKeyAccess -RegistryPath $msiPath
-                    if (Test-Path -LiteralPath $affPath) { Grant-UltixRegistryKeyAccess -RegistryPath $affPath }
+                    Invoke-UltixStep -Command "Grant-UltixRegistryKeyAccess '$irqRoot'" -Action {
+                        Grant-UltixRegistryKeyAccess -RegistryPath $irqRoot
+                        Grant-UltixRegistryKeyAccess -RegistryPath $msiPath
+                        if (Test-Path -LiteralPath $affPath) { Grant-UltixRegistryKeyAccess -RegistryPath $affPath }
+                    } -SuccessOutput "Escalated TrustedInstaller ACL on PCI Interrupt Management" -Module "Z7_Hardware"
                     & $revertBlock
                 }
                 Write-GUI " -> Reverted IRQ/MSI state to factory defaults: $($dev.RawDeviceName)"
@@ -2726,6 +2884,7 @@ function Show-MsiModal {
         [void]$modal.ShowDialog($global:form)
     } finally {
         $dpcTimer.Stop()
+        $dpcTimer.Tag = $null
         $dpcTimer.Dispose()
         try { [WinUltix.DpcDriverProfiler]::Stop() } catch { }
         $modal.Dispose()
@@ -3012,18 +3171,18 @@ function Show-TimerModal {
     $btnRevert.Anchor = 'Bottom, Left'
     $btnRevert.Add_Click({
         $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
-        Remove-ItemProperty -LiteralPath $regPath -Name "GlobalTimerResolutionRequests" -ErrorAction SilentlyContinue | Out-Null
+        Remove-UltixRegItem -Path $regPath -Name "GlobalTimerResolutionRequests" -IgnoreMissing -Module "Z7_Hardware"
         
-        $null = & bcdedit.exe /deletevalue "{current}" disabledynamictick 2>&1
-        $null = & bcdedit.exe /deletevalue "{current}" useplatformclock 2>&1
-        $null = & bcdedit.exe /deletevalue "{current}" useplatformtick 2>&1
+        $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "disabledynamictick") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "useplatformclock") -Module "Z7_Hardware"
+        $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "useplatformtick") -Module "Z7_Hardware"
         
         $hpetRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\ACPI\PNP0103"
         if (Test-Path -LiteralPath $hpetRoot) {
             foreach ($sub in (Get-ChildItem -LiteralPath $hpetRoot -ErrorAction SilentlyContinue)) {
                 $hpetId = "ACPI\PNP0103\$($sub.PSChildName)"
                 if ([WinUltix.PnpTree]::IsDeviceDisabled($hpetId)) {
-                    $null = & pnputil.exe /enable-device "$hpetId" 2>&1
+                    $null = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/enable-device", "$hpetId") -Module "Z7_Hardware"
                 }
             }
         }
@@ -3037,13 +3196,17 @@ function Show-TimerModal {
     $btnTestPulse.Anchor = 'Bottom, Left'
     $btnTestPulse.Add_Click({
         if (-not $testLockState.IsLocked) {
-            [void][WinUltix.NtDll]::SetTimerResolution(5000, $true)
+            Invoke-UltixStep -Command "[WinUltix.NtDll]::SetTimerResolution(5000, `$true)" -Action {
+                [void][WinUltix.NtDll]::SetTimerResolution(5000, $true)
+            } -SuccessOutput "Engaged 0.5ms (5000 x 100ns) kernel timer lock" -Module "Z7_Hardware"
             $testLockState.IsLocked = $true
             $this.Text = "Stop 0.5ms Test"
             $this.BackColor = [System.Drawing.Color]::FromArgb(255, 160, 90, 40)
             Write-GUI " -> Engaged live NtSetTimerResolution(5000) 0.5ms kernel clock test."
         } else {
-            [void][WinUltix.NtDll]::SetTimerResolution(5000, $false)
+            Invoke-UltixStep -Command "[WinUltix.NtDll]::SetTimerResolution(5000, `$false)" -Action {
+                [void][WinUltix.NtDll]::SetTimerResolution(5000, $false)
+            } -SuccessOutput "Released 0.5ms kernel timer lock" -Module "Z7_Hardware"
             $testLockState.IsLocked = $false
             $this.Text = "Test 0.5ms Lock"
             $this.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 110, 65)
@@ -3065,7 +3228,9 @@ function Show-TimerModal {
         [void]$modal.ShowDialog($global:form)
     } finally {
         if ($testLockState.IsLocked) {
-            [void][WinUltix.NtDll]::SetTimerResolution(5000, $false)
+            Invoke-UltixStep -Command "[WinUltix.NtDll]::SetTimerResolution(5000, `$false)" -Action {
+                [void][WinUltix.NtDll]::SetTimerResolution(5000, $false)
+            } -SuccessOutput "Released 0.5ms kernel timer lock on modal close" -Module "Z7_Hardware"
             Write-GUI " -> Released 0.5ms kernel clock test lock (Modal closed)."
         }
         $timerPoll.Stop()
@@ -3137,15 +3302,20 @@ function Show-NVMeModal {
         $modal.UseWaitCursor = $true
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
         try {
-            Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters" -Name "DisableASPM" -Force -ErrorAction SilentlyContinue | Out-Null
-            Remove-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device" -Name "IdlePowerMode" -Force -ErrorAction SilentlyContinue | Out-Null
+            Remove-UltixRegItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters" -Name "DisableASPM" -IgnoreMissing -Module "Z7_Hardware"
+            Remove-UltixRegItem -Path "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device" -Name "IdlePowerMode" -IgnoreMissing -Module "Z7_Hardware"
             $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
             $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
-            if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 }
+            if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 3 -Module "Z7_Hardware" }
             try {
-                Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+                Invoke-UltixStep -Command "Enable-MMAgent -MemoryCompression" -Action {
+                    Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+                } -SuccessOutput "Restored System Memory Compression" -Module "Z7_Hardware"
             } finally {
-                if ($smStart -eq 4) { Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 }
+                if ($smStart -eq 4) {
+                    Stop-UltixService -ServiceName "SysMain" -Module "Z7_Hardware"
+                    Set-ProtectedServiceStart -ServiceName "SysMain" -StartValue 4 -Module "Z7_Hardware"
+                }
             }
         } finally {
             $modal.UseWaitCursor = $false
@@ -3363,7 +3533,7 @@ if (`$res -eq "Yes") {
         `$d  = Get-Pcfg '4b92d758-5a24-4851-a470-815d78aee119'
         `$pr = Get-Pcfg '7b224883-b3cc-4d79-819f-8374152cbe7c'
         
-        if (`$null -ne `$e -and -not (`$e -eq 0 -and `$d -eq 100 -and `$pr -eq 100) -and -not (`$e -eq 0 -and `$d -eq 0 -and `$pr -eq 0)) {
+        if (`$null -ne `$e -and `$null -ne `$d -and `$null -ne `$pr -and -not (`$e -eq 0 -and `$d -eq 100 -and `$pr -eq 100) -and -not (`$e -eq 0 -and `$d -eq 0 -and `$pr -eq 0)) {
             Set-ItemProperty -LiteralPath `$p -Name 'EPP' -Value `$e -Type DWord -Force
             Set-ItemProperty -LiteralPath `$p -Name 'Demote' -Value `$d -Type DWord -Force
             Set-ItemProperty -LiteralPath `$p -Name 'Promote' -Value `$pr -Type DWord -Force
@@ -3421,16 +3591,20 @@ if (`$res -eq "Yes") {
 "@
 
     try {
-        Set-Content -LiteralPath $ps1Path -Value $code -Encoding UTF8 -ErrorAction Stop
-        $desktop  = [Environment]::GetFolderPath("Desktop")
-        $WshShell = New-Object -ComObject WScript.Shell -ErrorAction Stop
-        $Shortcut = $WshShell.CreateShortcut("$desktop\WinUltix Pre-Flight Mode.lnk")
-        $Shortcut.TargetPath = "powershell.exe"
-        $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1Path`""
-        $Shortcut.WindowStyle = 7
-        $Shortcut.IconLocation = if (Test-Path -LiteralPath $icoPath) { "$icoPath, 0" } else { "shell32.dll, 137" }
-        $Shortcut.Save()
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($WshShell)
+        $desktop = [Environment]::GetFolderPath("Desktop")
+        $lnkPath = "$desktop\WinUltix Pre-Flight Mode.lnk"
+        Invoke-UltixStep -Command "New-PreFlightShortcut '$lnkPath'" -Action {
+            Set-Content -LiteralPath $ps1Path -Value $code -Encoding UTF8 -ErrorAction Stop
+            $WshShell = New-Object -ComObject WScript.Shell -ErrorAction Stop
+            $Shortcut = $WshShell.CreateShortcut($lnkPath)
+            $Shortcut.TargetPath = "powershell.exe"
+            $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1Path`""
+            $Shortcut.WindowStyle = 7
+            $Shortcut.IconLocation = if (Test-Path -LiteralPath $icoPath) { "$icoPath, 0" } else { "shell32.dll, 137" }
+            $Shortcut.Save()
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Shortcut)
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($WshShell)
+        } -SuccessOutput "Generated PreFlight.ps1 & Desktop shortcut ($($topo.Label))" -Module "Z7_Hardware"
         
         Write-GUI " -> Generated Pre-Flight shortcut on Desktop ($($topo.Label))."
         [System.Windows.Forms.MessageBox]::Show("Pre-Flight Shortcut generated on Desktop.", "Success")
@@ -3443,319 +3617,424 @@ if (`$res -eq "Yes") {
 # Z7: USB XHCI ROOT-HUB TOPOLOGY & HID POLLING MAPPER
 # ------------------------------------------
 function Get-UsbTopologyMap {
-    param([switch]$IncludeRawHubs)
+    param([bool]$IncludeRawHubs = $false)
 
     $controllers = [System.Collections.Generic.List[PSCustomObject]]::new()
-    [int64[]]$coreMasks = Get-UltixPhysicalCoreMasks
-    [uint64]$core0Mask  = if ($coreMasks.Count -ge 1) { [uint64]$coreMasks[0] } else { 3 }
-    [uint64]$core1Mask  = if ($coreMasks.Count -ge 2) { [uint64]$coreMasks[1] } else { 12 }
+    $nativeCores = @([WinUltix.CpuTopology]::GetProcessorCores())
+    [int64[]]$coreMasks = if ($nativeCores.Count -gt 0) {
+        @($nativeCores | ForEach-Object { [int64]$_.Mask })
+    } else {
+        @([int64]3, [int64]12)
+    }
+    [uint64]$core0Mask = if ($coreMasks.Count -ge 1) { [BitConverter]::ToUInt64([BitConverter]::GetBytes([int64]$coreMasks[0]), 0) } else { 3 }
+    [uint64]$core1Mask = if ($coreMasks.Count -ge 2) { [BitConverter]::ToUInt64([BitConverter]::GetBytes([int64]$coreMasks[1]), 0) } else { 12 }
 
-    $pciRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\PCI"
-    if (-not (Test-Path -LiteralPath $pciRoot)) { return @() }
+    $pciRoot  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum\PCI", $false)
+    $enumRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Enum", $false)
+    if ($null -eq $pciRoot) {
+        if ($null -ne $enumRoot) { $enumRoot.Dispose() }
+        return @()
+    }
 
-    foreach ($venKey in (Get-ChildItem -LiteralPath $pciRoot -ErrorAction SilentlyContinue)) {
-        foreach ($instKey in (Get-ChildItem -LiteralPath $venKey.PSPath -ErrorAction SilentlyContinue)) {
-            $props = Get-ItemProperty -LiteralPath $instKey.PSPath -Name "Service", "FriendlyName", "DeviceDesc", "LocationInformation" -ErrorAction SilentlyContinue
-            if ($null -eq $props -or $props.Service -notmatch '^(?i)(USBXHCI|USB4|usbehci)$') { continue }
+    try {
+        foreach ($venName in $pciRoot.GetSubKeyNames()) {
+            $venKey = $pciRoot.OpenSubKey($venName, $false)
+            if ($null -eq $venKey) { continue }
+            try {
+                foreach ($instName in $venKey.GetSubKeyNames()) {
+                    $instKey = $venKey.OpenSubKey($instName, $false)
+                    if ($null -eq $instKey) { continue }
+                    try {
+                        $svcVal = [string]$instKey.GetValue("Service", "")
+                        if ($svcVal -notmatch '^(?i)(USBXHCI|USB4|usbehci)$') { continue }
 
-            $instanceId = "PCI\$($venKey.PSChildName)\$($instKey.PSChildName)"
-            if ([WinUltix.PnpTree]::GetDeviceConfigStatus($instanceId) -ne 0) { continue }
-            $rawCtrlName = if ([string]$props.DeviceDesc -match '^@usbxhci\.inf,') { $props.DeviceDesc } elseif ($props.FriendlyName) { $props.FriendlyName } else { $props.DeviceDesc }
-            $ctrlName    = Format-UltixDeviceName -RawName $rawCtrlName
+                        $instanceId = "PCI\$venName\$instName"
+                        if ([WinUltix.PnpTree]::GetDeviceConfigStatus($instanceId) -ne 0) { continue }
 
-            $parents = @([WinUltix.PnpTree]::GetParentChain($instanceId))
-            $pciBridgeHops = @($parents | Where-Object { $_ -like "PCI\*" }).Count
+                        $rawDescAttr = [string]$instKey.GetValue("DeviceDesc", "")
+                        $rawFriendly = [string]$instKey.GetValue("FriendlyName", "")
+                        $rawCtrlName = if ($rawDescAttr -match '^@usbxhci\.inf,') { $rawDescAttr } elseif (-not [string]::IsNullOrWhiteSpace($rawFriendly)) { $rawFriendly } else { $rawDescAttr }
+                        $ctrlName    = Format-UltixDeviceName -RawName $rawCtrlName
 
-            $routingBadge = if ($venKey.PSChildName -match 'DEV_43[A-F0-9]{2}' -or $ctrlName -match '(?i)Chipset') {
-                if ($pciBridgeHops -ge 3) { "[CHIPSET PCH (Daisy-Chained / $pciBridgeHops Hops)]" }
-                else { "[CHIPSET PCH ($pciBridgeHops PCIe Hops)]" }
-            } elseif ($pciBridgeHops -le 1) {
-                "[CPU DIRECT SoC LANES (1 PCIe Hop - Lowest Latency)]"
-            } else {
-                "[SECONDARY BRIDGE ($pciBridgeHops PCIe Hops)]"
-            }
+                        $parents = @([WinUltix.PnpTree]::GetParentChain($instanceId))
+                        $pciBridgeHops = @($parents | Where-Object { $_ -like "PCI\*" }).Count
 
-            $msiPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
-            $affPath = "$($instKey.PSPath)\Device Parameters\Interrupt Management\Affinity Policy"
-            $msiOn   = ((Get-ItemProperty -LiteralPath $msiPath -Name "MSISupported" -ErrorAction SilentlyContinue).MSISupported -eq 1)
-            $affProps = Get-ItemProperty -LiteralPath $affPath -ErrorAction SilentlyContinue
-            $irqTag  = "Core 0 (Default)"
-            if ($null -ne $affProps -and $affProps.DevicePolicy -eq 4 -and $null -ne $affProps.AssignmentSetOverride) {
-                [uint64]$mVal = 0
-                for ($b = 0; $b -lt [math]::Min(8, $affProps.AssignmentSetOverride.Length); $b++) {
-                    $mVal = $mVal -bor ([uint64]$affProps.AssignmentSetOverride[$b] -shl ($b * 8))
-                }
-                $cHint = if ($mVal -eq $core1Mask) { " (C1 Offloaded)" } elseif (($mVal -band $core0Mask) -ne 0) { " (C0)" } else { "" }
-                $irqTag = "0x$($mVal.ToString('X'))$cHint"
-            }
-
-            $descendants  = @([WinUltix.PnpTree]::GetDescendants($instanceId))
-            $endpoints    = [System.Collections.Generic.List[PSCustomObject]]::new()
-            $hubNames     = [System.Collections.Generic.List[string]]::new()
-            $hasMouse     = $false
-            $hasAudio     = $false
-            $hasStorage   = $false
-            $hasVr        = $false
-            $mouseLabel   = ""
-            $conflictList = [System.Collections.Generic.List[string]]::new()
-
-            $rootHubInfo  = $null
-            $hubSpeedMap  = @{}
-            $physDevices  = [System.Collections.Generic.List[PSCustomObject]]::new()
-            $currentPhys  = $null
-
-            foreach ($entry in $descendants) {
-                $parts = $entry -split '\|', 2
-                $depth = [int]$parts[0]
-                $devId = $parts[1]
-
-                # Purge stale hub speed maps from deeper or sibling DFS branches
-                foreach ($staleDepth in @($hubSpeedMap.Keys)) {
-                    if ($staleDepth -ge $depth) {
-                        [void]$hubSpeedMap.Remove($staleDepth)
-                    }
-                }
-
-                if ($devId -match '^USB\\ROOT_HUB') {
-                    $rootHubInfo = [WinUltix.UsbProberV2]::ProbeHub($devId)
-                    $hubSpeedMap[$depth] = $rootHubInfo.PortSpeeds
-                    continue
-                }
-
-                # Ignore virtual Bluetooth enumerator (BTHENUM\*) and SoftwareDevice (SWD\*) child nodes
-                if ($devId -match '^(?i)(BTHENUM|BTHLE|SWD|MMDEVAPI)\\') { continue }
-
-                $regNode = "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId"
-                $dProps  = Get-ItemProperty -LiteralPath $regNode -Name "FriendlyName", "DeviceDesc", "Service", "Class", "Address", "LocationInformation" -ErrorAction SilentlyContinue
-                if ($null -eq $dProps) { continue }
-
-                $rawDName = if ([string]$dProps.DeviceDesc -match '^@(usb|input|keyboard|msmouse|usbhub3|hidclass|hidserv)\.inf,') { $dProps.DeviceDesc } elseif ($dProps.FriendlyName) { $dProps.FriendlyName } else { $dProps.DeviceDesc }
-                $dName    = Format-UltixDeviceName -RawName $rawDName
-                $dSvc     = [string]$dProps.Service
-                $dCls     = [string]$dProps.Class
-                $busDesc  = [WinUltix.UsbProberV2]::GetBusReportedDesc($devId)
-
-                if ($dSvc -match '^(?i)(USBHUB3|usbhub)$') {
-                    $subHub = [WinUltix.UsbProberV2]::ProbeHub($devId)
-                    $hubSpeedMap[$depth] = $subHub.PortSpeeds
-                }
-
-                $parentHubDepth = $depth - 1
-                $isDirectChildOfHub = $hubSpeedMap.ContainsKey($parentHubDepth)
-                $isPhysicalUsbNode  = (
-                    $isDirectChildOfHub -and
-                    $devId -match '^USB\\(?!ROOT_HUB)[^\\]+\\[^\\]+$' -and
-                    $devId -notmatch '(?i)&MI_' -and
-                    (-not [string]::IsNullOrWhiteSpace($dSvc))
-                )
-
-                if ($isPhysicalUsbNode) {
-                    $portNum = if ($null -ne $dProps.Address -and $dProps.Address -gt 0) {
-                        [int]$dProps.Address
-                    } elseif ($dProps.LocationInformation -match 'Port_#0*(\d+)') {
-                        [int]$matches[1]
-                    } else { 0 }
-
-                    $negSpeed = ""
-                    if ($portNum -gt 0 -and $hubSpeedMap[$parentHubDepth].ContainsKey($portNum)) {
-                        $negSpeed = $hubSpeedMap[$parentHubDepth][$portNum]
-                    }
-
-                    $currentPhys = [PSCustomObject]@{
-                        Depth       = $depth
-                        DevId       = $devId
-                        PortNumber  = $portNum
-                        LinkSpeed   = $negSpeed
-                        BusName     = $busDesc
-                        BaseName    = $dName
-                        BaseService = $dSvc
-                        BaseClass   = $dCls
-                        Children    = [System.Collections.Generic.List[PSCustomObject]]::new()
-                    }
-                    $physDevices.Add($currentPhys)
-                } elseif ($null -ne $currentPhys -and $depth -gt $currentPhys.Depth) {
-                    $currentPhys.Children.Add([PSCustomObject]@{
-                        Depth   = $depth
-                        DevId   = $devId
-                        Name    = $dName
-                        BusName = $busDesc
-                        Service = $dSvc
-                        Class   = $dCls
-                    })
-                }
-            }
-
-            foreach ($phys in $physDevices) {
-                $deviceNodes = @([PSCustomObject]@{ DevId = $phys.DevId; Name = $phys.BaseName; BusName = $phys.BusName; Service = $phys.BaseService; Class = $phys.BaseClass }) + @($phys.Children)
-
-                $bestName = $phys.BusName
-                if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Receiver|USB Composite Device|Generic|USB Input Device|HID-compliant)') {
-                    foreach ($n in $deviceNodes) {
-                        if (-not [string]::IsNullOrWhiteSpace($n.BusName) -and $n.BusName -notmatch '^(?i)(USB Receiver|USB Composite Device|Generic|USB Input Device)') {
-                            $bestName = $n.BusName
-                            break
+                        $routingBadge = if ($venName -match 'DEV_43[A-F0-9]{2}' -or $ctrlName -match '(?i)Chipset') {
+                            if ($pciBridgeHops -ge 3) { "[CHIPSET PCH (Daisy-Chained / $pciBridgeHops Hops)]" }
+                            else { "[CHIPSET PCH ($pciBridgeHops PCIe Hops)]" }
+                        } elseif ($venName -match 'VEN_8086' -and $pciBridgeHops -eq 0 -and $ctrlName -notmatch '(?i)(USB4|Thunderbolt)') {
+                            "[INTEL PCH INTEGRATED (DMI Link - 0 Bridge Hops)]"
+                        } elseif ($pciBridgeHops -le 1) {
+                            $hopTxt = if ($pciBridgeHops -eq 1) { "1 PCIe Hop" } else { "0 Bridge Hops" }
+                            "[CPU DIRECT SoC LANES ($hopTxt - Lowest Latency)]"
+                        } else {
+                            "[SECONDARY / PCH BRIDGE ($pciBridgeHops PCIe Hops)]"
                         }
-                    }
-                }
-                if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Composite Device|Generic|USB Input Device|HID-compliant)') {
-                    foreach ($n in $deviceNodes) {
-                        if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|USB Input Device|HID Keyboard Device|HID-compliant|Generic)') {
-                            $bestName = $n.Name
-                            break
+
+                        $msiOn = $false
+                        $msiKey = $instKey.OpenSubKey("Device Parameters\Interrupt Management\MessageSignaledInterruptProperties", $false)
+                        if ($null -ne $msiKey) {
+                            try { $msiOn = ($msiKey.GetValue("MSISupported", $null) -eq 1) } finally { $msiKey.Dispose() }
                         }
-                    }
-                }
-                if ([string]::IsNullOrWhiteSpace($bestName)) { $bestName = $phys.BaseName }
 
-                $role      = "[USB DEVICE]"
-                $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { $phys.BaseClass }
-
-                $isStorage    = $false; $isCardReader = $false; $isAudio = $false; $isVr = $false; $isCam = $false; $isBt = $false; $isHub = $false
-                $isOnboardMcu = ($bestName -match '(?i)(AURA\s*LED|Mystic\s*Light|RGB\s*Fusion|Polychrome|ITE\s*Device|Nuvoton)')
-                $isWirelessRx = ($bestName -match '(?i)(Receiver|Lightspeed|HyperSpeed|Dongle|2\.4G|Unifying|Bolt)')
-                $hasMou       = $false; $hasKbd = $false
-                $mi00IsKbd    = $false; $mi00IsMou = $false
-
-                if ($phys.BaseClass -eq "Bluetooth" -or $phys.BaseService -match '^(?i)(BTHUSB|BTHMINI|ibtusb|BtFilter|RtkBtFilter)$' -or $bestName -match '(?i)\b(BT|Bluetooth)\b') {
-                    $isBt = $true
-                    $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { "BTHUSB" }
-                }
-
-                foreach ($n in $deviceNodes) {
-                    if ($isBt) { break }
-                    if ($n.Service -match '^(?i)(AmUStor|rtsuer)$' -or $bestName -match '(?i)Card\s*Reader') {
-                        $isCardReader = $true
-                        if ($n.Service) { $activeSvc = $n.Service }
-                    }
-                    elseif ($n.Service -match '^(?i)(USBSTOR|UASPStor)$' -or $n.Class -eq "DiskDrive") {
-                        $isStorage = $true
-                        if ($n.Service -match '^(?i)(USBSTOR|UASPStor)$') { $activeSvc = $n.Service }
-                    }
-                    elseif ($n.Class -eq "Bluetooth" -or $n.Service -match '^(?i)(BTHUSB|BTHMINI|ibtusb)$') {
-                        $isBt = $true
-                        $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { "BTHUSB" }
-                    }
-                    elseif ($n.Class -eq "Media" -or $n.Service -match '^(?i)(usbaudio|usbaudio2|iFiUsbAudio)' -or $n.Name -match '(?i)(DAC|iFi|Audio|Headset|Microphone|Sound)') {
-                        if ($n.Class -ne "AudioEndpoint" -and $n.Class -ne "SoftwareDevice") {
-                            $isAudio = $true
-                            if ($n.Service) { $activeSvc = $n.Service }
+                        $irqTag = "Core 0 (Default)"
+                        $affKey = $instKey.OpenSubKey("Device Parameters\Interrupt Management\Affinity Policy", $false)
+                        if ($null -ne $affKey) {
+                            try {
+                                $devPol = $affKey.GetValue("DevicePolicy", $null)
+                                $rawMaskObj = $affKey.GetValue("AssignmentSetOverride", $null)
+                                if ($devPol -eq 4 -and $null -ne $rawMaskObj) {
+                                    [uint64]$mVal = 0
+                                    if ($rawMaskObj -is [byte[]]) {
+                                        for ($b = 0; $b -lt [math]::Min(8, $rawMaskObj.Length); $b++) {
+                                            $mVal = $mVal -bor ([uint64]$rawMaskObj[$b] -shl ($b * 8))
+                                        }
+                                    } elseif ($rawMaskObj -is [int] -or $rawMaskObj -is [long] -or $rawMaskObj -is [uint32] -or $rawMaskObj -is [uint64]) {
+                                        $mVal = [BitConverter]::ToUInt64([BitConverter]::GetBytes([int64]$rawMaskObj), 0)
+                                    }
+                                    if ($mVal -gt 0) {
+                                        $cHint = if ($mVal -eq $core1Mask) { " (C1 Offloaded)" } elseif (($mVal -band $core0Mask) -ne 0) { " (C0)" } else { "" }
+                                        $irqTag = "0x$($mVal.ToString('X'))$cHint"
+                                    }
+                                }
+                            } finally {
+                                $affKey.Dispose()
+                            }
                         }
+
+                        $descendants  = @([WinUltix.PnpTree]::GetDescendants($instanceId))
+                        $endpoints    = [System.Collections.Generic.List[PSCustomObject]]::new()
+                        $hubNames     = [System.Collections.Generic.List[string]]::new()
+                        $hasMouse            = $false
+                        $hasAudio            = $false
+                        $hasStorage          = $false
+                        $hasVr               = $false
+                        $hasThrottledStorage = $false
+                        $throttledLabel      = ""
+                        $mouseLabel          = ""
+                        $conflictList        = [System.Collections.Generic.List[string]]::new()
+                        $seenEpKeys          = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+                        $rootHubInfo  = $null
+                        $hubSpeedMap  = @{}
+                        $physDevices  = [System.Collections.Generic.List[PSCustomObject]]::new()
+                        $currentPhys  = $null
+
+                        foreach ($entry in $descendants) {
+                            $parts = $entry -split '\|', 2
+                            if ($parts.Count -lt 2) { continue }
+                            $depth = [int]$parts[0]
+                            $devId = $parts[1]
+
+                            foreach ($staleDepth in @($hubSpeedMap.Keys)) {
+                                if ($staleDepth -ge $depth) {
+                                    [void]$hubSpeedMap.Remove($staleDepth)
+                                }
+                            }
+
+                            if ($devId -match '^(?i)(BTHENUM|BTHLE|SWD|MMDEVAPI)\\') { continue }
+                            if ([WinUltix.PnpTree]::GetDeviceConfigStatus($devId) -ne 0) { continue }
+
+                            if ($devId -match '^USB\\ROOT_HUB') {
+                                $rootHubInfo = [WinUltix.UsbProberV2]::ProbeHub($devId)
+                                $hubSpeedMap[$depth] = if ($null -ne $rootHubInfo -and $null -ne $rootHubInfo.PortSpeeds) { $rootHubInfo.PortSpeeds } else { @{} }
+                                continue
+                            }
+
+                            if ($null -eq $enumRoot) { continue }
+                            $dKey = $enumRoot.OpenSubKey($devId, $false)
+                            if ($null -eq $dKey) { continue }
+
+                            $dRawDesc = ""
+                            $dFriend  = ""
+                            $dSvc     = ""
+                            $dCls     = ""
+                            $dLoc     = ""
+                            $dAddrObj = $null
+                            try {
+                                $dRawDesc = [string]$dKey.GetValue("DeviceDesc", "")
+                                $dFriend  = [string]$dKey.GetValue("FriendlyName", "")
+                                $dSvc     = [string]$dKey.GetValue("Service", "")
+                                $dCls     = [string]$dKey.GetValue("Class", "")
+                                $dLoc     = [string]$dKey.GetValue("LocationInformation", "")
+                                $dAddrObj = $dKey.GetValue("Address", $null)
+                            } finally {
+                                $dKey.Dispose()
+                            }
+
+                            $rawDName = if ($dRawDesc -match '^@(usb|input|keyboard|msmouse|usbhub3|hidclass|hidserv)\.inf,') { $dRawDesc } elseif (-not [string]::IsNullOrWhiteSpace($dFriend)) { $dFriend } else { $dRawDesc }
+                            $dName    = Format-UltixDeviceName -RawName $rawDName
+                            $busDesc  = if ($devId -match '^USB\\') { [WinUltix.UsbProberV2]::GetBusReportedDesc($devId) } else { "" }
+
+                            if ($dSvc -match '^(?i)(USBHUB3|usbhub)$') {
+                                $subHub = [WinUltix.UsbProberV2]::ProbeHub($devId)
+                                $hubSpeedMap[$depth] = if ($null -ne $subHub -and $null -ne $subHub.PortSpeeds) { $subHub.PortSpeeds } else { @{} }
+                            }
+
+                            $parentHubDepth = $depth - 1
+                            $isDirectChildOfHub = $hubSpeedMap.ContainsKey($parentHubDepth)
+                            $isPhysicalUsbNode  = (
+                                $isDirectChildOfHub -and
+                                $devId -match '^USB\\(?!ROOT_HUB)[^\\]+\\[^\\]+$' -and
+                                $devId -notmatch '(?i)&MI_' -and
+                                (-not [string]::IsNullOrWhiteSpace($dSvc))
+                            )
+
+                            if ($isPhysicalUsbNode) {
+                                $rawAddr = 0L
+                                if ($null -ne $dAddrObj) {
+                                    try { $rawAddr = [int64]$dAddrObj } catch { $rawAddr = 0L }
+                                }
+                                $portNum = if ($rawAddr -ge 1 -and $rawAddr -le 255) {
+                                    [int]$rawAddr
+                                } elseif ($dLoc -match 'Port_#0*(\d+)') {
+                                    [int]$matches[1]
+                                } else { 0 }
+
+                                $negSpeed = ""
+                                $parentSpeedTable = $hubSpeedMap[$parentHubDepth]
+                                if ($portNum -gt 0 -and $null -ne $parentSpeedTable -and $parentSpeedTable.ContainsKey($portNum)) {
+                                    $negSpeed = [string]$parentSpeedTable[$portNum]
+                                }
+
+                                $currentPhys = [PSCustomObject]@{
+                                    Depth       = $depth
+                                    DevId       = $devId
+                                    PortNumber  = $portNum
+                                    LinkSpeed   = $negSpeed
+                                    BusName     = $busDesc
+                                    BaseName    = $dName
+                                    BaseService = $dSvc
+                                    BaseClass   = $dCls
+                                    Children    = [System.Collections.Generic.List[PSCustomObject]]::new()
+                                }
+                                $physDevices.Add($currentPhys)
+                            } elseif ($null -ne $currentPhys -and $depth -gt $currentPhys.Depth) {
+                                $currentPhys.Children.Add([PSCustomObject]@{
+                                    Depth   = $depth
+                                    DevId   = $devId
+                                    Name    = $dName
+                                    BusName = $busDesc
+                                    Service = $dSvc
+                                    Class   = $dCls
+                                })
+                            }
+                        }
+
+                        foreach ($phys in $physDevices) {
+                            $deviceNodes = @([PSCustomObject]@{ DevId = $phys.DevId; Name = $phys.BaseName; BusName = $phys.BusName; Service = $phys.BaseService; Class = $phys.BaseClass }) + @($phys.Children)
+
+                            $bestName = $phys.BusName
+                            if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Receiver|USB Composite Device|Generic|USB Input Device|HID-compliant)') {
+                                foreach ($n in $deviceNodes) {
+                                    if (-not [string]::IsNullOrWhiteSpace($n.BusName) -and $n.BusName -notmatch '^(?i)(USB Receiver|USB Composite Device|Generic|USB Input Device)') {
+                                        $bestName = $n.BusName
+                                        break
+                                    }
+                                }
+                            }
+                            if ([string]::IsNullOrWhiteSpace($bestName) -or $bestName -match '^(?i)(USB Composite Device|Generic|USB Input Device|HID-compliant)') {
+                                foreach ($n in $deviceNodes) {
+                                    if (-not [string]::IsNullOrWhiteSpace($n.Name) -and $n.Name -notmatch '^(?i)(USB Composite Device|USB Input Device|HID Keyboard Device|HID-compliant|Generic)') {
+                                        $bestName = $n.Name
+                                        break
+                                    }
+                                }
+                            }
+                            if ([string]::IsNullOrWhiteSpace($bestName)) { $bestName = $phys.BaseName }
+
+                            $role      = "[USB DEVICE]"
+                            $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { $phys.BaseClass }
+
+                            $isStorage    = $false; $isCardReader = $false; $isAudio = $false; $isVr = $false; $isCam = $false; $isBt = $false; $isHub = $false
+                            $isOnboardMcu = ($bestName -match '(?i)(AURA\s*LED|Mystic\s*Light|RGB\s*Fusion|Polychrome|ITE\s*Device|Nuvoton)')
+                            $isWirelessRx = ($bestName -match '(?i)(Receiver|Lightspeed|HyperSpeed|Dongle|2\.4G|Unifying|Bolt)')
+                            $hasMou       = $false; $hasKbd = $false
+                            $mi00IsKbd    = $false; $mi00IsMou = $false
+
+                            if ($phys.BaseClass -eq "Bluetooth" -or $phys.BaseService -match '^(?i)(BTHUSB|BTHMINI|ibtusb|BtFilter|RtkBtFilter)$' -or $bestName -match '(?i)\b(BT|Bluetooth)\b') {
+                                $isBt = $true
+                                $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { "BTHUSB" }
+                            }
+
+                            foreach ($n in $deviceNodes) {
+                                if ($isBt) { break }
+                                if ($n.Service -match '^(?i)(AmUStor|rtsuer)$' -or $bestName -match '(?i)Card\s*Reader') {
+                                    $isCardReader = $true
+                                    if ($n.Service) { $activeSvc = $n.Service }
+                                }
+                                elseif ($n.Service -match '^(?i)(USBSTOR|UASPStor)$' -or $n.Class -eq "DiskDrive") {
+                                    $isStorage = $true
+                                    if ($n.Service -match '^(?i)(USBSTOR|UASPStor)$') { $activeSvc = $n.Service }
+                                }
+                                elseif ($n.Class -eq "Bluetooth" -or $n.Service -match '^(?i)(BTHUSB|BTHMINI|ibtusb)$') {
+                                    $isBt = $true
+                                    $activeSvc = if ($phys.BaseService) { $phys.BaseService } else { "BTHUSB" }
+                                }
+                                elseif ($n.Class -eq "Media" -or $n.Service -match '^(?i)(usbaudio|usbaudio2|iFiUsbAudio)' -or $n.Name -match '(?i)(DAC|iFi|Audio|Headset|Microphone|Sound)') {
+                                    if ($n.Class -ne "AudioEndpoint" -and $n.Class -ne "SoftwareDevice") {
+                                        $isAudio = $true
+                                        if ($n.Service) { $activeSvc = $n.Service }
+                                    }
+                                }
+                                elseif ($n.Name -match '(?i)(Index|Steam Frame|VR|HMD|Watchman|Tracker|Beyond)') { $isVr = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                                elseif ($n.Service -eq "usbvideo" -or $n.Class -in @("Camera", "Image")) { $isCam = $true; if ($n.Service) { $activeSvc = $n.Service } }
+                                elseif ($n.Service -match '^(?i)(USBHUB3|usbhub)$') { $isHub = $true; $activeSvc = $n.Service }
+                                elseif ($n.Service -eq "mouhid" -or $n.Class -eq "Mouse") {
+                                    $hasMou = $true
+                                    if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsMou = $true }
+                                }
+                                elseif ($n.Service -eq "kbdhid" -or $n.Class -eq "Keyboard") {
+                                    $hasKbd = $true
+                                    if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsKbd = $true }
+                                }
+                            }
+
+                            if ($isHub)             { $role = "[USB HUB]" }
+                            elseif ($isOnboardMcu)  { $role = "[ONBOARD MCU]"; $activeSvc = "Internal PCB RGB - Idle" }
+                            elseif ($isBt)          { $role = "[BLUETOOTH]" }
+                            elseif ($isCardReader)  { $role = "[CARD READER]" }
+                            elseif ($isStorage) {
+                                $role = "[STORAGE]"
+                                $hasStorage = $true
+                                $conflictList.Add("Storage: $bestName")
+                                if ($phys.LinkSpeed -match '(?i)(High-Speed|Full-Speed|480\s*Mbps|12\s*Mbps|USB\s*2\.0)') {
+                                    $hasThrottledStorage = $true
+                                    $throttledLabel = "$bestName ($($phys.LinkSpeed))"
+                                }
+                            }
+                            elseif ($isVr)          { $role = "[VR / HMD]";    $hasVr      = $true }
+                            elseif ($isAudio)       { $role = "[AUDIO / DAC]"; $hasAudio   = $true; $conflictList.Add("DAC: $bestName") }
+                            elseif ($isCam)         { $role = "[VIDEO / CAM]"; $hasAudio   = $true; $conflictList.Add("Cam: $bestName") }
+                            elseif ($hasMou -and $hasKbd) {
+                                if ($isWirelessRx -or $mi00IsMou -or -not $mi00IsKbd) {
+                                    $role       = "[MOUSE / HID]"
+                                    $activeSvc  = "mouhid"
+                                    $hasMouse   = $true
+                                    $mouseLabel = $bestName
+                                } else {
+                                    $role      = "[KEYBOARD]"
+                                    $activeSvc = "kbdhid"
+                                }
+                            }
+                            elseif ($hasMou) { $role = "[MOUSE / HID]"; $activeSvc = "mouhid"; $hasMouse = $true; $mouseLabel = $bestName }
+                            elseif ($isWirelessRx -and -not $hasKbd) {
+                                $role       = "[MOUSE / HID]"
+                                $activeSvc  = "2.4GHz Wireless Rx"
+                                $hasMouse   = $true
+                                $mouseLabel = $bestName
+                            }
+                            elseif ($hasKbd) { $role = "[KEYBOARD]"; $activeSvc = "kbdhid" }
+                            elseif ($phys.Children | Where-Object { $_.Class -eq "HIDClass" -or $_.Service -eq "HidUsb" }) {
+                                $role      = "[HID / INPUT]"
+                                $activeSvc = "HidUsb"
+                            }
+
+                            $portBadge = if ($phys.PortNumber -gt 0) {
+                                $pPrefix = if ($phys.Depth -le 2) { "Port #$($phys.PortNumber)" } else { "Hub Port #$($phys.PortNumber)" }
+                                if ($phys.LinkSpeed) { " [$pPrefix | $($phys.LinkSpeed)]" } else { " [$pPrefix]" }
+                            } else { "" }
+
+                            if ($isHub) {
+                                $hubNames.Add($bestName)
+                                if (-not $IncludeRawHubs) { continue }
+                            }
+
+                            $dedupKey = "$role|$bestName|$($phys.PortNumber)|$($phys.Depth)"
+                            if (-not $seenEpKeys.Add($dedupKey)) { continue }
+
+                            $endpoints.Add([PSCustomObject]@{
+                                Role       = $role
+                                Name       = "$bestName$portBadge"
+                                InstanceId = $phys.DevId
+                                Service    = $activeSvc
+                                Depth      = $phys.Depth
+                            })
+                        }
+
+                        if (-not $IncludeRawHubs -and $hubNames.Count -gt 0) {
+                            $uniqueHubs = @($hubNames | Select-Object -Unique) -join ", "
+                            $endpoints.Add([PSCustomObject]@{
+                                Role       = "[ONBOARD HUBS]"
+                                Name       = "$($hubNames.Count)x Passive USB 2.0/3.x Port Splitters ($uniqueHubs)"
+                                InstanceId = "HUB_SUMMARY"
+                                Service    = "0% DMA Load"
+                                Depth      = 99
+                            })
+                        }
+
+                        $portMapSummary = if ($venName -match 'DEV_15B8') {
+                            "1 Internal SoC Line (USB 2.0 480 Mbps - Unrouted on Desktop PCB)"
+                        } elseif ($null -ne $rootHubInfo -and $rootHubInfo.TotalPorts -gt 0) {
+                            $ssLabel = if ($ctrlName -match '(?i)(USB4|40G)' -or $venName -match 'DEV_2426') {
+                                "USB4 40 Gbps"
+                            } elseif ($rootHubInfo.SsPlusPorts -gt 0 -or $ctrlName -match '(?i)(3\.2|3\.1)') {
+                                "USB 3.x SuperSpeed (5/10/20 Gbps)"
+                            } else {
+                                "USB 3.0 SuperSpeed (5 Gbps)"
+                            }
+                            "$($rootHubInfo.TotalPorts) Logical Lines ($($rootHubInfo.Usb3Ports)x $ssLabel + $($rootHubInfo.Usb2Ports)x USB 2.0 High-Speed [480 Mbps] | Active: $($rootHubInfo.ActivePorts))"
+                        } else {
+                            "Root Hub port descriptor unavailable"
+                        }
+
+                        $statusAdvice = "Optimal Isolation"
+                        $severity     = "Green"
+                        if ($hasMouse -and ($hasAudio -or $hasStorage)) {
+                            $confTargets  = ($conflictList | Select-Object -Unique) -join ", "
+                            $statusAdvice = "[!] CONTENTION: Mouse ($mouseLabel) shares XHCI bus with $confTargets!"
+                            $severity     = "Red"
+                        } elseif (($hasMouse -or $hasVr) -and $routingBadge -match "CHIPSET") {
+                            $statusAdvice = "[*] Notice: Latency-sensitive Mouse/VR is on Chipset PCH instead of CPU Direct lanes"
+                            $severity     = "Yellow"
+                        } elseif ($hasThrottledStorage) {
+                            $statusAdvice = "[*] Notice: USB Storage [$throttledLabel] is running at USB 2.0 speed - move to a SuperSpeed port/cable"
+                            $severity     = "Yellow"
+                        } elseif ($endpoints.Count -eq 0) {
+                            if ($venName -match 'DEV_15B8') {
+                                $statusAdvice = "[Internal SoC USB 2.0 Node - Unrouted on Desktop PCB]"
+                            } else {
+                                $statusAdvice = "[Idle Root Hub - Free Ports Available]"
+                            }
+                            $severity = "Gray"
+                        }
+
+                        $controllers.Add([PSCustomObject]@{
+                            ControllerName = $ctrlName
+                            InstanceId     = $instanceId
+                            RoutingBadge   = $routingBadge
+                            PortSummary    = $portMapSummary
+                            PciHops        = $pciBridgeHops
+                            MsiEnabled     = $msiOn
+                            IrqAffinity    = $irqTag
+                            Endpoints      = @($endpoints)
+                            Advice         = $statusAdvice
+                            Severity       = $severity
+                        })
+                    } catch {
+                        $controllers.Add([PSCustomObject]@{
+                            ControllerName = "PCI\$venName\$instName"
+                            InstanceId     = "PCI\$venName\$instName"
+                            RoutingBadge   = "[PROBE WARNING]"
+                            PortSummary    = "Controller probe error: $($_.Exception.Message)"
+                            PciHops        = 99
+                            MsiEnabled     = $false
+                            IrqAffinity    = "Unknown"
+                            Endpoints      = @()
+                            Advice         = "[!] Failed to enumerate this USB controller node"
+                            Severity       = "Yellow"
+                        })
+                    } finally {
+                        $instKey.Dispose()
                     }
-                    elseif ($n.Name -match '(?i)(Index|Steam Frame|VR|HMD|Watchman|Tracker|Beyond)') { $isVr = $true; if ($n.Service) { $activeSvc = $n.Service } }
-                    elseif ($n.Service -eq "usbvideo" -or $n.Class -in @("Camera", "Image")) { $isCam = $true; if ($n.Service) { $activeSvc = $n.Service } }
-                    elseif ($n.Service -match '^(?i)(USBHUB3|usbhub)$') { $isHub = $true; $activeSvc = $n.Service }
-                    elseif ($n.Service -eq "mouhid" -or $n.Class -eq "Mouse") {
-                        $hasMou = $true
-                        if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsMou = $true }
-                    }
-                    elseif ($n.Service -eq "kbdhid" -or $n.Class -eq "Keyboard") {
-                        $hasKbd = $true
-                        if ($n.DevId -match '(?i)&MI_00' -or $n.DevId -notmatch '(?i)&MI_0[1-9]') { $mi00IsKbd = $true }
-                    }
                 }
-
-                if ($isHub)             { $role = "[USB HUB]" }
-                elseif ($isOnboardMcu)  { $role = "[ONBOARD MCU]"; $activeSvc = "Internal PCB RGB - Idle" }
-                elseif ($isBt)          { $role = "[BLUETOOTH]" }
-                elseif ($isCardReader)  { $role = "[CARD READER]" }
-                elseif ($isStorage)     { $role = "[STORAGE]";     $hasStorage = $true; $conflictList.Add("Storage: $bestName") }
-                elseif ($isVr)          { $role = "[VR / HMD]";    $hasVr      = $true }
-                elseif ($isAudio)       { $role = "[AUDIO / DAC]"; $hasAudio   = $true; $conflictList.Add("DAC: $bestName") }
-                elseif ($isCam)         { $role = "[VIDEO / CAM]"; $hasAudio   = $true; $conflictList.Add("Cam: $bestName") }
-                elseif ($hasMou -and $hasKbd) {
-                    if ($isWirelessRx -or $mi00IsMou -or -not $mi00IsKbd) {
-                        $role       = "[MOUSE / HID]"
-                        $activeSvc  = "mouhid"
-                        $hasMouse   = $true
-                        $mouseLabel = $bestName
-                    } else {
-                        $role      = "[KEYBOARD]"
-                        $activeSvc = "kbdhid"
-                    }
-                }
-                elseif ($hasMou) { $role = "[MOUSE / HID]"; $activeSvc = "mouhid"; $hasMouse = $true; $mouseLabel = $bestName }
-                elseif ($hasKbd) { $role = "[KEYBOARD]";    $activeSvc = "kbdhid" }
-                elseif ($phys.Children | Where-Object { $_.Class -eq "HIDClass" -or $_.Service -eq "HidUsb" }) {
-                    $role      = "[HID / INPUT]"
-                    $activeSvc = "HidUsb"
-                }
-
-                $portBadge = if ($phys.PortNumber -gt 0) {
-                    $pPrefix = if ($phys.Depth -le 2) { "Port #$($phys.PortNumber)" } else { "Hub Port #$($phys.PortNumber)" }
-                    if ($phys.LinkSpeed) { " [$pPrefix | $($phys.LinkSpeed)]" } else { " [$pPrefix]" }
-                } else { "" }
-
-                if ($isHub) {
-                    $hubNames.Add($bestName)
-                    if (-not $IncludeRawHubs) { continue }
-                }
-
-                $endpoints.Add([PSCustomObject]@{
-                    Role       = $role
-                    Name       = "$bestName$portBadge"
-                    InstanceId = $phys.DevId
-                    Service    = $activeSvc
-                    Depth      = $phys.Depth
-                })
+            } finally {
+                $venKey.Dispose()
             }
-
-            if (-not $IncludeRawHubs -and $hubNames.Count -gt 0) {
-                $uniqueHubs = @($hubNames | Select-Object -Unique) -join ", "
-                $endpoints.Add([PSCustomObject]@{
-                    Role       = "[ONBOARD HUBS]"
-                    Name       = "$($hubNames.Count)x Passive USB 2.0/3.x Port Splitters ($uniqueHubs)"
-                    InstanceId = "HUB_SUMMARY"
-                    Service    = "0% DMA Load"
-                    Depth      = 99
-                })
-            }
-
-            $portMapSummary = if ($venKey.PSChildName -match 'DEV_15B8') {
-                "1 Internal SoC Line (USB 2.0 480 Mbps - Unrouted on Desktop PCB)"
-            } elseif ($null -ne $rootHubInfo -and $rootHubInfo.TotalPorts -gt 0) {
-                $ssLabel = if ($ctrlName -match '(?i)(USB4|40G)' -or $venKey.PSChildName -match 'DEV_2426') {
-                    "USB4 40 Gbps"
-                } elseif ($rootHubInfo.SsPlusPorts -gt 0 -or $ctrlName -match '(?i)(3\.2|3\.1)') {
-                    "USB 3.x SuperSpeed (5/10/20 Gbps)"
-                } else {
-                    "USB 3.0 SuperSpeed (5 Gbps)"
-                }
-                "$($rootHubInfo.TotalPorts) Logical Lines ($($rootHubInfo.Usb3Ports)x $ssLabel + $($rootHubInfo.Usb2Ports)x USB 2.0 High-Speed [480 Mbps] | Active: $($rootHubInfo.ActivePorts))"
-            } else {
-                "Root Hub port descriptor unavailable"
-            }
-
-            $statusAdvice = "Optimal Isolation"
-            $severity     = "Green"
-            if ($hasMouse -and ($hasAudio -or $hasStorage)) {
-                $confTargets  = ($conflictList | Select-Object -Unique) -join ", "
-                $statusAdvice = "[!] CONTENTION: Mouse ($mouseLabel) shares XHCI bus with $confTargets!"
-                $severity     = "Red"
-            } elseif (($hasMouse -or $hasVr) -and $routingBadge -match "CHIPSET") {
-                $statusAdvice = "[*] Notice: Latency-sensitive Mouse/VR is on Chipset PCH instead of CPU Direct lanes"
-                $severity     = "Yellow"
-            } elseif ($endpoints.Count -eq 0) {
-                if ($venKey.PSChildName -match 'DEV_15B8') {
-                    $statusAdvice = "[Internal SoC USB 2.0 Node - Unrouted on Desktop PCB]"
-                } else {
-                    $statusAdvice = "[Idle Root Hub - Free Ports Available]"
-                }
-                $severity = "Gray"
-            }
-
-            $controllers.Add([PSCustomObject]@{
-                ControllerName = $ctrlName
-                InstanceId     = $instanceId
-                RoutingBadge   = $routingBadge
-                PortSummary    = $portMapSummary
-                PciHops        = $pciBridgeHops
-                MsiEnabled     = $msiOn
-                IrqAffinity    = $irqTag
-                Endpoints      = @($endpoints)
-                Advice         = $statusAdvice
-                Severity       = $severity
-            })
         }
+    } finally {
+        $pciRoot.Dispose()
+        if ($null -ne $enumRoot) { $enumRoot.Dispose() }
     }
 
     return @($controllers | Sort-Object PciHops, ControllerName)
@@ -3806,66 +4085,8 @@ function Show-UsbTopologyModal {
         $rtbMap.AppendText($Text)
     }.GetNewClosure())
 
-    $renderTopology = ({
-        $rtbMap.Clear()
-
-        # Render concise Engineering Mini-Guide at the top of the report
-        & $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
-        & $appendColored "QUICK WIRING GUIDE & HOW TO READ THIS TOPOLOGY MAP:`r`n" ([System.Drawing.Color]::Gold)
-        & $appendColored "  1. [CPU DIRECT SoC] : Wired straight to CPU silicon (1 Hop). Best for 4K/8KHz Mice & VR.`r`n" ([System.Drawing.Color]::Cyan)
-        & $appendColored "  2. [CHIPSET PCH]    : Routed via motherboard chipset. Ideal for USB Audio DACs, Keyboards & Drives.`r`n" ([System.Drawing.Color]::LightSkyBlue)
-        & $appendColored "  3. XHCI Isolation   : NEVER share one controller between an 8KHz Mouse and an Audio DAC or USB Drive.`r`n" ([System.Drawing.Color]::LightGreen)
-        & $appendColored "  4. Logical Lines    : Every physical USB 3.x port contains 2 logical lines (1x SuperSpeed + 1x USB 2.0).`r`n" ([System.Drawing.Color]::Silver)
-        & $appendColored "  5. Onboard Hubs/MCU : Passive PCB splitters (ASM107x) & static RGB (AURA) do NOT disturb Audio DACs.`r`n" ([System.Drawing.Color]::DarkGray)
-
-        $map = Get-UsbTopologyMap -IncludeRawHubs:($chkShowHubs.Checked)
-        $idx = 0
-        foreach ($ctrl in $map) {
-            $idx++
-            $hdrColor = if ($ctrl.RoutingBadge -match "CPU DIRECT") { [System.Drawing.Color]::Cyan } else { [System.Drawing.Color]::LightSkyBlue }
-            & $appendColored "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
-            & $appendColored "CONTROLLER #$idx : $($ctrl.ControllerName)`r`n" $hdrColor
-            & $appendColored "  PCIe Routing : $($ctrl.RoutingBadge)`r`n" $hdrColor
-            & $appendColored "  PCI ID & IRQ : $($ctrl.InstanceId) | MSI: $(if($ctrl.MsiEnabled){'ON'}else{'OFF'}) | IRQ: $($ctrl.IrqAffinity)`r`n" ([System.Drawing.Color]::Silver)
-            & $appendColored "  Root Hub Map : $($ctrl.PortSummary)`r`n" ([System.Drawing.Color]::LightSkyBlue)
-            
-            $advColor = switch ($ctrl.Severity) {
-                "Red"    { [System.Drawing.Color]::OrangeRed; break }
-                "Yellow" { [System.Drawing.Color]::Gold;      break }
-                "Green"  { [System.Drawing.Color]::LightGreen; break }
-                default  { [System.Drawing.Color]::DarkGray;  break }
-            }
-            & $appendColored "  Assessment   : $($ctrl.Advice)`r`n" $advColor
-
-            if ($ctrl.Endpoints.Count -gt 0) {
-                & $appendColored "  Connected Endpoints:`r`n" ([System.Drawing.Color]::White)
-                foreach ($ep in $ctrl.Endpoints) {
-                    $epColor = switch -Wildcard ($ep.Role) {
-                        "*MOUSE*"   { [System.Drawing.Color]::LightGreen; break }
-                        "*AUDIO*"   { [System.Drawing.Color]::Violet;     break }
-                        "*VR*"      { [System.Drawing.Color]::Cyan;       break }
-                        "*STORAGE*" { [System.Drawing.Color]::Orange;     break }
-                        "*ONBOARD*" { [System.Drawing.Color]::DarkGray;   break }
-                        "*HUB*"     { [System.Drawing.Color]::DarkGray;   break }
-                        default     { [System.Drawing.Color]::LightGray;  break }
-                    }
-                    & $appendColored ("    +-- {0,-15} {1} ({2})`r`n" -f $ep.Role, $ep.Name, $ep.Service) $epColor
-                }
-            } else {
-                & $appendColored "    +-- (No active external USB endpoints attached)`r`n" ([System.Drawing.Color]::DarkGray)
-            }
-            & $appendColored "`r`n" ([System.Drawing.Color]::LightGray)
-        }
-        $rtbMap.SelectionStart = 0
-        $rtbMap.ScrollToCaret()
-    }.GetNewClosure())
-
-    &$renderTopology
-    $chkShowHubs.Add_CheckedChanged({ &$renderTopology }.GetNewClosure())
-
     $btnRefresh = New-UltixButton -Parent $modal -Text "Rescan USB Tree (Live)" -X 15 -Y 590 -Width 200 -Height 35 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Bottom, Left'
-    $btnRefresh.Add_Click({ &$renderTopology }.GetNewClosure())
 
     $btnExportLog = New-UltixButton -Parent $modal -Text "Print Map to Main Log" -X 225 -Y 590 -Width 200 -Height 35 -RGB @(50, 110, 70)
     $btnExportLog.Anchor = 'Bottom, Left'
@@ -3882,8 +4103,99 @@ function Show-UsbTopologyModal {
     $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 790 -Y 590 -Width 120 -Height 35 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Right'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
+
+    $renderTopologyAsync = ({
+        $ctxModal  = $modal
+        $ctxRtb    = $rtbMap
+        $ctxChk    = $chkShowHubs
+        $ctxAppend = $appendColored
+        $ctxCtrls  = @($btnRefresh, $btnExportLog, $chkShowHubs)
+
+        if ($null -eq $ctxModal -or $ctxModal.IsDisposed -or $null -eq $ctxRtb -or $ctxRtb.IsDisposed) { return }
+        $ctxRtb.Clear()
+        & $ctxAppend "Probing USB XHCI controllers, PCIe bridge hops & IOCTL root-hub port speeds in background..." ([System.Drawing.Color]::LightSkyBlue)
+
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $sb = (Get-Command -Name Get-UsbTopologyMap).ScriptBlock
+        $onScanError = ({
+            param([string]$ErrMsg)
+            $sw.Stop()
+            if ($null -eq $ctxModal -or $ctxModal.IsDisposed -or $null -eq $ctxRtb -or $ctxRtb.IsDisposed) { return }
+            $ctxRtb.Clear()
+            & $ctxAppend "[ERROR] USB XHCI Topology scan failed:`r`n$ErrMsg`r`n" ([System.Drawing.Color]::OrangeRed)
+        }.GetNewClosure())
+
+        Invoke-AsyncTask -ScriptBlock $sb -Arguments @($ctxChk.Checked) -ControlsToDisable $ctxCtrls -OnError $onScanError -OnComplete ({
+            param($output)
+            $sw.Stop()
+            Update-Progress 0
+            if ($null -eq $ctxModal -or $ctxModal.IsDisposed -or $null -eq $ctxRtb -or $ctxRtb.IsDisposed) { return }
+
+            $ctxRtb.Clear()
+            $scanMs = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
+
+            & $ctxAppend "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+            & $ctxAppend ("QUICK WIRING GUIDE & HOW TO READ THIS TOPOLOGY MAP (Scan Time: {0:0.0} ms):`r`n" -f $scanMs) ([System.Drawing.Color]::Gold)
+            & $ctxAppend "  1. [CPU DIRECT SoC] : Wired straight to CPU silicon (1 Hop). Best for 4K/8KHz Mice & VR.`r`n" ([System.Drawing.Color]::Cyan)
+            & $ctxAppend "  2. [CHIPSET / DMI]  : Routed via motherboard chipset. Ideal for USB Audio DACs, Keyboards & Drives.`r`n" ([System.Drawing.Color]::LightSkyBlue)
+            & $ctxAppend "  3. XHCI Isolation   : NEVER share one controller between an 8KHz Mouse and an Audio DAC or USB Drive.`r`n" ([System.Drawing.Color]::LightGreen)
+            & $ctxAppend "  4. Logical Lines    : Every physical USB 3.x port contains 2 logical lines (1x SuperSpeed + 1x USB 2.0).`r`n" ([System.Drawing.Color]::Silver)
+            & $ctxAppend "  5. Onboard Hubs/MCU : Passive PCB splitters (ASM107x) & static RGB (AURA) do NOT disturb Audio DACs.`r`n" ([System.Drawing.Color]::DarkGray)
+
+            $map = @($output | Where-Object { $null -ne $_ })
+            if ($map.Count -eq 0) {
+                & $ctxAppend "`r`n[!] No active USB XHCI/EHCI controllers detected.`r`n" ([System.Drawing.Color]::Orange)
+                return
+            }
+
+            $idx = 0
+            foreach ($ctrl in $map) {
+                $idx++
+                $hdrColor = if ($ctrl.RoutingBadge -match "CPU DIRECT") { [System.Drawing.Color]::Cyan } else { [System.Drawing.Color]::LightSkyBlue }
+                & $ctxAppend "================================================================================`r`n" ([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
+                & $ctxAppend "CONTROLLER #$idx : $($ctrl.ControllerName)`r`n" $hdrColor
+                & $ctxAppend "  PCIe Routing : $($ctrl.RoutingBadge)`r`n" $hdrColor
+                & $ctxAppend "  PCI ID & IRQ : $($ctrl.InstanceId) | MSI: $(if($ctrl.MsiEnabled){'ON'}else{'OFF'}) | IRQ: $($ctrl.IrqAffinity)`r`n" ([System.Drawing.Color]::Silver)
+                & $ctxAppend "  Root Hub Map : $($ctrl.PortSummary)`r`n" ([System.Drawing.Color]::LightSkyBlue)
+                
+                $advColor = switch ($ctrl.Severity) {
+                    "Red"    { [System.Drawing.Color]::OrangeRed; break }
+                    "Yellow" { [System.Drawing.Color]::Gold;      break }
+                    "Green"  { [System.Drawing.Color]::LightGreen; break }
+                    default  { [System.Drawing.Color]::DarkGray;  break }
+                }
+                & $ctxAppend "  Assessment   : $($ctrl.Advice)`r`n" $advColor
+
+                if ($ctrl.Endpoints.Count -gt 0) {
+                    & $ctxAppend "  Connected Endpoints:`r`n" ([System.Drawing.Color]::White)
+                    foreach ($ep in $ctrl.Endpoints) {
+                        $epColor = switch -Wildcard ($ep.Role) {
+                            "*MOUSE*"   { [System.Drawing.Color]::LightGreen; break }
+                            "*AUDIO*"   { [System.Drawing.Color]::Violet;     break }
+                            "*VR*"      { [System.Drawing.Color]::Cyan;       break }
+                            "*STORAGE*" { [System.Drawing.Color]::Orange;     break }
+                            "*ONBOARD*" { [System.Drawing.Color]::DarkGray;   break }
+                            "*HUB*"     { [System.Drawing.Color]::DarkGray;   break }
+                            default     { [System.Drawing.Color]::LightGray;  break }
+                        }
+                        & $ctxAppend ("    +-- {0,-15} {1} ({2})`r`n" -f $ep.Role, $ep.Name, $ep.Service) $epColor
+                    }
+                } else {
+                    & $ctxAppend "    +-- (No active external USB endpoints attached)`r`n" ([System.Drawing.Color]::DarkGray)
+                }
+                & $ctxAppend "`r`n" ([System.Drawing.Color]::LightGray)
+            }
+            $ctxRtb.SelectionStart = 0
+            $ctxRtb.ScrollToCaret()
+        }.GetNewClosure())
+    }.GetNewClosure())
+
+    $chkShowHubs.Add_CheckedChanged({ &$renderTopologyAsync }.GetNewClosure())
+    $btnRefresh.Add_Click({ &$renderTopologyAsync }.GetNewClosure())
 
     $modal.Controls.AddRange(@($lblDesc, $rtbMap, $chkShowHubs))
+    &$renderTopologyAsync
     try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 
@@ -4004,14 +4316,14 @@ function Show-QuantumSchedulerModal {
     $btnApply.Add_Click({
         if ($listBox.SelectedIndex -lt 0) { return }
         $sel = $profiles[$listBox.SelectedIndex]
-        Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value $sel.Value -Type DWord -Force
+        Set-UltixRegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value $sel.Value -Type DWord -Module "Z7_Hardware"
         Write-GUI " -> [LIVE QUANTUM] Enforced Win32PrioritySeparation = $($sel.Hex) ($($sel.Value) dec) [$($sel.Name)]"
         &$refreshInfo
     }.GetNewClosure())
 
     $btnReset = New-UltixButton -Parent $modal -Text "Restore Factory (0x02)" -X 320 -Y 425 -Width 215 -Height 38 -RGB @(60, 100, 150)
     $btnReset.Add_Click({
-        Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 2 -Type DWord -Force
+        Set-UltixRegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 2 -Type DWord -Module "Z7_Hardware"
         Write-GUI " -> [LIVE QUANTUM] Restored factory Win32PrioritySeparation = 0x02 (2 dec)."
         &$refreshInfo
     }.GetNewClosure())

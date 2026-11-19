@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # WINULTIX - ULTIMATE SYSTEM TOOLKIT
 # https://github.com/Firever-ultix/WinUltix
-# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE (v3.14)
+# Z3_REGISTRY.PS1 - REGISTRY ENGINE MODULE
 # Z3_Registry: OS Tweaks, Taskbar (with UCPD.sys bypass), native 3-icon Start Menu compiler (with 26H2 Classic List view), File Explorer, Modern Standby S0, 7-Point Power & Display Optimizer, 1:1 Raw Mouse Input, and Extreme Gaming Registry.
 # ==========================================
 
@@ -46,7 +46,11 @@ function Invoke-RegistryAudit {
                 }
             }
             
-            if ($rule.ContainsKey("ValidValues")) {
+            if ($rule.Expected -eq "DELETE_KEY") {
+                if ($null -eq $regKey) { $isDetected = $false }
+            } elseif ($rule.Expected -eq "DELETE_VALUE") {
+                if (-not $valueExists) { $isDetected = $false }
+            } elseif ($rule.ContainsKey("ValidValues")) {
                 if ($valueExists -and ($rule.ValidValues -contains $currentValue)) { 
                     $isDetected = $false 
                 }
@@ -218,7 +222,7 @@ function Get-RegState_Gaming {
         @{ UIDisplayName = "Kernel: Disable Paging Executive (Keeps core system in RAM)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS: System Responsiveness (Allocate 100% CPU to Games)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Expected = 0; Default = 20; Type = "DWord" }
         @{ UIDisplayName = "Network: Remove MMCSS Network Throttling Index"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Expected = 4294967295; Default = 10; ValidValues = @(4294967295, -1); Type = "DWord" }
-        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(38, 40, 42, 22, 24); Type = "DWord" }
+        @{ UIDisplayName = "CPU: Optimize Priority Separation (Focus CPU on foreground)"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; Name = "Win32PrioritySeparation"; Expected = 40; Default = 2; ValidValues = @(21, 22, 24, 25, 26, 37, 38, 40, 41, 42); Type = "DWord" }
         @{ UIDisplayName = "Power: Disable Windows Power Throttling globally"; Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; Name = "PowerThrottlingOff"; Expected = 1; Default = 0; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: GPU Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "GPU Priority"; Expected = 8; Default = 2; Type = "DWord" }
         @{ UIDisplayName = "MMCSS Profile: Priority (High)"; Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; Name = "Priority"; Expected = 6; Default = 2; Type = "DWord" }
@@ -334,20 +338,18 @@ function Invoke-ApplySRP {
         $nullStub = "$env:SystemRoot\System32\systray.exe"
         
         if ($Op -eq 'Apply') {
-            if (-not (Test-Path -LiteralPath $srpRoot)) { New-Item -Path $srpRoot -Force | Out-Null }
-            
-            $srpSettings = @{
+            $srpSettings = [ordered]@{
                 "AuthenticodeEnabled" = 0
                 "DefaultLevel"        = 262144
                 "TransparentEnabled"  = 1
                 "PolicyScope"         = 0
             }
             foreach ($kvp in $srpSettings.GetEnumerator()) {
-                Set-ItemProperty -LiteralPath $srpRoot -Name $kvp.Key -Value $kvp.Value -Type DWord -Force
+                Set-UltixRegValue -Path $srpRoot -Name $kvp.Key -Value $kvp.Value -Type DWord -Module "Z3_Registry"
             }
             
             $exeTypes = [string[]]@("BAT","CMD","COM","EXE","HTA","LNK","MSI","OCX","PIF","REG","SCR","VBS","WSF")
-            Set-ItemProperty -LiteralPath $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Force
+            Set-UltixRegValue -Path $srpRoot -Name "ExecutableTypes" -Value $exeTypes -Type MultiString -Module "Z3_Registry"
             
             if (-not (Test-Path -LiteralPath "$srpRoot\0"))      { New-Item -Path "$srpRoot\0" -Force | Out-Null }
             if (-not (Test-Path -LiteralPath "$srpRoot\262144")) { New-Item -Path "$srpRoot\262144" -Force | Out-Null }
@@ -361,7 +363,7 @@ function Invoke-ApplySRP {
             $current++
             if ($null -ne $UltixSync) {
                 $UltixSync.Progress = [int](($current / $total) * 75)
-                $UltixSync.Logs.Enqueue(" -> $($actionVerb) Execution Lock: $($item.UIDisplayName)")
+                $UltixSync.Logs.Enqueue(" -> $($actionVerb): $($item.UIDisplayName)")
             }
             
             $target       = $item.ActionData
@@ -376,40 +378,33 @@ function Invoke-ApplySRP {
                         foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
                             $existingData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
                             if ($existingData -eq $target.TargetPath -and $subKey.PSChildName -ne $guid) {
-                                Remove-Item -LiteralPath $subKey.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                Remove-UltixRegItem -Path $subKey.PSPath -IgnoreMissing -Module "Z3_Registry"
                             }
                         }
                     }
 
-                    New-Item -Path $ruleKey -Force | Out-Null
-                    Set-ItemProperty -LiteralPath $ruleKey -Name "Description" -Value "WinUltix SRP Lockdown" -Type String -Force
-                    Set-ItemProperty -LiteralPath $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String -Force
-                    Set-ItemProperty -LiteralPath $ruleKey -Name "SaferFlags" -Value 0 -Type DWord -Force
-
-                    if (-not (Test-Path -LiteralPath $ifeoKey)) { New-Item -Path $ifeoKey -Force | Out-Null }
+                    Set-UltixRegValue -Path $ruleKey -Name "Description" -Value "WinUltix SRP Lockdown" -Type String -Module "Z3_Registry"
+                    Set-UltixRegValue -Path $ruleKey -Name "ItemData" -Value $target.TargetPath -Type String -Module "Z3_Registry"
+                    Set-UltixRegValue -Path $ruleKey -Name "SaferFlags" -Value 0 -Type DWord -Module "Z3_Registry"
 
                     if ($target.IsCustom -and $target.TargetPath -notmatch '[\*\?]') {
                         # Scoped kernel filter (FilterFullPath) so custom .exe blocks do not collide with other apps sharing the same filename
-                        Set-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Value 1 -Type DWord -Force
-                        Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
-                        if (-not (Test-Path -LiteralPath $filterSubKey)) { New-Item -Path $filterSubKey -Force | Out-Null }
-                        Set-ItemProperty -LiteralPath $filterSubKey -Name "FilterFullPath" -Value $target.TargetPath -Type String -Force
-                        Set-ItemProperty -LiteralPath $filterSubKey -Name "Debugger" -Value $nullStub -Type String -Force
-                        Set-ItemProperty -LiteralPath $filterSubKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+                        Set-UltixRegValue -Path $ifeoKey -Name "UseFilter" -Value 1 -Type DWord -Module "Z3_Registry"
+                        Set-UltixRegValue -Path $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Module "Z3_Registry"
+                        Set-UltixRegValue -Path $filterSubKey -Name "FilterFullPath" -Value $target.TargetPath -Type String -Module "Z3_Registry"
+                        Set-UltixRegValue -Path $filterSubKey -Name "Debugger" -Value $nullStub -Type String -Module "Z3_Registry"
+                        Set-UltixRegValue -Path $filterSubKey -Name "WinUltixManaged" -Value 1 -Type DWord -Module "Z3_Registry"
                     } else {
                         # Global kernel image lock (intercepts wildcard paths such as WindowsApps\...\Widgets.exe across updates)
-                        Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
-                        Set-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Value $nullStub -Type String -Force
-                        Set-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Force
+                        Remove-UltixRegItem -Path $ifeoKey -Name "UseFilter" -IgnoreMissing -Module "Z3_Registry"
+                        Set-UltixRegValue -Path $ifeoKey -Name "Debugger" -Value $nullStub -Type String -Module "Z3_Registry"
+                        Set-UltixRegValue -Path $ifeoKey -Name "WinUltixManaged" -Value 1 -Type DWord -Module "Z3_Registry"
                     }
                     
                     $procName = [System.IO.Path]::GetFileNameWithoutExtension($target.ExeName)
-                    $activeProc = Get-Process -Name $procName -ErrorAction SilentlyContinue
-                    if ($activeProc) { 
-                        $activeProc | Stop-Process -Force -ErrorAction SilentlyContinue
-                        if ($null -ne $UltixSync) {
-                            $UltixSync.Logs.Enqueue("    [OK] Flushed active process ($procName) from memory.")
-                        }
+                    $killedProcs = Stop-UltixProcess -Name $procName -Module "Z3_Registry"
+                    if ($killedProcs -gt 0 -and $null -ne $UltixSync) {
+                        $UltixSync.Logs.Enqueue("    [OK] Flushed active process ($procName) from memory.")
                     }
                     $policyChanged = $true
                 } else {
@@ -417,7 +412,7 @@ function Invoke-ApplySRP {
                         foreach ($subKey in (Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)) {
                             $itemData = (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "ItemData" -ErrorAction SilentlyContinue).ItemData
                             if ($subKey.PSChildName -eq $guid -or $itemData -eq $target.TargetPath) {
-                                Remove-Item -LiteralPath $subKey.PSPath -Force -Recurse -ErrorAction Stop
+                                Remove-UltixRegItem -Path $subKey.PSPath -Module "Z3_Registry"
                                 $policyChanged = $true
                             }
                         }
@@ -425,7 +420,7 @@ function Invoke-ApplySRP {
 
                     if (Test-Path -LiteralPath $ifeoKey) {
                         if (Test-Path -LiteralPath $filterSubKey) {
-                            Remove-Item -LiteralPath $filterSubKey -Recurse -Force -ErrorAction SilentlyContinue
+                            Remove-UltixRegItem -Path $filterSubKey -IgnoreMissing -Module "Z3_Registry"
                             $policyChanged = $true
                         }
 
@@ -433,12 +428,12 @@ function Invoke-ApplySRP {
                         $dbgVal    = (Get-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -ErrorAction SilentlyContinue).Debugger
                         if ($isManaged -eq 1 -or $dbgVal -match "systray\.exe") {
                             if (-not $target.IsCustom -or $dbgVal -match "systray\.exe") {
-                                Remove-ItemProperty -LiteralPath $ifeoKey -Name "Debugger" -Force -ErrorAction SilentlyContinue
+                                Remove-UltixRegItem -Path $ifeoKey -Name "Debugger" -IgnoreMissing -Module "Z3_Registry"
                             }
                             $remainingSubKeys = @(Get-ChildItem -LiteralPath $ifeoKey -ErrorAction SilentlyContinue)
                             if ($remainingSubKeys.Count -eq 0) {
-                                Remove-ItemProperty -LiteralPath $ifeoKey -Name "UseFilter" -Force -ErrorAction SilentlyContinue
-                                Remove-ItemProperty -LiteralPath $ifeoKey -Name "WinUltixManaged" -Force -ErrorAction SilentlyContinue
+                                Remove-UltixRegItem -Path $ifeoKey -Name "UseFilter" -IgnoreMissing -Module "Z3_Registry"
+                                Remove-UltixRegItem -Path $ifeoKey -Name "WinUltixManaged" -IgnoreMissing -Module "Z3_Registry"
                             }
 
                             $remainingProps = @()
@@ -447,7 +442,7 @@ function Invoke-ApplySRP {
                                 try { $remainingProps = @($ifeoItem.Property) } finally { $ifeoItem.Dispose() }
                             }
                             if ($remainingSubKeys.Count -eq 0 -and $remainingProps.Count -eq 0) {
-                                Remove-Item -LiteralPath $ifeoKey -Force -ErrorAction SilentlyContinue
+                                Remove-UltixRegItem -Path $ifeoKey -IgnoreMissing -Module "Z3_Registry"
                             }
                             $policyChanged = $true
                         }
@@ -466,7 +461,7 @@ function Invoke-ApplySRP {
         if ($Op -eq 'Revert' -and (Test-Path -LiteralPath $srpPaths)) {
             $remainingSrp = @(Get-ChildItem -LiteralPath $srpPaths -ErrorAction SilentlyContinue)
             if ($remainingSrp.Count -eq 0) {
-                Remove-Item -LiteralPath $srpRoot -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-UltixRegItem -Path $srpRoot -IgnoreMissing -Module "Z3_Registry"
             }
         }
 
@@ -476,10 +471,7 @@ function Invoke-ApplySRP {
                 $UltixSync.Logs.Enqueue(" -> Refreshing Safer API policy tokens (gpupdate.exe /force in background)...")
                 $UltixSync.Progress = 85
             }
-            $gpProc = Start-Process -FilePath "gpupdate.exe" -ArgumentList "/force" -WindowStyle Hidden -PassThru
-            $gpProc.WaitForExit()
-            $exitCode = $gpProc.ExitCode
-            $gpProc.Dispose()
+            $exitCode = Invoke-UltixExe -FilePath "gpupdate.exe" -Arguments @("/force") -Module "Z3_Registry"
         }
 
         if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
@@ -526,6 +518,26 @@ function Invoke-ApplyRegistry {
         $touchedMouse = $false
         $actionVerb   = if ($Op -eq 'Apply') { "Enforcing" } else { "Reverting" }
 
+        $logLine = {
+            param([string]$Msg)
+            if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue($Msg) } else { Write-GUI $Msg }
+        }
+
+        $invokeWithAclEscalation = {
+            param([string]$RegPath, [scriptblock]$OpBlock)
+            try {
+                & $OpBlock
+            } catch {
+                $aclTarget = $RegPath -replace '^Registry::HKEY_CLASSES_ROOT\\', 'HKLM:\SOFTWARE\Classes\'
+                if ($aclTarget -match '^HKLM:\\' -and (Get-Command -Name Grant-UltixRegistryKeyAccess -ErrorAction SilentlyContinue)) {
+                    Grant-UltixRegistryKeyAccess -RegistryPath $aclTarget
+                    & $OpBlock
+                } else {
+                    throw
+                }
+            }
+        }
+
         foreach ($item in $Items) {
             $current++
             if ($null -ne $UltixSync) {
@@ -543,17 +555,19 @@ function Invoke-ApplyRegistry {
 
             $targetValue = if ($Op -eq 'Apply') { $reg.Expected } else { $reg.Default }
             if ($null -eq $targetValue -and $Op -eq 'Revert') {
-                Write-GUI "    [!] Missing 'Default' property in array definition. Skipping."
+                & $logLine "    [!] Missing 'Default' property in array definition. Skipping."
                 continue
             }
 
             try {
                 if ($targetValue -eq 'DELETE_KEY') {
                     if (Test-Path -LiteralPath $reg.Path) {
-                        Remove-Item -LiteralPath $reg.Path -Recurse -Force -ErrorAction Stop | Out-Null
+                        & $invokeWithAclEscalation $reg.Path {
+                            Remove-UltixRegItem -Path $reg.Path -Module "Z3_Registry"
+                        }
                         $parentKey = Split-Path -Path $reg.Path -Parent
                         if ($parentKey -match "\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2\}$" -and (Test-Path -LiteralPath $parentKey)) {
-                            Remove-Item -LiteralPath $parentKey -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+                            Remove-UltixRegItem -Path $parentKey -IgnoreMissing -Module "Z3_Registry"
                         }
                     }
                     continue
@@ -565,21 +579,21 @@ function Invoke-ApplyRegistry {
                             $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
                             $cleanedDx  = ($existingDx -replace "SwapEffectUpgradeEnable=\d+;?", "").Trim()
                             if ([string]::IsNullOrWhiteSpace($cleanedDx)) {
-                                Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction SilentlyContinue | Out-Null
+                                Remove-UltixRegItem -Path $reg.Path -Name $reg.Name -IgnoreMissing -Module "Z3_Registry"
                             } else {
-                                Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $cleanedDx -Type String -Force -ErrorAction Stop | Out-Null
+                                Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $cleanedDx -Type String -Module "Z3_Registry"
                             }
                         } else {
-                            Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Force -ErrorAction Stop | Out-Null
+                            & $invokeWithAclEscalation $reg.Path {
+                                Remove-UltixRegItem -Path $reg.Path -Name $reg.Name -IgnoreMissing -Module "Z3_Registry"
+                            }
                         }
                     }
                     continue
                 }
 
-                if (-not (Test-Path -LiteralPath $reg.Path)) { New-Item -Path $reg.Path -Force -ErrorAction Stop | Out-Null }
-
                 # Preserve custom optimized values (e.g., Z7 Quantum Scheduler presets in Win32PrioritySeparation)
-                if ($Op -eq 'Apply' -and $reg.ContainsKey("ValidValues")) {
+                if ($Op -eq 'Apply' -and $reg.ContainsKey("ValidValues") -and (Test-Path -LiteralPath $reg.Path)) {
                     $curRaw = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
                     if ($null -ne $curRaw) {
                         $curNorm = if ($reg.Type -eq "DWord" -and $curRaw -is [int] -and $curRaw -lt 0) {
@@ -589,27 +603,37 @@ function Invoke-ApplyRegistry {
                         }
                         if ($reg.ValidValues -contains $curNorm -or $reg.ValidValues -contains $curRaw) {
                             if ($reg.Name -eq "Win32PrioritySeparation" -and $curNorm -ne $reg.Expected) {
-                                Write-GUI ("    [OK] Preserved active Quantum Scheduler preset (0x{0:X2} / {0} dec)." -f [int]$curNorm)
+                                & $logLine ("    [OK] Preserved active Quantum Scheduler preset (0x{0:X2} / {0} dec)." -f [int]$curNorm)
                             }
                             continue
                         }
                     }
                 }
 
-                # Sync 25H2/26H2 DisableWidgetsBoard policy alongside AllowNewsAndInterests
+                # Sync 25H2/26H2 DisableWidgetsBoard policy & proactively disarm UCPD.sys if active
+                $altSynced = $false
                 if ($reg.ContainsKey("AltName")) {
+                    $ucpdSvc = Get-Service -Name "UCPD" -ErrorAction SilentlyContinue
+                    if ($null -ne $ucpdSvc -and $ucpdSvc.Status -eq 'Running') {
+                        Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4 -Module "Z3_Registry"
+                        Invoke-UltixStep -Command "Disable-ScheduledTask -TaskPath '\Microsoft\Windows\AppxDeploymentClient\' -TaskName 'UCPD velocity'" -Action {
+                            Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
+                        } -SuccessOutput "Disarmed UCPD velocity task" -Module "Z3_Registry"
+                    }
                     if ($Op -eq 'Apply') {
-                        Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                        Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                        try {
+                            Set-UltixRegValue -Path $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Module "Z3_Registry"
+                            Set-UltixRegValue -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Module "Z3_Registry"
+                            $altSynced = $true
+                        } catch { }
                     } else {
-                        Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
-                        Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
+                        Remove-UltixRegItem -Path $reg.Path -Name $reg.AltName -IgnoreMissing -Module "Z3_Registry"
+                        Remove-UltixRegItem -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -IgnoreMissing -Module "Z3_Registry"
+                        $altSynced = $true
                     }
                 }
 
-                if ($reg.Name -eq "" -or $reg.Name -eq "(Default)") {
-                    Set-Item -LiteralPath $reg.Path -Value ([string]$targetValue) -Force -ErrorAction Stop | Out-Null
-                } elseif ($reg.Name -eq "DirectXUserGlobalSettings" -and $Op -eq 'Apply') {
+                if ($reg.Name -eq "DirectXUserGlobalSettings" -and $Op -eq 'Apply') {
                     $existingDx = (Get-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -ErrorAction SilentlyContinue).$($reg.Name)
                     if ([string]::IsNullOrWhiteSpace($existingDx)) {
                         $newDx = "SwapEffectUpgradeEnable=1;"
@@ -619,37 +643,41 @@ function Invoke-ApplyRegistry {
                         $sep   = if ($existingDx.EndsWith(";")) { "" } else { ";" }
                         $newDx = "$existingDx${sep}SwapEffectUpgradeEnable=1;"
                     }
-                    Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $newDx -Type String -Force -ErrorAction Stop | Out-Null
+                    Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $newDx -Type String -Module "Z3_Registry"
                 } else {
-                    $writeVal = $targetValue
-                    if ($reg.Type -eq "DWord" -and $writeVal -is [long] -and $writeVal -gt [int]::MaxValue) {
-                        $writeVal = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$writeVal), 0)
+                    & $invokeWithAclEscalation $reg.Path {
+                        Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $targetValue -Type $reg.Type -Module "Z3_Registry"
                     }
-                    Set-ItemProperty -LiteralPath $reg.Path -Name $reg.Name -Value $writeVal -Type $reg.Type -Force -ErrorAction Stop | Out-Null
                 }
             } catch {
                 # Symmetric UCPD.sys kernel filter bypass for both Apply and Revert on Windows 11 24H2/25H2/26H2
                 if ($reg.ContainsKey("AltName")) {
                     try {
                         if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\UCPD") {
-                            Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4
-                            Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
+                            Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4 -Module "Z3_Registry"
+                            Invoke-UltixStep -Command "Disable-ScheduledTask -TaskPath '\Microsoft\Windows\AppxDeploymentClient\' -TaskName 'UCPD velocity'" -Action {
+                                Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
+                            } -SuccessOutput "Disarmed UCPD velocity task" -Module "Z3_Registry"
                         }
 
                         if ($Op -eq 'Apply') {
-                            Set-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Force -ErrorAction Stop | Out-Null
-                            Set-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                            Write-GUI "    [+] Bypassed UCPD.sys filter via $($reg.AltName)=1 & disarmed UCPD driver."
+                            if (-not $altSynced) {
+                                Set-UltixRegValue -Path $reg.Path -Name $reg.AltName -Value $reg.AltExpected -Type DWord -Module "Z3_Registry"
+                                Set-UltixRegValue -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -Value 1 -Type DWord -Module "Z3_Registry"
+                            }
+                            & $logLine "    [+] Bypassed UCPD.sys filter via $($reg.AltName)=1 & disarmed UCPD driver."
                         } else {
-                            Remove-ItemProperty -LiteralPath $reg.Path -Name $reg.AltName -Force -ErrorAction SilentlyContinue | Out-Null
-                            Remove-ItemProperty -LiteralPath $reg.Path -Name "DisableWidgetsOnLockScreen" -Force -ErrorAction SilentlyContinue | Out-Null
-                            Write-GUI "    [+] Reverted $($reg.AltName) policy & disarmed UCPD filter (Reboot unlocks $($reg.Name))."
+                            if (-not $altSynced) {
+                                Remove-UltixRegItem -Path $reg.Path -Name $reg.AltName -IgnoreMissing -Module "Z3_Registry"
+                                Remove-UltixRegItem -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -IgnoreMissing -Module "Z3_Registry"
+                            }
+                            & $logLine "    [+] Reverted $($reg.AltName) policy & disarmed UCPD filter (Reboot unlocks $($reg.Name))."
                         }
                     } catch {
-                        Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+                        & $logLine "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
                     }
                 } else {
-                    Write-GUI "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
+                    & $logLine "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
                 }
             }
         }
@@ -661,10 +689,16 @@ function Invoke-ApplyRegistry {
                 $t1 = if ($null -ne $mProps -and $mProps.MouseThreshold1 -match '^\d+$') { [int]$mProps.MouseThreshold1 } else { 0 }
                 $t2 = if ($null -ne $mProps -and $mProps.MouseThreshold2 -match '^\d+$') { [int]$mProps.MouseThreshold2 } else { 0 }
                 $sp = if ($null -ne $mProps -and $mProps.MouseSpeed -match '^\d+$')      { [int]$mProps.MouseSpeed }      else { 0 }
-                if ([WinUltix.NativeMethods]::ApplyLiveMouseParams($t1, $t2, $sp)) {
-                    Write-GUI "    [OK] Live-reloaded win32kfull.sys pointer acceleration table (SPI_SETMOUSE: $t1/$t2/$sp)."
-                }
-            } catch { }
+                Invoke-UltixStep -Command "[WinUltix.NativeMethods]::ApplyLiveMouseParams($t1, $t2, $sp)" -Action {
+                    if (-not [WinUltix.NativeMethods]::ApplyLiveMouseParams($t1, $t2, $sp)) {
+                        throw "user32!SystemParametersInfoW(SPI_SETMOUSE) returned false"
+                    }
+                    "Live-reloaded win32kfull.sys pointer curve ($t1/$t2/$sp)"
+                } -Module "Z3_Registry"
+                & $logLine "    [OK] Live-reloaded win32kfull.sys pointer acceleration table (SPI_SETMOUSE: $t1/$t2/$sp)."
+            } catch {
+                & $logLine "    [!] Live SPI_SETMOUSE reload failed (changes will apply on next logon): $($_.Exception.Message)"
+            }
         }
     } -OnComplete ({
         param($nullOut)
@@ -763,6 +797,10 @@ function Invoke-StartMenuAudit {
         } else {
             $UltixSync.Logs.Enqueue("  [OK] No residual MDM Start Menu locks or orphaned provider keys found.")
         }
+
+        $bakExists = Test-Path -LiteralPath "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
+        $defJson   = Test-Path -LiteralPath "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell\LayoutModification.json"
+        $UltixSync.Logs.Enqueue("  [*] Backup (start2_backup.bin): $(if($bakExists){'Present'}else{'None'}) | Default User LayoutModification.json: $(if($defJson){'Provisioned'}else{'Not set'})")
         $UltixSync.Progress = 100
     } -OnComplete ({
         param($nullOut)
@@ -794,28 +832,40 @@ function Clear-StartMenu {
             $bakBin         = "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
 
             $UltixSync.Progress = 40
-            Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+            Invoke-UltixStep -Command "Stop-UltixProcess -Name 'StartMenuExperienceHost','ShellExperienceHost','explorer'" -Action {
+                if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
+                    Stop-UltixProcess -Name @("StartMenuExperienceHost", "ShellExperienceHost", "explorer")
+                } else {
+                    Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
+                }
+            } -SuccessOutput "Stopped shell host processes" -Module "Z3_Registry"
             Start-Sleep -Milliseconds 350
 
             if (Test-Path -LiteralPath $bakBin) {
-                Copy-Item -LiteralPath $bakBin -Destination $origBin -Force -ErrorAction SilentlyContinue
+                Invoke-UltixStep -Command "Copy-Item -LiteralPath '$bakBin' -Destination '$origBin' -Force" -Action {
+                    Copy-Item -LiteralPath $bakBin -Destination $origBin -Force -ErrorAction Stop
+                } -SuccessOutput "Restored original start2.bin database" -Module "Z3_Registry"
                 $UltixSync.Logs.Enqueue("    [OK] Restored original start2.bin from $bakBin.")
             } else {
                 $UltixSync.Logs.Enqueue("    [*] No start2_backup.bin found in %LOCALAPPDATA%\WinUltix; reverting registry view flags only.")
             }
 
-            Remove-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-            Remove-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "ShowRecentList", "ShowFrequentList" -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            Remove-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_IrisRecommendations", "Start_AccountNotifications" -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "HideRecommendedSection" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoRecentDocsHistory" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Remove-UltixRegItem -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -IgnoreMissing -Module "Z3_Registry"
+            Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "AllAppsViewMode" -Value 0 -Type DWord -Module "Z3_Registry"
+            Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "ShowRecentList" -IgnoreMissing -Module "Z3_Registry"
+            Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start" -Name "ShowFrequentList" -IgnoreMissing -Module "Z3_Registry"
+            Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackDocs" -Value 1 -Type DWord -Module "Z3_Registry"
+            Set-UltixRegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 1 -Type DWord -Module "Z3_Registry"
+            Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_IrisRecommendations" -IgnoreMissing -Module "Z3_Registry"
+            Remove-UltixRegItem -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_AccountNotifications" -IgnoreMissing -Module "Z3_Registry"
+            Set-UltixRegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "HideRecommendedSection" -Value 0 -Type DWord -Module "Z3_Registry"
+            Set-UltixRegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoRecentDocsHistory" -Value 0 -Type DWord -Module "Z3_Registry"
 
             $defaultJsonPath = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell\LayoutModification.json"
             if (Test-Path -LiteralPath $defaultJsonPath) {
-                Remove-Item -LiteralPath $defaultJsonPath -Force -ErrorAction SilentlyContinue
+                Invoke-UltixStep -Command "Remove-Item -LiteralPath '$defaultJsonPath' -Force" -Action {
+                    Remove-Item -LiteralPath $defaultJsonPath -Force -ErrorAction SilentlyContinue
+                } -SuccessOutput "Removed Default User LayoutModification.json" -Module "Z3_Registry"
             }
 
             if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
@@ -863,34 +913,33 @@ function Clear-StartMenu {
             $cdmPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
             if (Test-Path -LiteralPath $cdmPath) {
                 foreach ($cdmName in @("OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "ContentDeliveryAllowed", "SubscribedContentEnabled")) {
-                    Set-ItemProperty -LiteralPath $cdmPath -Name $cdmName -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-UltixRegValue -Path $cdmPath -Name $cdmName -Value 0 -Type DWord -Module "Z3_Registry"
                 }
-                if (Test-Path -LiteralPath "$cdmPath\SuggestedApps") {
-                    Remove-Item -LiteralPath "$cdmPath\SuggestedApps" -Recurse -Force -ErrorAction SilentlyContinue
-                }
+                Remove-UltixRegItem -Path "$cdmPath\SuggestedApps" -IgnoreMissing -Module "Z3_Registry"
             }
 
             $advPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
             if (Test-Path -LiteralPath $advPath) {
-                Set-ItemProperty -LiteralPath $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -LiteralPath $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -LiteralPath $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -LiteralPath $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -LiteralPath $advPath -Name "Start_Layout" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-UltixRegValue -Path $advPath -Name "Start_TrackDocs" -Value 0 -Type DWord -Module "Z3_Registry"
+                Set-UltixRegValue -Path $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Module "Z3_Registry"
+                Set-UltixRegValue -Path $advPath -Name "Start_IrisRecommendations" -Value 0 -Type DWord -Module "Z3_Registry"
+                Set-UltixRegValue -Path $advPath -Name "Start_AccountNotifications" -Value 0 -Type DWord -Module "Z3_Registry"
+                Set-UltixRegValue -Path $advPath -Name "Start_Layout" -Value 1 -Type DWord -Module "Z3_Registry"
             }
 
             $expPolPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
-            if (-not (Test-Path -LiteralPath $expPolPath)) { New-Item -Path $expPolPath -Force -ErrorAction SilentlyContinue | Out-Null }
-            Set-ItemProperty -LiteralPath $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-UltixRegValue -Path $expPolPath -Name "HideRecommendedSection" -Value 1 -Type DWord -Module "Z3_Registry"
+            Set-UltixRegValue -Path $expPolPath -Name "NoRecentDocsHistory" -Value 1 -Type DWord -Module "Z3_Registry"
 
             # Purge Recent JumpList AutomaticDestinations & Recent shortcuts
             $recentDir = "$env:APPDATA\Microsoft\Windows\Recent"
             if (Test-Path -LiteralPath $recentDir) {
-                Get-ChildItem -LiteralPath $recentDir -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                if (Test-Path -LiteralPath "$recentDir\AutomaticDestinations") {
-                    Get-ChildItem -LiteralPath "$recentDir\AutomaticDestinations" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                }
+                Invoke-UltixStep -Command "Remove-Item -Path '$recentDir\*','$recentDir\AutomaticDestinations\*' -Force" -Action {
+                    Get-ChildItem -LiteralPath $recentDir -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                    if (Test-Path -LiteralPath "$recentDir\AutomaticDestinations") {
+                        Get-ChildItem -LiteralPath "$recentDir\AutomaticDestinations" -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                    }
+                } -SuccessOutput "Cleared Recent items & JumpList destinations" -Module "Z3_Registry"
             }
 
             # Stage 2: Temporary MDM Provider Registration
@@ -898,27 +947,28 @@ function Clear-StartMenu {
                 $UltixSync.Progress = 30
                 $UltixSync.Logs.Enqueue(" -> [2/7] Injecting temporary MDM PolicyManager provider context...")
             }
-            if (-not (Test-Path -LiteralPath $enrollmentPath)) {
-                New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
-                $createdEnrollment = $true
-            }
-            Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
-            Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
-            Set-ItemProperty -LiteralPath $enrollmentPath -Name "IsFederated" -Value 0 -Type DWord -Force
-            Set-ItemProperty -LiteralPath $enrollmentPath -Name "ProviderID" -Value "MS DM Server" -Type String -Force
+            $hadEnrollmentBefore = (Test-Path -LiteralPath $enrollmentPath)
+            Invoke-UltixStep -Command "New-Item -Path '$enrollmentPath','$providerPath' -Force" -Action {
+                if (-not (Test-Path -LiteralPath $enrollmentPath)) {
+                    New-Item -Path $enrollmentPath -Force -ErrorAction Stop | Out-Null
+                }
+                Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentState" -Value 1 -Type DWord -Force
+                Set-ItemProperty -LiteralPath $enrollmentPath -Name "EnrollmentType" -Value 6 -Type DWord -Force
+                Set-ItemProperty -LiteralPath $enrollmentPath -Name "IsFederated" -Value 0 -Type DWord -Force
+                Set-ItemProperty -LiteralPath $enrollmentPath -Name "ProviderID" -Value "MS DM Server" -Type String -Force
 
-            if (-not (Test-Path -LiteralPath $providerPath)) {
-                New-Item -Path $providerPath -Force -ErrorAction Stop | Out-Null
-            }
-            Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
-            Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
+                if (-not (Test-Path -LiteralPath $providerPath)) {
+                    New-Item -Path $providerPath -Force -ErrorAction Stop | Out-Null
+                }
+                Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
+                Set-ItemProperty -LiteralPath $providerPath -Name "ConfigureStartPins_LastWrite" -Value 1 -Type DWord -Force
+                "Provisioned temporary MDM node ($provGuid)"
+            } -Module "Z3_Registry"
+            $createdEnrollment = (-not $hadEnrollmentBefore) -and (Test-Path -LiteralPath $enrollmentPath)
 
-            if (-not (Test-Path -LiteralPath $policyDevicePath)) {
-                New-Item -Path $policyDevicePath -Force -ErrorAction Stop | Out-Null
-            }
-            Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Force
-            Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Force
-            Set-ItemProperty -LiteralPath $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Force
+            Set-UltixRegValue -Path $policyDevicePath -Name "ConfigureStartPins" -Value $cleanPinsJson -Type String -Module "Z3_Registry"
+            Set-UltixRegValue -Path $policyDevicePath -Name "ConfigureStartPins_ProviderSet" -Value 1 -Type DWord -Module "Z3_Registry"
+            Set-UltixRegValue -Path $policyDevicePath -Name "ConfigureStartPins_WinningProvider" -Value $provGuid -Type String -Module "Z3_Registry"
 
             # Stage 3: Purge CloudStore caches & lock AllAppsViewMode = 2 (Classic Alphabetical List)
             if ($null -ne $UltixSync) {
@@ -927,28 +977,31 @@ function Clear-StartMenu {
             }
             $cloudStoreRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
             if (Test-Path -LiteralPath $cloudStoreRoot) {
-                Get-ChildItem -LiteralPath $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
-                    $_.PSChildName -match "start\.tilegrid|unifiedtile|start\.allapps|start\.properties"
-                } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                Invoke-UltixStep -Command "Get-ChildItem '$cloudStoreRoot' | Where-Object { `$_.PSChildName -match 'start\.tilegrid|unifiedtile|start\.allapps|start\.properties' } | Remove-Item -Recurse -Force" -Action {
+                    Get-ChildItem -LiteralPath $cloudStoreRoot -ErrorAction SilentlyContinue | Where-Object {
+                        $_.PSChildName -match "start\.tilegrid|unifiedtile|start\.allapps|start\.properties"
+                    } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                } -SuccessOutput "Purged CloudStore Start tile grid caches" -Module "Z3_Registry"
             }
 
             $startRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
-            if (Test-Path -LiteralPath $startRegPath) {
-                Remove-Item -LiteralPath $startRegPath -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            New-Item -Path $startRegPath -Force -ErrorAction SilentlyContinue | Out-Null
+            Remove-UltixRegItem -Path $startRegPath -IgnoreMissing -Module "Z3_Registry"
             # 2 = Classic Alphabetical List View (replaces Windows 11 25H2/26H2 Category Tiles = 0)
-            Set-ItemProperty -LiteralPath $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -LiteralPath $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-UltixRegValue -Path $startRegPath -Name "AllAppsViewMode" -Value 2 -Type DWord -Module "Z3_Registry"
+            Set-UltixRegValue -Path $startRegPath -Name "ShowRecentList" -Value 0 -Type DWord -Module "Z3_Registry"
+            Set-UltixRegValue -Path $startRegPath -Name "ShowFrequentList" -Value 0 -Type DWord -Module "Z3_Registry"
 
-            # Stage 4: Backup original start2.bin once, then stop shell processes and wipe start*.bin
-            $origBin = Join-Path $startStatePath "start2.bin"
-            $bakDir  = "$env:LOCALAPPDATA\WinUltix"
-            $bakBin  = "$bakDir\start2_backup.bin"
-            if ((Test-Path -LiteralPath $origBin) -and -not (Test-Path -LiteralPath $bakBin)) {
-                if (-not (Test-Path -LiteralPath $bakDir)) { New-Item -Path $bakDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
-                Copy-Item -LiteralPath $origBin -Destination $bakBin -Force -ErrorAction SilentlyContinue
+            # Stage 4: Backup original start2.bin once (skip if already cleaned), then stop shell processes and wipe start*.bin
+            $origBin   = Join-Path $startStatePath "start2.bin"
+            $bakDir    = "$env:LOCALAPPDATA\WinUltix"
+            $bakBin    = "$bakDir\start2_backup.bin"
+            $prevClean = (Get-ItemProperty -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -ErrorAction SilentlyContinue).StartMenuClearedSize
+            $isAlreadyClean = ($null -ne $prevClean -and (Test-Path -LiteralPath $origBin) -and [math]::Abs((Get-Item -LiteralPath $origBin -Force).Length - $prevClean) -le 512)
+            if ((Test-Path -LiteralPath $origBin) -and -not (Test-Path -LiteralPath $bakBin) -and -not $isAlreadyClean) {
+                Invoke-UltixStep -Command "Copy-Item -LiteralPath '$origBin' -Destination '$bakBin' -Force" -Action {
+                    if (-not (Test-Path -LiteralPath $bakDir)) { New-Item -Path $bakDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
+                    Copy-Item -LiteralPath $origBin -Destination $bakBin -Force -ErrorAction SilentlyContinue
+                } -SuccessOutput "Backed up original start2.bin" -Module "Z3_Registry"
             }
 
             # Stage 5: Stop shell processes and wipe start*.bin (with attribute reset & locked-handle evacuation)
@@ -956,24 +1009,34 @@ function Clear-StartMenu {
                 $UltixSync.Progress = 60
                 $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin database...")
             }
-            Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 300
-
-            for ($attempt = 1; $attempt -le 6; $attempt++) {
-                Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
-                Get-ChildItem -Path $startStatePath -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    $binFull = $_.FullName
-                    try {
-                        $_.Attributes = 'Normal'
-                        Remove-Item -LiteralPath $binFull -Force -ErrorAction Stop
-                    } catch {
-                        $trashBin = Join-Path -Path $env:TEMP -ChildPath "WinUltix_StartBin_$([guid]::NewGuid().ToString('N')).tmp"
-                        Move-Item -LiteralPath $binFull -Destination $trashBin -Force -ErrorAction SilentlyContinue
-                    }
+            $stopShellHosts = {
+                param([string[]]$Names)
+                if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
+                    Stop-UltixProcess -Name $Names
+                } else {
+                    Stop-Process -Name $Names -Force -ErrorAction SilentlyContinue
                 }
-                if (-not (Test-Path -LiteralPath (Join-Path $startStatePath "start2.bin"))) { break }
-                Start-Sleep -Milliseconds 60
             }
+            Invoke-UltixStep -Command "Stop-UltixProcess -Name 'StartMenuExperienceHost','ShellExperienceHost','explorer'; Remove-Item -Path '$startStatePath\start*.bin*' -Force" -Action {
+                & $stopShellHosts @("StartMenuExperienceHost", "ShellExperienceHost", "explorer")
+                Start-Sleep -Milliseconds 300
+
+                for ($attempt = 1; $attempt -le 6; $attempt++) {
+                    & $stopShellHosts @("StartMenuExperienceHost")
+                    Get-ChildItem -Path $startStatePath -Filter "start*.bin*" -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        $binFull = $_.FullName
+                        try {
+                            $_.Attributes = 'Normal'
+                            Remove-Item -LiteralPath $binFull -Force -ErrorAction Stop
+                        } catch {
+                            $trashBin = Join-Path -Path $env:TEMP -ChildPath "WinUltix_StartBin_$([guid]::NewGuid().ToString('N')).tmp"
+                            Move-Item -LiteralPath $binFull -Destination $trashBin -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                    if (-not (Test-Path -LiteralPath (Join-Path $startStatePath "start2.bin"))) { break }
+                    Start-Sleep -Milliseconds 60
+                }
+            } -SuccessOutput "Wiped locked start2.bin database" -Module "Z3_Registry"
 
             if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
                 Start-Process "explorer.exe"
@@ -985,17 +1048,21 @@ function Clear-StartMenu {
                 $UltixSync.Progress = 75
                 $UltixSync.Logs.Enqueue(" -> [5/7] Invoking COM IApplicationActivationManager to compile clean start2.bin...")
             }
-            $appActivator = $null
             try {
-                $appActivator = New-Object WinUltix.AppActivator
-                [uint32]$activatedPid = 0
-                [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
-            } catch {
-            } finally {
-                if ($null -ne $appActivator -and [System.Runtime.InteropServices.Marshal]::IsComObject($appActivator)) {
-                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($appActivator)
-                }
-            }
+                Invoke-UltixStep -Command "(New-Object WinUltix.AppActivator).ActivateApplication('Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App', `$null, 0, [ref]`$activatedPid)" -Action {
+                    $appActivator = $null
+                    try {
+                        $appActivator = New-Object WinUltix.AppActivator
+                        [uint32]$activatedPid = 0
+                        [void]$appActivator.ActivateApplication("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App", $null, 0, [ref]$activatedPid)
+                        "Activated StartMenuExperienceHost (PID: $activatedPid)"
+                    } finally {
+                        if ($null -ne $appActivator -and [System.Runtime.InteropServices.Marshal]::IsComObject($appActivator)) {
+                            [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($appActivator)
+                        }
+                    }
+                } -Module "Z3_Registry"
+            } catch { }
 
             $compiledBinPath = Join-Path $startStatePath "start2.bin"
             $elapsed = 0
@@ -1012,9 +1079,10 @@ function Clear-StartMenu {
             }
 
             if (Test-Path -LiteralPath $compiledBinPath) {
-                $newBinSize = (Get-Item -LiteralPath $compiledBinPath -Force).Length
-                if (-not (Test-Path -LiteralPath "HKCU:\Software\WinUltix")) { New-Item -Path "HKCU:\Software\WinUltix" -Force | Out-Null }
-                Set-ItemProperty -LiteralPath "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Force
+                $newBinSize = [int](Get-Item -LiteralPath $compiledBinPath -Force).Length
+                if ($newBinSize -gt 1024) {
+                    Set-UltixRegValue -Path "HKCU:\Software\WinUltix" -Name "StartMenuClearedSize" -Value $newBinSize -Type DWord -Module "Z3_Registry"
+                }
             }
 
             if ($null -ne $UltixSync) {
@@ -1043,7 +1111,11 @@ function Clear-StartMenu {
             if ($createdEnrollment -and (Test-Path -LiteralPath $enrollmentPath)) {
                 Remove-Item -LiteralPath $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
             }
-            Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+            if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
+                Stop-UltixProcess -Name @("StartMenuExperienceHost")
+            } else {
+                Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
+            }
             if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
                 Start-Process "explorer.exe"
             }
@@ -1142,8 +1214,9 @@ function Get-PowerDisplayState {
     $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
     $cabcReg = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
     $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)
+    $cabcStatus = "AC: $(if($null -ne $cabcVal){$cabcVal}else{'N/A'}), Reg: $(if($cabcReg -eq 1){'Disabled'}else{'Default'})"
     $results.Add([PSCustomObject]@{
-        UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming)"
+        UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming) ($cabcStatus)"
         IsDetected    = (-not $isCabcOpt)
         ActionData    = @{ Type = "CABC"; Sub = "7516b95f-f776-4464-8c53-06167f40cc99"; Guid = "aded5e82-b909-4619-9949-f5d71dac0bcb"; OptAC = 0; OptDC = 0; DefAC = 1; DefDC = 1 }
     })
@@ -1176,27 +1249,28 @@ function Invoke-ApplyPowerDisplay {
             $d = $item.ActionData
             try {
                 if ($d.Type -eq "Hiber") {
-                    if ($Op -eq 'Apply') {
-                        powercfg.exe /hibernate off 2>$null
-                    } else {
-                        powercfg.exe /hibernate on 2>$null
-                    }
+                    $hiberArg = if ($Op -eq 'Apply') { "off" } else { "on" }
+                    [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/hibernate", $hiberArg) -Module "Z3_Registry")
                 } elseif ($d.Type -eq "PowerCfg") {
                     $acVal = if ($Op -eq 'Apply') { $d.OptAC } else { $d.DefAC }
                     $dcVal = if ($Op -eq 'Apply') { $d.OptDC } else { $d.DefDC }
-                    powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $acVal 2>$null
-                    powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $dcVal 2>$null
+                    [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$acVal") -Module "Z3_Registry")
+                    [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$dcVal") -Module "Z3_Registry")
                 } elseif ($d.Type -eq "CABC") {
                     $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+                    $hasCabcGuid = ($null -ne (Get-UltixPowerAcIndex -SubGroupGuid $d.Sub -SettingGuid $d.Guid -IncludeHidden))
                     if ($Op -eq 'Apply') {
-                        powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.OptAC 2>$null
-                        powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.OptDC 2>$null
-                        if (-not (Test-Path -LiteralPath $gfxKey)) { New-Item -Path $gfxKey -Force -ErrorAction SilentlyContinue | Out-Null }
-                        Set-ItemProperty -LiteralPath $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                        if ($hasCabcGuid) {
+                            [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.OptAC)") -Module "Z3_Registry")
+                            [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.OptDC)") -Module "Z3_Registry")
+                        }
+                        Set-UltixRegValue -Path $gfxKey -Name "DisableCABC" -Value 1 -Type DWord -Module "Z3_Registry"
                     } else {
-                        powercfg.exe /setacvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.DefAC 2>$null
-                        powercfg.exe /setdcvalueindex SCHEME_CURRENT $d.Sub $d.Guid $d.DefDC 2>$null
-                        Remove-ItemProperty -LiteralPath $gfxKey -Name "DisableCABC" -Force -ErrorAction SilentlyContinue
+                        if ($hasCabcGuid) {
+                            [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setacvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.DefAC)") -Module "Z3_Registry")
+                            [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setdcvalueindex", "SCHEME_CURRENT", $d.Sub, $d.Guid, "$($d.DefDC)") -Module "Z3_Registry")
+                        }
+                        Remove-UltixRegItem -Path $gfxKey -Name "DisableCABC" -IgnoreMissing -Module "Z3_Registry"
                     }
                 }
             } catch {
@@ -1206,7 +1280,7 @@ function Invoke-ApplyPowerDisplay {
             }
         }
 
-        powercfg.exe /setactive SCHEME_CURRENT 2>$null
+        [void](Invoke-UltixExe -FilePath "powercfg.exe" -Arguments @("/setactive", "SCHEME_CURRENT") -Module "Z3_Registry")
         if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
     } -OnComplete ({
         param($nullOut)
