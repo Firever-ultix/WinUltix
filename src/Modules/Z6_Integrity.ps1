@@ -6,6 +6,23 @@
 # ==========================================
 
 # ------------------------------------------
+# Z6: UI CONFIRMATION HELPER
+# ------------------------------------------
+function Confirm-Z6Operation {
+    param(
+        [Parameter(Mandatory=$true)][string]$Title,
+        [Parameter(Mandatory=$true)][string]$Message,
+        [System.Windows.Forms.MessageBoxIcon]$Icon = [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+    $ans = if ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired) {
+        [System.Windows.Forms.MessageBox]::Show($global:form, $Message, "WinUltix - $Title", [System.Windows.Forms.MessageBoxButtons]::YesNo, $Icon)
+    } else {
+        [System.Windows.Forms.MessageBox]::Show($Message, "WinUltix - $Title", [System.Windows.Forms.MessageBoxButtons]::YesNo, $Icon)
+    }
+    return ($ans -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
+# ------------------------------------------
 # Z6: ASYNC EXTERNAL CONSOLE HELPER (REAL EXIT CODE LATCH)
 # ------------------------------------------
 function Start-ExternalConsoleAsync {
@@ -189,13 +206,18 @@ function Get-WinSxSState {
 function Optimize-WinSXS {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
 
-    if (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
-        $warnMsg = "A pending Windows servicing reboot was detected in the CBS registry.`n`nRunning DISM /ResetBase while a reboot is pending on Windows 11 24H2/26H2 may fail with error 0x800f0806.`n`nDo you still want to force execution?"
-        $ans = [System.Windows.Forms.MessageBox]::Show($warnMsg, "WinUltix - CBS Reboot Pending", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
-            Write-GUI " -> WinSxS ResetBase aborted due to pending reboot.`n"
-            return
-        }
+    $rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+    $msg = "This operation runs 'DISM /StartComponentCleanup /ResetBase' in an external console:`n`n" +
+           "  - Permanently deletes superseded Windows Update backup layers (cannot be uninstalled afterward).`n" +
+           "  - Causes heavy disk/CPU I/O and typically takes 5 to 20 minutes.`n"
+    if ($rebootPending) {
+        $msg += "`n[!] WARNING: A pending CBS servicing reboot was detected. Running /ResetBase before rebooting may fail with error 0x800f0806.`n"
+    }
+    $msg += "`nDo you want to proceed?"
+
+    if (-not (Confirm-Z6Operation -Title "WinSxS ResetBase" -Message $msg -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning))) {
+        Write-GUI " -> WinSxS ResetBase cancelled by user.`n"
+        return
     }
 
     $cmd = "echo Aggressive WinSxS compression in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
@@ -278,8 +300,7 @@ function Repair-SystemIntegrity {
            "  2. DISM Image Repair (DISM /Online /Cleanup-Image /RestoreHealth)`n" +
            "  3. System File Checker (sfc /scannow)`n`n" +
            "Full verification typically takes 5 to 15 minutes. Do you want to proceed?"
-    $ans = [System.Windows.Forms.MessageBox]::Show($msg, "WinUltix - System Integrity Repair", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+    if (-not (Confirm-Z6Operation -Title "System Integrity Repair" -Message $msg)) {
         Write-GUI " -> System Integrity Repair cancelled by user.`n"
         return
     }
@@ -291,6 +312,15 @@ function Repair-SystemIntegrity {
 
 function Clear-NetworkStack {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
+
+    $msg = "This operation will flush DNS/ARP caches, reset WinHTTP proxy, reset the Winsock catalog, and reset the TCP/IPv4 & IPv6 stack.`n`n" +
+           "  - Active downloads, VPN tunnels, and remote sessions may drop immediately.`n" +
+           "  - A system reboot is recommended afterward to finalize Winsock changes.`n`n" +
+           "Do you want to proceed?"
+    if (-not (Confirm-Z6Operation -Title "Refresh Network Stack" -Message $msg -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning))) {
+        Write-GUI " -> Network Stack refresh cancelled by user.`n"
+        return
+    }
 
     Write-GUI " -> Initiating Full Network Stack Refresh (Background Thread)..."
     Update-Progress 10
@@ -404,6 +434,13 @@ function Repair-PrintSubsystem {
 
 function Repair-WindowsUpdateSubsystem {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
+
+    $msg = "This operation will stop Windows Update / BITS / CryptSvc services, purge pending BITS queues (qmgr*.dat), clear Catroot2 & SoftwareDistribution\DataStore (update history), and re-register 21 core COM DLLs.`n`n" +
+           "Do you want to proceed?"
+    if (-not (Confirm-Z6Operation -Title "Reset Windows Update & CryptSvc" -Message $msg)) {
+        Write-GUI " -> Windows Update subsystem reset cancelled by user.`n"
+        return
+    }
 
     Write-GUI " -> Initiating Windows Update & Cryptographic First-Aid (Background Thread)..."
     Update-Progress 5
@@ -716,6 +753,13 @@ function Repair-TimeSynchronization {
 
 function Repair-UwpGamingRuntime {
     param([System.Windows.Forms.Control[]]$ControlsToDisable)
+
+    $msg = "This operation will unlock core Store/Xbox services, close running Microsoft Store & WinGet processes, reset WinHTTP/WinINet proxy settings, re-register Store/WinGet/Xbox manifests, and refresh the WinGet source index (source2.msix).`n`n" +
+           "Do you want to proceed?"
+    if (-not (Confirm-Z6Operation -Title "Repair UWP, Store & Gaming Services" -Message $msg)) {
+        Write-GUI " -> UWP & Gaming Services repair cancelled by user.`n"
+        return
+    }
 
     Write-GUI " -> Initiating UWP, Store, WinGet & Xbox Gaming Services First-Aid (Background Thread)..."
     Update-Progress 10

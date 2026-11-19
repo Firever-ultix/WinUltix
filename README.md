@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo.png" alt="WinUltix Logo" width="128" height="128" />
   <h1>WinUltix 3.19</h1>
-  <p><b>A &lt;800 KB Zero-WMI Windows 11 &amp; 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
+  <p><b>A 800 KB Zero-WMI Windows 11 &amp; 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
 </div>
 
 > 🔗 **Part of the Ultix Ecosystem:**
@@ -25,7 +25,7 @@ irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix
 ```
 
 **Prefer a standalone executable?** Download `WinUltix.exe` (`796 KB`) from **[Releases](https://github.com/Firever-ultix/WinUltix/releases)**.
-* **`WinUltix.exe` (v3.19) SHA-256:** `D6BE05D081FB9E8906A499E4CC6DECDEEE3496C17E3B6FE77F42A01C13D7A282`
+* **`WinUltix.exe` (v3.19) SHA-256:** `34AEE417FDA72492B41E2AE856C5CAF7A3D323390359B42B2180839678A83A55`
 
 ---
 

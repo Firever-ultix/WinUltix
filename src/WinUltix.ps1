@@ -147,7 +147,7 @@ $global:btnExpertConsole.Add_Click({
         $global:btnExpertConsole.ForeColor = [System.Drawing.Color]::White
         $global:btnExpertConsole.Update()
         Write-UltixExpertCommand -CommandText "Expert Command & Output Stream attached (PID: $PID | Console Host Active)" -Module "SYSTEM"
-        Write-UltixExpertResult -OutputText "[TIP] Drag mouse to select text and press Enter or Ctrl+C to copy. QuickEdit pause is disabled." -ExitCode 0 -Module "SYSTEM"
+        Write-UltixExpertResult -OutputText "[TIP] Drag to select + Enter/Ctrl+C to copy (QuickEdit pause disabled)." -ExitCode 0 -Module "SYSTEM"
     } else {
         $global:btnExpertConsole.Text = "[ Expert: OFF ]"
         $global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
@@ -397,7 +397,7 @@ try {
         }
         $global:UltixActiveTasks.Clear()
     }
-    try { [WinUltix.ExpertConsole]::SetVisible($false) } catch { }
+    try { [WinUltix.ExpertConsole]::Shutdown() } catch { }
     $global:form.Dispose()
     if ($null -ne $global:UltixFontCache) {
         foreach ($fObj in $global:UltixFontCache.Values) {

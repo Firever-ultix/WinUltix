@@ -1769,6 +1769,12 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool FillConsoleOutputAttribute(IntPtr hConsoleOutput, ushort wAttribute, uint nLength, COORD dwWriteCoord, out uint lpNumberOfAttrsWritten);
 
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool FillConsoleOutputCharacterW(IntPtr hConsoleOutput, char cCharacter, uint nLength, COORD dwWriteCoord, out uint lpNumberOfCharsWritten);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleCursorPosition(IntPtr hConsoleOutput, COORD dwCursorPosition);
+
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool SetConsoleScreenBufferSize(IntPtr hConsoleOutput, COORD dwSize);
 
@@ -1805,6 +1811,8 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
 
             private static volatile bool _visible = false;
             private static bool _initialized = false;
+            private static bool _isWindowsTerminal = false;
+            private static bool _ownedConsole = false;
             private static readonly object _stateLock = new object();
             private static readonly object _writeLock = new object();
             private static readonly ConsoleCtrlDelegate _ctrlHandler = new ConsoleCtrlDelegate(OnConsoleCtrl);
@@ -1866,27 +1874,57 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                 return _visible;
             }
 
+            private static void ClearConsoleBuffer(IntPtr hOut, bool isWt) {
+                if (hOut == IntPtr.Zero || hOut == new IntPtr(-1)) return;
+                uint written;
+                if (isWt) {
+                    string clearSeq = "\x1b[2J\x1b[3J\x1b[H";
+                    WriteConsoleW(hOut, clearSeq, (uint)clearSeq.Length, out written, IntPtr.Zero);
+                    return;
+                }
+
+                CONSOLE_SCREEN_BUFFER_INFO_EX csbi = new CONSOLE_SCREEN_BUFFER_INFO_EX();
+                csbi.cbSize = (uint)Marshal.SizeOf(typeof(CONSOLE_SCREEN_BUFFER_INFO_EX));
+                if (GetConsoleScreenBufferInfoEx(hOut, ref csbi)) {
+                    uint totalCells = (uint)((int)csbi.dwSize.X * (int)csbi.dwSize.Y);
+                    COORD origin = new COORD(0, 0);
+                    FillConsoleOutputCharacterW(hOut, ' ', totalCells, origin, out written);
+                    FillConsoleOutputAttribute(hOut, 0x0007, totalCells, origin, out written);
+                    SetConsoleCursorPosition(hOut, origin);
+                }
+            }
+
             public static void SetVisible(bool show) {
                 lock (_stateLock) {
                     IntPtr hWnd = GetConsoleWindow();
                     if (show) {
+                        if (!_initialized) {
+                            _isWindowsTerminal = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"));
+                        }
                         if (hWnd == IntPtr.Zero) {
                             AllocConsole();
                             hWnd = GetConsoleWindow();
+                            _ownedConsole = true;
+                            _isWindowsTerminal = false;
                         }
                         if (hWnd != IntPtr.Zero && !_initialized) {
                             SetConsoleTitleW("WinUltix - Live Expert Command & Output Stream");
                             SetConsoleCtrlHandler(_ctrlHandler, true);
-                            IntPtr hMenu = GetSystemMenu(hWnd, false);
-                            if (hMenu != IntPtr.Zero) {
-                                DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+                            if (_ownedConsole) {
+                                IntPtr hMenu = GetSystemMenu(hWnd, false);
+                                if (hMenu != IntPtr.Zero) {
+                                    DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+                                }
                             }
                             IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
                             uint outMode;
                             if (hOut != IntPtr.Zero && GetConsoleMode(hOut, out outMode)) {
                                 SetConsoleMode(hOut, outMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
                             }
-                            ApplyDarkThemeAndGeometry(hOut);
+                            if (!_isWindowsTerminal) {
+                                ApplyDarkThemeAndGeometry(hOut);
+                            }
+                            ClearConsoleBuffer(hOut, _isWindowsTerminal);
 
                             IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
                             uint inMode;
@@ -1896,15 +1934,26 @@ if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Typ
                             }
                             _initialized = true;
                         }
-                        if (hWnd != IntPtr.Zero) {
+                        if (hWnd != IntPtr.Zero && !_isWindowsTerminal) {
                             ShowWindow(hWnd, SW_SHOW);
                         }
                         _visible = true;
                     } else {
-                        if (hWnd != IntPtr.Zero) {
+                        if (hWnd != IntPtr.Zero && !_isWindowsTerminal) {
                             ShowWindow(hWnd, SW_HIDE);
                         }
                         _visible = false;
+                    }
+                }
+            }
+
+            public static void Shutdown() {
+                lock (_stateLock) {
+                    _visible = false;
+                    if (_isWindowsTerminal) return;
+                    IntPtr hWnd = GetConsoleWindow();
+                    if (hWnd != IntPtr.Zero) {
+                        ShowWindow(hWnd, _ownedConsole ? SW_HIDE : SW_SHOW);
                     }
                 }
             }

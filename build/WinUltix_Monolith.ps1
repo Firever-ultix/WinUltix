@@ -1773,6 +1773,12 @@ Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -Type
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool FillConsoleOutputAttribute(IntPtr hConsoleOutput, ushort wAttribute, uint nLength, COORD dwWriteCoord, out uint lpNumberOfAttrsWritten);
 
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern bool FillConsoleOutputCharacterW(IntPtr hConsoleOutput, char cCharacter, uint nLength, COORD dwWriteCoord, out uint lpNumberOfCharsWritten);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetConsoleCursorPosition(IntPtr hConsoleOutput, COORD dwCursorPosition);
+
             [DllImport("kernel32.dll", SetLastError = true)]
             private static extern bool SetConsoleScreenBufferSize(IntPtr hConsoleOutput, COORD dwSize);
 
@@ -1809,6 +1815,8 @@ Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -Type
 
             private static volatile bool _visible = false;
             private static bool _initialized = false;
+            private static bool _isWindowsTerminal = false;
+            private static bool _ownedConsole = false;
             private static readonly object _stateLock = new object();
             private static readonly object _writeLock = new object();
             private static readonly ConsoleCtrlDelegate _ctrlHandler = new ConsoleCtrlDelegate(OnConsoleCtrl);
@@ -1870,27 +1878,57 @@ Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -Type
                 return _visible;
             }
 
+            private static void ClearConsoleBuffer(IntPtr hOut, bool isWt) {
+                if (hOut == IntPtr.Zero || hOut == new IntPtr(-1)) return;
+                uint written;
+                if (isWt) {
+                    string clearSeq = "\x1b[2J\x1b[3J\x1b[H";
+                    WriteConsoleW(hOut, clearSeq, (uint)clearSeq.Length, out written, IntPtr.Zero);
+                    return;
+                }
+
+                CONSOLE_SCREEN_BUFFER_INFO_EX csbi = new CONSOLE_SCREEN_BUFFER_INFO_EX();
+                csbi.cbSize = (uint)Marshal.SizeOf(typeof(CONSOLE_SCREEN_BUFFER_INFO_EX));
+                if (GetConsoleScreenBufferInfoEx(hOut, ref csbi)) {
+                    uint totalCells = (uint)((int)csbi.dwSize.X * (int)csbi.dwSize.Y);
+                    COORD origin = new COORD(0, 0);
+                    FillConsoleOutputCharacterW(hOut, ' ', totalCells, origin, out written);
+                    FillConsoleOutputAttribute(hOut, 0x0007, totalCells, origin, out written);
+                    SetConsoleCursorPosition(hOut, origin);
+                }
+            }
+
             public static void SetVisible(bool show) {
                 lock (_stateLock) {
                     IntPtr hWnd = GetConsoleWindow();
                     if (show) {
+                        if (!_initialized) {
+                            _isWindowsTerminal = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"));
+                        }
                         if (hWnd == IntPtr.Zero) {
                             AllocConsole();
                             hWnd = GetConsoleWindow();
+                            _ownedConsole = true;
+                            _isWindowsTerminal = false;
                         }
                         if (hWnd != IntPtr.Zero && !_initialized) {
                             SetConsoleTitleW("WinUltix - Live Expert Command & Output Stream");
                             SetConsoleCtrlHandler(_ctrlHandler, true);
-                            IntPtr hMenu = GetSystemMenu(hWnd, false);
-                            if (hMenu != IntPtr.Zero) {
-                                DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+                            if (_ownedConsole) {
+                                IntPtr hMenu = GetSystemMenu(hWnd, false);
+                                if (hMenu != IntPtr.Zero) {
+                                    DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+                                }
                             }
                             IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
                             uint outMode;
                             if (hOut != IntPtr.Zero && GetConsoleMode(hOut, out outMode)) {
                                 SetConsoleMode(hOut, outMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
                             }
-                            ApplyDarkThemeAndGeometry(hOut);
+                            if (!_isWindowsTerminal) {
+                                ApplyDarkThemeAndGeometry(hOut);
+                            }
+                            ClearConsoleBuffer(hOut, _isWindowsTerminal);
 
                             IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
                             uint inMode;
@@ -1900,15 +1938,26 @@ Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -Type
                             }
                             _initialized = true;
                         }
-                        if (hWnd != IntPtr.Zero) {
+                        if (hWnd != IntPtr.Zero && !_isWindowsTerminal) {
                             ShowWindow(hWnd, SW_SHOW);
                         }
                         _visible = true;
                     } else {
-                        if (hWnd != IntPtr.Zero) {
+                        if (hWnd != IntPtr.Zero && !_isWindowsTerminal) {
                             ShowWindow(hWnd, SW_HIDE);
                         }
                         _visible = false;
+                    }
+                }
+            }
+
+            public static void Shutdown() {
+                lock (_stateLock) {
+                    _visible = false;
+                    if (_isWindowsTerminal) return;
+                    IntPtr hWnd = GetConsoleWindow();
+                    if (hWnd != IntPtr.Zero) {
+                        ShowWindow(hWnd, _ownedConsole ? SW_HIDE : SW_SHOW);
                     }
                 }
             }
@@ -10479,6 +10528,19 @@ $lblDNS, $comboDNS, $chkDoH, $chkIPv6, $global:lblCurrentDNS, $lblClassic
 ))
 $TabControl.Controls.Add($tabSec)
 }
+function Confirm-Z6Operation {
+param(
+[Parameter(Mandatory=$true)][string]$Title,
+[Parameter(Mandatory=$true)][string]$Message,
+[System.Windows.Forms.MessageBoxIcon]$Icon = [System.Windows.Forms.MessageBoxIcon]::Question
+)
+$ans = if ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired) {
+[System.Windows.Forms.MessageBox]::Show($global:form, $Message, "WinUltix - $Title", [System.Windows.Forms.MessageBoxButtons]::YesNo, $Icon)
+} else {
+[System.Windows.Forms.MessageBox]::Show($Message, "WinUltix - $Title", [System.Windows.Forms.MessageBoxButtons]::YesNo, $Icon)
+}
+return ($ans -eq [System.Windows.Forms.DialogResult]::Yes)
+}
 function Start-ExternalConsoleAsync {
 param(
 [Parameter(Mandatory=$true)][string]$Title,
@@ -10625,13 +10687,17 @@ ExitCode      = $exitCode
 }
 function Optimize-WinSXS {
 param([System.Windows.Forms.Control[]]$ControlsToDisable)
-if (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
-$warnMsg = "A pending Windows servicing reboot was detected in the CBS registry.`n`nRunning DISM /ResetBase while a reboot is pending on Windows 11 24H2/26H2 may fail with error 0x800f0806.`n`nDo you still want to force execution?"
-$ans = [System.Windows.Forms.MessageBox]::Show($warnMsg, "WinUltix - CBS Reboot Pending", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
-Write-GUI " -> WinSxS ResetBase aborted due to pending reboot.`n"
-return
+$rebootPending = Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+$msg = "This operation runs 'DISM /StartComponentCleanup /ResetBase' in an external console:`n`n" +
+"  - Permanently deletes superseded Windows Update backup layers (cannot be uninstalled afterward).`n" +
+"  - Causes heavy disk/CPU I/O and typically takes 5 to 20 minutes.`n"
+if ($rebootPending) {
+$msg += "`n[!] WARNING: A pending CBS servicing reboot was detected. Running /ResetBase before rebooting may fail with error 0x800f0806.`n"
 }
+$msg += "`nDo you want to proceed?"
+if (-not (Confirm-Z6Operation -Title "WinSxS ResetBase" -Message $msg -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning))) {
+Write-GUI " -> WinSxS ResetBase cancelled by user.`n"
+return
 }
 $cmd = "echo Aggressive WinSxS compression in progress (ResetBase)... & dism /online /cleanup-image /startcomponentcleanup /resetbase & (if !ERRORLEVEL! NEQ 0 set WUX_ERR=!ERRORLEVEL!)"
 Unlock-UltixTrustedInstaller
@@ -10700,8 +10766,7 @@ $msg = "This operation will open an external maintenance console and execute:`n`
 "  2. DISM Image Repair (DISM /Online /Cleanup-Image /RestoreHealth)`n" +
 "  3. System File Checker (sfc /scannow)`n`n" +
 "Full verification typically takes 5 to 15 minutes. Do you want to proceed?"
-$ans = [System.Windows.Forms.MessageBox]::Show($msg, "WinUltix - System Integrity Repair", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+if (-not (Confirm-Z6Operation -Title "System Integrity Repair" -Message $msg)) {
 Write-GUI " -> System Integrity Repair cancelled by user.`n"
 return
 }
@@ -10711,6 +10776,14 @@ Start-ExternalConsoleAsync -Title "WinUltix - System Integrity Repair" -CommandC
 }
 function Clear-NetworkStack {
 param([System.Windows.Forms.Control[]]$ControlsToDisable)
+$msg = "This operation will flush DNS/ARP caches, reset WinHTTP proxy, reset the Winsock catalog, and reset the TCP/IPv4 & IPv6 stack.`n`n" +
+"  - Active downloads, VPN tunnels, and remote sessions may drop immediately.`n" +
+"  - A system reboot is recommended afterward to finalize Winsock changes.`n`n" +
+"Do you want to proceed?"
+if (-not (Confirm-Z6Operation -Title "Refresh Network Stack" -Message $msg -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning))) {
+Write-GUI " -> Network Stack refresh cancelled by user.`n"
+return
+}
 Write-GUI " -> Initiating Full Network Stack Refresh (Background Thread)..."
 Update-Progress 10
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
@@ -10807,6 +10880,12 @@ Write-GUI ""
 }
 function Repair-WindowsUpdateSubsystem {
 param([System.Windows.Forms.Control[]]$ControlsToDisable)
+$msg = "This operation will stop Windows Update / BITS / CryptSvc services, purge pending BITS queues (qmgr*.dat), clear Catroot2 & SoftwareDistribution\DataStore (update history), and re-register 21 core COM DLLs.`n`n" +
+"Do you want to proceed?"
+if (-not (Confirm-Z6Operation -Title "Reset Windows Update & CryptSvc" -Message $msg)) {
+Write-GUI " -> Windows Update subsystem reset cancelled by user.`n"
+return
+}
 Write-GUI " -> Initiating Windows Update & Cryptographic First-Aid (Background Thread)..."
 Update-Progress 5
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
@@ -11078,6 +11157,12 @@ Write-GUI ""
 }
 function Repair-UwpGamingRuntime {
 param([System.Windows.Forms.Control[]]$ControlsToDisable)
+$msg = "This operation will unlock core Store/Xbox services, close running Microsoft Store & WinGet processes, reset WinHTTP/WinINet proxy settings, re-register Store/WinGet/Xbox manifests, and refresh the WinGet source index (source2.msix).`n`n" +
+"Do you want to proceed?"
+if (-not (Confirm-Z6Operation -Title "Repair UWP, Store & Gaming Services" -Message $msg)) {
+Write-GUI " -> UWP & Gaming Services repair cancelled by user.`n"
+return
+}
 Write-GUI " -> Initiating UWP, Store, WinGet & Xbox Gaming Services First-Aid (Background Thread)..."
 Update-Progress 10
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -ScriptBlock {
@@ -15350,7 +15435,7 @@ $global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 165, 
 $global:btnExpertConsole.ForeColor = [System.Drawing.Color]::White
 $global:btnExpertConsole.Update()
 Write-UltixExpertCommand -CommandText "Expert Command & Output Stream attached (PID: $PID | Console Host Active)" -Module "SYSTEM"
-Write-UltixExpertResult -OutputText "[TIP] Drag mouse to select text and press Enter or Ctrl+C to copy. QuickEdit pause is disabled." -ExitCode 0 -Module "SYSTEM"
+Write-UltixExpertResult -OutputText "[TIP] Drag to select + Enter/Ctrl+C to copy (QuickEdit pause disabled)." -ExitCode 0 -Module "SYSTEM"
 } else {
 $global:btnExpertConsole.Text = "[ Expert: OFF ]"
 $global:btnExpertConsole.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 45, 48)
@@ -15522,7 +15607,7 @@ $btnExportProfile.FlatStyle = "Flat"
 $btnExportProfile.Anchor = 'Bottom, Left'
 $btnExportProfile.AccessibleName = "FooterButton"
 $btnExportProfile.Font = Get-UltixFittedFont -Control $btnExportProfile -Role "FooterButton"
-$btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, Quantum Scheduler, Power & Display settings, USB Guard, SRP locks, Services, and Hardware locks into a portable JSON snapshot." })
+$btnExportProfile.Add_MouseEnter({ Show-Description "Exports your active Registry tweaks, Start Menu layout, DNS/DoH profile, Quantum Scheduler, Power & Display settings, USB Guard, SRP locks, Services, and Hardware locks into a portable JSON snapshot." })
 $btnExportProfile.Add_MouseLeave({ Restore-Log })
 $btnExportProfile.Add_Click({ Export-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
 $btnImportProfile = New-Object System.Windows.Forms.Button
@@ -15577,7 +15662,7 @@ try { if ($null -ne $task.Runspace) { $task.Runspace.Close(); $task.Runspace.Dis
 }
 $global:UltixActiveTasks.Clear()
 }
-try { [WinUltix.ExpertConsole]::SetVisible($false) } catch { }
+try { [WinUltix.ExpertConsole]::Shutdown() } catch { }
 $global:form.Dispose()
 if ($null -ne $global:UltixFontCache) {
 foreach ($fObj in $global:UltixFontCache.Values) {
