@@ -7,6 +7,7 @@
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.ServiceProcess
 
 # ------------------------------------------
 # 1. UNIFIED WIN32 / NTDLL / KERNEL32 / CFGMGR32 P/INVOKE RUNTIME
@@ -2338,7 +2339,7 @@ function Stop-UltixService {
         [switch]$IncludePerUserInstances,
         [string]$Module = ""
     )
-    $targets = [System.Collections.Generic.List[System.ServiceProcess.ServiceController]]::new()
+    $targets = [System.Collections.Generic.List[object]]::new()
     try {
         $mainSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
         if ($null -ne $mainSvc) { $targets.Add($mainSvc) }
@@ -2565,7 +2566,7 @@ function Set-UltixRegValue {
             Write-UltixExpertResult -OutputText "(Default) = '$Value'" -ExitCode 0 -Module $Module
         } else {
             $writeVal = $Value
-            if ($Type -eq "DWord" -and $writeVal -is [long] -and $writeVal -gt [int]::MaxValue) {
+            if ($Type -eq "DWord" -and ($writeVal -is [long] -or $writeVal -is [uint32] -or $writeVal -is [uint64]) -and $writeVal -gt [int]::MaxValue -and $writeVal -le [uint32]::MaxValue) {
                 $writeVal = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$writeVal), 0)
             }
             Set-ItemProperty -LiteralPath $Path -Name $Name -Value $writeVal -Type $Type -Force -ErrorAction Stop | Out-Null
@@ -2821,7 +2822,10 @@ function Format-UltixDeviceName {
 }
 
 function Write-UltixSystemBanner {
-    param([string]$StatusMessage = "Ready for deployment. Modular architecture loaded successfully.")
+    param(
+        [string]$StatusMessage = "Ready for deployment. Modular architecture loaded successfully.",
+        [switch]$ShowQuickGuide
+    )
 
     if ($null -eq $global:infoBox -or $global:infoBox.IsDisposed) { return }
 
@@ -3022,6 +3026,57 @@ function Write-UltixSystemBanner {
         $global:infoBox.SelectionColor = [System.Drawing.Color]::LightGreen
         $global:infoBox.AppendText("$StatusMessage`r`n")
     }
+
+    if ($null -ne $global:UltixRebootReasons -and $global:UltixRebootReasons.Count -gt 0) {
+        $global:infoBox.SelectionColor = [System.Drawing.Color]::Orange
+        $global:infoBox.AppendText("[*] Reboot Recommended to finalize: $(@($global:UltixRebootReasons) -join ', ')`r`n")
+    }
+
+    if ($ShowQuickGuide.IsPresent) {
+        $cHead = [System.Drawing.Color]::Cyan
+        $cKey  = [System.Drawing.Color]::LightSkyBlue
+        $cText = [System.Drawing.Color]::FromArgb(255, 195, 200, 208)
+
+        $appendSeg = {
+            param([string]$Text, [System.Drawing.Color]$Color)
+            $global:infoBox.SelectionStart  = $global:infoBox.TextLength
+            $global:infoBox.SelectionLength = 0
+            $global:infoBox.SelectionColor  = $Color
+            $global:infoBox.AppendText($Text)
+        }
+
+        & $appendSeg "`r`n--- QUICK START (ZERO BLACK BOXES) ---`r`n" $cHead
+
+        & $appendSeg "  * Checklists     : " $cKey
+        & $appendSeg "Cleanup, Debloat, Tweaks, Services & Security ask before changing.`r`n" $cText
+
+        & $appendSeg "  * [ ? ] Buttons  : " $cKey
+        & $appendSeg "Read-only audit printed directly into this log (zero OS changes).`r`n" $cText
+
+        & $appendSeg "  * [ OPTIONAL ]   : " ([System.Drawing.Color]::Gold)
+        & $appendSeg "Opt-In items stay unchecked (Camera, Mic, Printer, Xbox, VBS, USB).`r`n" $cText
+
+        & $appendSeg "  * 1-Click Revert : " ([System.Drawing.Color]::LightGreen)
+        & $appendSeg "Tweaks, Services, Security & Hardware support symmetric rollback.`r`n" $cText
+
+        & $appendSeg "  * [ Expert: ON ] : " ([System.Drawing.Color]::Orange)
+        & $appendSeg "Live Win32 console showing exact commands, reg writes & exit codes.`r`n`r`n" $cText
+
+        & $appendSeg "  Button Colors    : " $cKey
+        & $appendSeg "Slate" ([System.Drawing.Color]::Silver)
+        & $appendSeg " = Standard | " $cText
+        & $appendSeg "Blue" ([System.Drawing.Color]::LightSkyBlue)
+        & $appendSeg " = Inspector / Read-Only | " $cText
+        & $appendSeg "Red" ([System.Drawing.Color]::IndianRed)
+        & $appendSeg " = Aggressive`r`n" $cText
+
+        & $appendSeg "  Typical Order    : " $cKey
+        & $appendSeg "Debloat -> Tweaks -> Services -> Security -> Hardware (Scan First)`r`n" $cText
+
+        $global:infoBox.SelectionStart  = $global:infoBox.TextLength
+        $global:infoBox.SelectionLength = 0
+        $global:infoBox.SelectionColor  = [System.Drawing.Color]::LightGray
+    }
 }
 
 function Show-Description { 
@@ -3031,9 +3086,28 @@ function Show-Description {
     }
 }
 
+$global:UltixTabDescriptions = @{
+    "Cleanup"   = "[CLEANUP] Disk, cache & orphan hygiene (WU, Temp, Browsers, Shaders, DriverStore, MSI).`r`nEvery tool scans first and opens a checklist or grid so you review items before removal.`r`nHover any button for details, or click [?] for a read-only audit into the log below."
+    "Debloat"   = "[DEBLOAT] OneDrive removal, 64 UWP/AI targets (Recall/Copilot), FOD & Appx GC.`r`nCore OS/Store/Xbox runtimes are protected; daily apps (Photos/Camera/Xbox) are Opt-In.`r`nBottom grids are manual inspectors for targeted review only (do not Select All)."
+    "Tweaks"    = "[TWEAKS] Taskbar, Start Menu, Explorer, Power/Display, Raw Mouse & Gaming Registry.`r`nEvery category supports read-only [?] audits and 1-click Symmetric Revert to defaults.`r`nHover any button for details before opening its interactive checklist."
+    "Services"  = "[SERVICES] Reversible Office (12) & Gaming (60) profiles, Telemetry Tasks & 3 managers.`r`nCritical OS services are locked in Red; Printer, Camera, RDP & Xbox are Opt-In.`r`nUse the bottom grids for targeted manual control of services, tasks & startup items."
+    "Security"  = "[SECURITY] Privacy/AppPrivacy, UEFI WPBT block, 4-Layer USB Guard, SRP+IFEO & DoH DNS.`r`nAll policy locks support 1-click Revert; restrictive USB & device locks are Opt-In.`r`nBottom buttons launch classic Win32 Control Panel & MMC tools directly."
+    "Integrity" = "[INTEGRITY] OS recovery (ChkDisk/DISM/SFC, WinSxS, WMI, WU, Network, Spooler, Store).`r`nRun [?] health audits first (read-only); heavy/disruptive repairs prompt before running.`r`nHover any button to inspect exact recovery actions before launching."
+    "Hardware"  = "[HARDWARE] Low-level latency cockpit. Read-only diagnostics: USB Map, WHEA & Live DPC.`r`nTuners (Affinity, CPPC, Quantum, MSI/IRQ, Timer, NVMe, NDIS) include backup & restore.`r`nHover any button to check whether changes apply live or require a reboot."
+}
+
 function Restore-Log { 
     if ($null -ne $global:descBox -and -not $global:descBox.IsDisposed) {
-        $global:descBox.Text = "Hover over any button to see operation details." 
+        $tabKey = if ($null -ne $global:tabControl -and -not $global:tabControl.IsDisposed -and $null -ne $global:tabControl.SelectedTab) {
+            [string]$global:tabControl.SelectedTab.Text
+        } else {
+            ""
+        }
+        if (-not [string]::IsNullOrWhiteSpace($tabKey) -and $global:UltixTabDescriptions.ContainsKey($tabKey)) {
+            $global:descBox.Text = $global:UltixTabDescriptions[$tabKey]
+        } else {
+            $global:descBox.Text = "Hover over any button to see operation details."
+        }
     }
 }
 
@@ -3047,7 +3121,196 @@ function Update-Progress {
     }
 }
 
+$global:UltixRebootReasons = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+function Set-UltixRebootRequired {
+    param([string]$Reason = "Pending Changes")
+
+    if ($null -eq $global:UltixRebootReasons) {
+        $global:UltixRebootReasons = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+
+    $cleanReason = if ([string]::IsNullOrWhiteSpace($Reason)) { "Pending Changes" } else { $Reason.Trim() }
+    [void]$global:UltixRebootReasons.Add($cleanReason)
+
+    if ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired) {
+        $baseTitle = "WinUltix - Ultimate System Toolkit $Global:AppVersion"
+        $tag = if ($global:UltixRebootReasons.Count -le 3) {
+            "  [Reboot Recommended: $(@($global:UltixRebootReasons) -join ', ')]"
+        } else {
+            "  [Reboot Recommended ($($global:UltixRebootReasons.Count) subsystems)]"
+        }
+        $global:form.Text = "$baseTitle$tag"
+    }
+}
+
+function Get-UltixDnsCatalog {
+    return [ordered]@{
+        "Quad9 (9.9.9.9)" = @{
+            IPv4     = @("9.9.9.9", "149.112.112.112")
+            IPv6     = @("2620:fe::fe", "2620:fe::9")
+            Template = "https://dns.quad9.net/dns-query"
+            Badge    = "[SECURITY | CH]"
+            Category = "Security"
+            Summary  = "Blocks malware, phishing & C2 domains (Swiss non-profit, DNSSEC, zero-log)."
+        }
+        "Cloudflare (1.1.1.1)" = @{
+            IPv4     = @("1.1.1.1", "1.0.0.1")
+            IPv6     = @("2606:4700:4700::1111", "2606:4700:4700::1001")
+            Template = "https://cloudflare-dns.com/dns-query"
+            Badge    = "[FAST | UNFILTERED]"
+            Category = "Standard"
+            Summary  = "Unfiltered ultra-low latency global Anycast resolver (no content blocking)."
+        }
+        "Cloudflare Security (1.1.1.2)" = @{
+            IPv4     = @("1.1.1.2", "1.0.0.2")
+            IPv6     = @("2606:4700:4700::1112", "2606:4700:4700::1002")
+            Template = "https://security.cloudflare-dns.com/dns-query"
+            Badge    = "[SECURITY]"
+            Category = "Security"
+            Summary  = "Fast Anycast resolver with automatic malware & phishing domain blocking."
+        }
+        "Cloudflare Family (1.1.1.3)" = @{
+            IPv4     = @("1.1.1.3", "1.0.0.3")
+            IPv6     = @("2606:4700:4700::1113", "2606:4700:4700::1003")
+            Template = "https://family.cloudflare-dns.com/dns-query"
+            Badge    = "[PARENTAL | 18+]"
+            Category = "Parental"
+            Summary  = "Parental Control: blocks malware, phishing and adult (18+) websites."
+        }
+        "AdGuard (94.140.14.14)" = @{
+            IPv4     = @("94.140.14.14", "94.140.15.15")
+            IPv6     = @("2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff")
+            Template = "https://dns.adguard-dns.com/dns-query"
+            Badge    = "[ADBLOCK]"
+            Category = "AdBlock"
+            Summary  = "System-wide DNS blocking of ads, trackers, telemetry and phishing domains."
+        }
+        "AdGuard Family (94.140.14.15)" = @{
+            IPv4     = @("94.140.14.15", "94.140.15.16")
+            IPv6     = @("2a10:50c0::bad1:ff", "2a10:50c0::bad2:ff")
+            Template = "https://family.adguard-dns.com/dns-query"
+            Badge    = "[PARENTAL | ADS+18+]"
+            Category = "Parental"
+            Summary  = "Parental Control: blocks ads, trackers, adult (18+) & enforces SafeSearch."
+        }
+        "DNS4EU Protective (86.54.11.1)" = @{
+            IPv4     = @("86.54.11.1", "86.54.11.201")
+            IPv6     = @("2a13:1001::86:54:11:1", "2a13:1001::86:54:11:201")
+            Template = "https://protective.joindns4.eu/dns-query"
+            Badge    = "[SECURITY | EU]"
+            Category = "Security"
+            Summary  = "EU sovereign GDPR resolver: blocks malware, phishing & C2 domains."
+        }
+        "DNS4EU AdBlock (86.54.11.13)" = @{
+            IPv4     = @("86.54.11.13", "86.54.11.213")
+            IPv6     = @("2a13:1001::86:54:11:13", "2a13:1001::86:54:11:213")
+            Template = "https://noads.joindns4.eu/dns-query"
+            Badge    = "[ADBLOCK | EU]"
+            Category = "AdBlock"
+            Summary  = "EU GDPR resolver: blocks malware, phishing, web/app ads & trackers."
+        }
+        "DNS4EU Child (86.54.11.12)" = @{
+            IPv4     = @("86.54.11.12", "86.54.11.212")
+            IPv6     = @("2a13:1001::86:54:11:12", "2a13:1001::86:54:11:212")
+            Template = "https://child.joindns4.eu/dns-query"
+            Badge    = "[PARENTAL | EU 18+]"
+            Category = "Parental"
+            Summary  = "EU Parental Control: blocks malware, explicit (18+), violence & drug sites."
+        }
+        "DNS4EU Child+Ads (86.54.11.11)" = @{
+            IPv4     = @("86.54.11.11", "86.54.11.211")
+            IPv6     = @("2a13:1001::86:54:11:11", "2a13:1001::86:54:11:211")
+            Template = "https://child-noads.joindns4.eu/dns-query"
+            Badge    = "[PARENTAL | EU ALL]"
+            Category = "Parental"
+            Summary  = "EU Full Filter: blocks malware, ads/trackers, 18+, violence & drug sites."
+        }
+        "Control D Ads+Malware (76.76.2.2)" = @{
+            IPv4     = @("76.76.2.2", "76.76.10.2")
+            IPv6     = @("2606:1a40::2", "2606:1a40:1::2")
+            Template = "https://freedns.controld.com/p2"
+            Badge    = "[ADBLOCK]"
+            Category = "AdBlock"
+            Summary  = "Global Anycast DNS blocking malware, ads & tracking domains (DNSSEC, no ECS)."
+        }
+        "Control D Family (76.76.2.4)" = @{
+            IPv4     = @("76.76.2.4", "76.76.10.4")
+            IPv6     = @("2606:1a40::4", "2606:1a40:1::4")
+            Template = "https://freedns.controld.com/family"
+            Badge    = "[PARENTAL | ADS+18+]"
+            Category = "Parental"
+            Summary  = "Parental Control: blocks malware, ads, trackers, adult (18+) & drug sites."
+        }
+        "CleanBrowsing Family (185.228.168.168)" = @{
+            IPv4     = @("185.228.168.168", "185.228.169.168")
+            IPv6     = @("2a0d:2a00:1::", "2a0d:2a00:2::")
+            Template = "https://doh.cleanbrowsing.org/doh/family-filter/"
+            Badge    = "[PARENTAL | STRICT]"
+            Category = "Parental"
+            Summary  = "Strict Parental Filter: blocks 18+, proxies/VPNs, mixed-content & SafeSearch."
+        }
+        "OpenDNS (208.67.222.222)" = @{
+            IPv4     = @("208.67.222.222", "208.67.220.220")
+            IPv6     = @("2620:119:35::35", "2620:119:53::53")
+            Template = "https://doh.opendns.com/dns-query"
+            Badge    = "[SECURITY | CISCO]"
+            Category = "Security"
+            Summary  = "Cisco Umbrella Home resolver blocking phishing & known malicious domains."
+        }
+        "OpenDNS Family (208.67.222.123)" = @{
+            IPv4     = @("208.67.222.123", "208.67.220.123")
+            IPv6     = @()
+            Template = "https://doh.familyshield.opendns.com/dns-query"
+            Badge    = "[PARENTAL | IPv4]"
+            Category = "Parental"
+            Summary  = "Cisco FamilyShield: blocks adult (18+), proxies & phishing (IPv4-only)."
+        }
+        "Google (8.8.8.8)" = @{
+            IPv4     = @("8.8.8.8", "8.8.4.4")
+            IPv6     = @("2001:4860:4860::8888", "2001:4860:4860::8844")
+            Template = "https://dns.google/dns-query"
+            Badge    = "[FAST | UNFILTERED]"
+            Category = "Standard"
+            Summary  = "Unfiltered Google Public DNS (high availability, DNSSEC, no parental filter)."
+        }
+        "Default (DHCP)" = @{
+            IPv4     = @()
+            IPv6     = @()
+            Template = ""
+            Badge    = "[ISP / ROUTER]"
+            Category = "Dhcp"
+            Summary  = "Reverts all active adapters to router/ISP DHCP DNS and clears DoH locks."
+        }
+    }
+}
+
+function Format-UltixDnsDescription {
+    param([AllowEmptyString()][string]$Provider)
+    $catalog = Get-UltixDnsCatalog
+    if ([string]::IsNullOrWhiteSpace($Provider) -or -not $catalog.Contains($Provider)) {
+        return "Select a hardened or parental-control DNS profile, then click Apply DNS."
+    }
+
+    $cfg = $catalog[$Provider]
+    if ($cfg.Category -eq "Dhcp") {
+        return "[DNS] $Provider $($cfg.Badge)`r`n$($cfg.Summary)`r`nClears static IPv4/IPv6 NameServer entries & Dnscache DoH policies on all active NICs."
+    }
+
+    $v4Text = ($cfg.IPv4 -join ", ")
+    $v6Text = if (@($cfg.IPv6).Count -gt 0) { ($cfg.IPv6 -join ", ") } else { "Not offered (IPv4-only; disable DHCPv6 if needed)" }
+    return "[DNS] $Provider $($cfg.Badge) - $($cfg.Summary)`r`nIPv4: $v4Text | IPv6: $v6Text`r`nDoH : $($cfg.Template)"
+}
+
 function Get-UltixActiveNetworkAdapters {
+    $dnsCatalog = Get-UltixDnsCatalog
+    $ipToProvider = @{}
+    foreach ($kvp in $dnsCatalog.GetEnumerator()) {
+        foreach ($ip in @($kvp.Value.IPv4)) {
+            if (-not [string]::IsNullOrWhiteSpace($ip)) { $ipToProvider[$ip] = $kvp.Key }
+        }
+    }
+
     $adapters = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
         if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
@@ -3072,22 +3335,19 @@ function Get-UltixActiveNetworkAdapters {
                 }
             }
 
-            $ifGuid = [string]$nic.Id
-            $v4RegKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$ifGuid"
-            $staticNs = [string](Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
-            $primaryV4 = if ($v4Addrs.Count -gt 0) { $v4Addrs[0] } else { "" }
+            $ifGuid     = [string]$nic.Id
+            $v4RegKey   = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$ifGuid"
+            $v6RegKey   = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$ifGuid"
+            $staticNs   = [string](Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
+            $staticNsV6 = [string](Get-ItemProperty -LiteralPath $v6RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
+            $primaryV4  = if ($v4Addrs.Count -gt 0) { $v4Addrs[0] } else { "" }
 
             $providerName = if ([string]::IsNullOrWhiteSpace($staticNs)) {
                 "Default (DHCP)"
+            } elseif ($ipToProvider.ContainsKey($primaryV4)) {
+                $ipToProvider[$primaryV4]
             } else {
-                switch ($primaryV4) {
-                    "9.9.9.9"        { "Quad9 (9.9.9.9)" }
-                    "1.1.1.1"        { "Cloudflare (1.1.1.1)" }
-                    "94.140.14.14"   { "AdGuard (94.140.14.14)" }
-                    "8.8.8.8"        { "Google (8.8.8.8)" }
-                    "208.67.222.222" { "OpenDNS (208.67.222.222)" }
-                    default          { "Custom" }
-                }
+                "Custom"
             }
 
             $isDohActive = $false
@@ -3106,6 +3366,7 @@ function Get-UltixActiveNetworkAdapters {
                 DnsV6            = @($v6Addrs)
                 PrimaryV4        = $primaryV4
                 StaticNameServer = $staticNs
+                StaticNameServerV6 = $staticNsV6
                 ProviderName     = $providerName
                 IsDohActive      = $isDohActive
             })
@@ -3121,22 +3382,26 @@ function Update-DNSLabel {
         $activeNic = @(Get-UltixActiveNetworkAdapters) | Select-Object -First 1
         if ($null -eq $activeNic) {
             $global:lblCurrentDNS.Text = "Current DNS: No active internet route"
+            $global:lblCurrentDNS.AccessibleDescription = "No active network adapter with a default gateway was detected."
             $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::DarkGray
             return
         }
 
         if ([string]::IsNullOrWhiteSpace($activeNic.StaticNameServer)) {
-            $dhcpHint = if (-not [string]::IsNullOrWhiteSpace($activeNic.PrimaryV4)) { " (DHCP - $($activeNic.PrimaryV4))" } else { " (DHCP)" }
-            $global:lblCurrentDNS.Text = "Current DNS: Default provider$dhcpHint"
+            $dhcpIp = if (-not [string]::IsNullOrWhiteSpace($activeNic.PrimaryV4)) { $activeNic.PrimaryV4 } else { "Auto" }
+            $global:lblCurrentDNS.Text = "Current DNS: Default (DHCP)`r`nActive IP  : $dhcpIp [$($activeNic.InterfaceAlias)]"
+            $global:lblCurrentDNS.AccessibleDescription = "[ACTIVE DNS] Adapter: $($activeNic.InterfaceName) ($($activeNic.InterfaceAlias))`r`nMode: Automatic DHCP | IPv4: $(($activeNic.DnsV4 -join ', '))`r`nIPv6: $(if($activeNic.DnsV6.Count -gt 0){ $activeNic.DnsV6 -join ', ' }else{ 'None' })"
             $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
             return
         }
 
         $shortProv  = ($activeNic.ProviderName -replace '\s*\([^)]*\)$', '')
-        $stackBadge = if ($activeNic.DnsV6.Count -gt 0) { "IPv4+v6" } else { "IPv4" }
-        $dohBadge   = if ($activeNic.IsDohActive) { " [DoH Encrypted]" } else { " [Plaintext]" }
+        $stackBadge = if (-not [string]::IsNullOrWhiteSpace($activeNic.StaticNameServerV6)) { "IPv4+v6" } else { "IPv4" }
+        $dohShort   = if ($activeNic.IsDohActive) { "[DoH]" } else { "[Plain]" }
+        $dohFull    = if ($activeNic.IsDohActive) { "Native DoH Encrypted" } else { "Plaintext UDP/53" }
 
-        $global:lblCurrentDNS.Text = "Current DNS: $shortProv ($($activeNic.PrimaryV4) | $stackBadge)$dohBadge"
+        $global:lblCurrentDNS.Text = "Current DNS: $shortProv $dohShort`r`nActive IP  : $($activeNic.PrimaryV4) ($stackBadge)"
+        $global:lblCurrentDNS.AccessibleDescription = "[ACTIVE DNS] $($activeNic.ProviderName) | $dohFull`r`nAdapter: $($activeNic.InterfaceName) ($($activeNic.InterfaceAlias))`r`nIPv4: $(($activeNic.DnsV4 -join ', ')) | IPv6: $(if($activeNic.DnsV6.Count -gt 0){ $activeNic.DnsV6 -join ', ' }else{ 'None' })"
         $global:lblCurrentDNS.ForeColor = if ($activeNic.IsDohActive) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::LightSkyBlue }
     } catch {
         $global:lblCurrentDNS.Text = "Current DNS: Unknown"
@@ -3461,9 +3726,10 @@ function Invoke-AsyncTask {
     }
 
     $syncContext = [hashtable]::Synchronized(@{
-        Logs         = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-        Progress     = -1
-        LockProgress = $false
+        Logs          = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        RebootReasons = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        Progress      = -1
+        LockProgress  = $false
     })
 
     # Pre-hydrate toolkit functions into isolated Runspace InitialSessionState
@@ -3475,16 +3741,17 @@ function Invoke-AsyncTask {
     }
 
     foreach ($fnName in $fnRoster) {
-        if ($fnName -in @("Write-GUI", "Update-Progress", "Show-Description", "Restore-Log")) { continue }
+        if ($fnName -in @("Write-GUI", "Update-Progress", "Show-Description", "Restore-Log", "Set-UltixRebootRequired")) { continue }
         $cmd = Get-Command -Name $fnName -CommandType Function -ErrorAction SilentlyContinue
         if ($null -ne $cmd) {
             $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fnName, $cmd.Definition))
         }
     }
 
-    # Inject thread-safe UI shims so any helper calling Write-GUI / Update-Progress inside a Runspace routes through $UltixSync
+    # Inject thread-safe UI shims so any helper calling Write-GUI / Update-Progress / Set-UltixRebootRequired inside a Runspace routes through $UltixSync
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Write-GUI", 'param([AllowEmptyString()][string]$Message, [switch]$DeferUpdate) if ($null -ne $UltixSync -and -not [string]::IsNullOrWhiteSpace($Message)) { $UltixSync.Logs.Enqueue($Message) }'))
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Update-Progress", 'param([int]$Percent) if ($null -ne $UltixSync -and -not $UltixSync.LockProgress) { $UltixSync.Progress = $Percent }'))
+    $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Set-UltixRebootRequired", 'param([string]$Reason = "Pending Changes") if ($null -ne $UltixSync -and $null -ne $UltixSync.RebootReasons) { $UltixSync.RebootReasons.Enqueue($Reason) }'))
 
     if ($null -eq $global:UltixActiveTasks) {
         $global:UltixActiveTasks = [System.Collections.Generic.List[hashtable]]::new()
@@ -3553,7 +3820,12 @@ function Invoke-AsyncTask {
             $global:infoBox.Update()
         }
 
-        if ($sync.Progress -ge 0 -and $sync.Progress -ne $state.LastProgress) {
+        $rbReason = $null
+        while ($sync.RebootReasons.TryDequeue([ref]$rbReason)) {
+            Set-UltixRebootRequired -Reason $rbReason
+        }
+
+        if (-not $sync.LockProgress -and $sync.Progress -ge 0 -and $sync.Progress -ne $state.LastProgress) {
             $state.LastProgress = $sync.Progress
             Update-Progress $sync.Progress
         }
@@ -3573,6 +3845,10 @@ function Invoke-AsyncTask {
             while ($sync.Logs.TryDequeue([ref]$logLine)) {
                 Write-GUI -Message $logLine -DeferUpdate
                 $dequeuedFinal = $true
+            }
+            $rbReasonFinal = $null
+            while ($sync.RebootReasons.TryDequeue([ref]$rbReasonFinal)) {
+                Set-UltixRebootRequired -Reason $rbReasonFinal
             }
             if ($dequeuedFinal -and $null -ne $global:infoBox -and -not $global:infoBox.IsDisposed) {
                 $global:infoBox.ScrollToCaret()
@@ -3708,10 +3984,11 @@ function Show-ActionModal {
     )
     $modal = New-Object System.Windows.Forms.Form
     $modal.Text = $Title
-    $modal.Size = New-Object System.Drawing.Size(780, 680)
-    $modal.MinimumSize = New-Object System.Drawing.Size(780, 520)
+    $modal.Size = New-Object System.Drawing.Size(840, 695)
+    $modal.MinimumSize = New-Object System.Drawing.Size(840, 540)
     $modal.StartPosition = "CenterParent"
     $modal.FormBorderStyle = "Sizable"
+    $modal.KeyPreview = $true
     $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
     $modal.ForeColor = [System.Drawing.Color]::White
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
@@ -3720,129 +3997,407 @@ function Show-ActionModal {
     $lblDesc.Text = $Description
     $lblDesc.UseMnemonic = $false
     $lblDesc.Location = New-Object System.Drawing.Point(15, 10)
-    $lblDesc.Size = New-Object System.Drawing.Size(730, 38)
+    $lblDesc.Size = New-Object System.Drawing.Size(795, 38)
     $lblDesc.Font = Get-UltixFont -Role "ModalDesc"
     $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
     $lblDesc.Anchor = 'Top, Left, Right'
 
     $hasValidItems = ($null -ne $AuditResults -and $AuditResults.Count -gt 0)
 
-    $btnSelAll = New-Object System.Windows.Forms.Button
-    $btnSelAll.Text = "Select All"
-    $btnSelAll.UseMnemonic = $false
-    $btnSelAll.Location = New-Object System.Drawing.Point(15, 51)
-    $btnSelAll.Size = New-Object System.Drawing.Size(118, 30)
-    $btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
-    $btnSelAll.ForeColor = [System.Drawing.Color]::White
-    $btnSelAll.FlatStyle = "Flat"
-    $btnSelAll.Font = Get-UltixFittedFont -Control $btnSelAll -Role "ToolbarButton"
-    $btnSelAll.Enabled = $hasValidItems
+    # Row 1: Filter Bar + Counter
+    $lblSearch = New-Object System.Windows.Forms.Label
+    $lblSearch.Text = "Filter:"
+    $lblSearch.UseMnemonic = $false
+    $lblSearch.Location = New-Object System.Drawing.Point(15, 54)
+    $lblSearch.Size = New-Object System.Drawing.Size(48, 22)
+    $lblSearch.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblSearch.ForeColor = [System.Drawing.Color]::LightSkyBlue
 
-    $btnSelNone = New-Object System.Windows.Forms.Button
-    $btnSelNone.Text = "Deselect All"
-    $btnSelNone.UseMnemonic = $false
-    $btnSelNone.Location = New-Object System.Drawing.Point(140, 51)
-    $btnSelNone.Size = New-Object System.Drawing.Size(118, 30)
-    $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
-    $btnSelNone.ForeColor = [System.Drawing.Color]::White
-    $btnSelNone.FlatStyle = "Flat"
-    $btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
-    $btnSelNone.Enabled = $hasValidItems
+    $txtSearch = New-Object System.Windows.Forms.TextBox
+    $txtSearch.Location = New-Object System.Drawing.Point(65, 51)
+    $txtSearch.Size = New-Object System.Drawing.Size(270, 26)
+    $txtSearch.BackColor = [System.Drawing.Color]::FromArgb(255, 38, 40, 45)
+    $txtSearch.ForeColor = [System.Drawing.Color]::White
+    $txtSearch.BorderStyle = "FixedSingle"
+    $txtSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10.0)
+    $txtSearch.Enabled = $hasValidItems
 
+    $btnClearFilter = New-Object System.Windows.Forms.Button
+    $btnClearFilter.Text = "X"
+    $btnClearFilter.UseMnemonic = $false
+    $btnClearFilter.Location = New-Object System.Drawing.Point(340, 51)
+    $btnClearFilter.Size = New-Object System.Drawing.Size(28, 25)
+    $btnClearFilter.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
+    $btnClearFilter.ForeColor = [System.Drawing.Color]::LightGray
+    $btnClearFilter.FlatStyle = "Flat"
+    $btnClearFilter.Font = Get-UltixFont -Role "IconButton" -CustomSize 8.5
+    $btnClearFilter.Enabled = $hasValidItems
+
+    $lblCount = New-Object System.Windows.Forms.Label
+    $lblCount.Location = New-Object System.Drawing.Point(380, 54)
+    $lblCount.Size = New-Object System.Drawing.Size(430, 22)
+    $lblCount.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblCount.ForeColor = [System.Drawing.Color]::LightGray
+    $lblCount.TextAlign = "MiddleRight"
+    $lblCount.Anchor = 'Top, Right'
+
+    # Row 2: Quick Selection Toolbar
     $btnSelDet = New-Object System.Windows.Forms.Button
     $btnSelDet.Text = "Select Detected"
     $btnSelDet.UseMnemonic = $false
-    $btnSelDet.Location = New-Object System.Drawing.Point(265, 51)
-    $btnSelDet.Size = New-Object System.Drawing.Size(140, 30)
+    $btnSelDet.Location = New-Object System.Drawing.Point(15, 85)
+    $btnSelDet.Size = New-Object System.Drawing.Size(142, 28)
     $btnSelDet.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
     $btnSelDet.ForeColor = [System.Drawing.Color]::White
     $btnSelDet.FlatStyle = "Flat"
     $btnSelDet.Font = Get-UltixFittedFont -Control $btnSelDet -Role "ToolbarButton"
     $btnSelDet.Enabled = $hasValidItems
 
-    $lblCount = New-Object System.Windows.Forms.Label
-    $lblCount.Location = New-Object System.Drawing.Point(545, 56)
-    $lblCount.Size = New-Object System.Drawing.Size(200, 22)
-    $lblCount.Font = New-Object System.Drawing.Font("Consolas", 10.0, [System.Drawing.FontStyle]::Bold)
-    $lblCount.ForeColor = [System.Drawing.Color]::LightGray
-    $lblCount.TextAlign = "MiddleRight"
-    $lblCount.Anchor = 'Top, Right'
-    
-    $chkList = New-Object System.Windows.Forms.CheckedListBox
-    $chkList.Location = New-Object System.Drawing.Point(15, 88)
-    $chkList.Size = New-Object System.Drawing.Size(730, 480)
-    $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38)
-    $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
-    $chkList.BorderStyle = "FixedSingle"
-    $chkList.Font = Get-UltixFont -Role "GridMono"
-    $chkList.CheckOnClick = $false
-    $chkList.HorizontalScrollbar = $true
-    $chkList.Anchor = 'Top, Bottom, Left, Right'
-
-    if ($hasValidItems) {
-        $chkList.BeginUpdate()
-        foreach ($item in $AuditResults) {
-            $isOptIn = (
-                ($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
-                ($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
-            )
-            if ($item.IsDetected) {
-                if ($isOptIn) {
-                    [void]$chkList.Items.Add("[ OPTIONAL ]  " + $item.UIDisplayName, $false)
-                } else {
-                    [void]$chkList.Items.Add("[ DETECTED ]  " + $item.UIDisplayName, $true)
-                }
-            } else { 
-                [void]$chkList.Items.Add("[ OPTIMIZED ] " + $item.UIDisplayName, $false) 
-            }
-        }
-        $chkList.EndUpdate()
-        $lblCount.Text = "Selected: $($chkList.CheckedIndices.Count) / $($AuditResults.Count)"
-    } else { 
-        [void]$chkList.Items.Add("No actionable items returned from audit scanner.", $false)
-        $chkList.Enabled = $false
-        $lblCount.Text = "Selected: 0 / 0"
+    $nextX = 164
+    $btnSelOpt = $null
+    if ($EnableRevert) {
+        $btnSelOpt = New-Object System.Windows.Forms.Button
+        $btnSelOpt.Text = "Select Optimized"
+        $btnSelOpt.UseMnemonic = $false
+        $btnSelOpt.Location = New-Object System.Drawing.Point($nextX, 85)
+        $btnSelOpt.Size = New-Object System.Drawing.Size(148, 28)
+        $btnSelOpt.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 95, 60)
+        $btnSelOpt.ForeColor = [System.Drawing.Color]::White
+        $btnSelOpt.FlatStyle = "Flat"
+        $btnSelOpt.Font = Get-UltixFittedFont -Control $btnSelOpt -Role "ToolbarButton"
+        $btnSelOpt.Enabled = $hasValidItems
+        $nextX += 155
     }
 
-    $updateCounter = ({
-        param([int]$Delta = 0)
-        $totalChecked = $chkList.CheckedIndices.Count + $Delta
-        $lblCount.Text = "Selected: $totalChecked / $($chkList.Items.Count)"
+    $btnSelAll = New-Object System.Windows.Forms.Button
+    $btnSelAll.Text = "Select All"
+    $btnSelAll.UseMnemonic = $false
+    $btnSelAll.Location = New-Object System.Drawing.Point($nextX, 85)
+    $btnSelAll.Size = New-Object System.Drawing.Size(124, 28)
+    $btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelAll.ForeColor = [System.Drawing.Color]::White
+    $btnSelAll.FlatStyle = "Flat"
+    $btnSelAll.Font = Get-UltixFittedFont -Control $btnSelAll -Role "ToolbarButton"
+    $btnSelAll.Enabled = $hasValidItems
+    $nextX += 131
+
+    $btnSelNone = New-Object System.Windows.Forms.Button
+    $btnSelNone.Text = "Deselect All"
+    $btnSelNone.UseMnemonic = $false
+    $btnSelNone.Location = New-Object System.Drawing.Point($nextX, 85)
+    $btnSelNone.Size = New-Object System.Drawing.Size(118, 28)
+    $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelNone.ForeColor = [System.Drawing.Color]::White
+    $btnSelNone.FlatStyle = "Flat"
+    $btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
+    $btnSelNone.Enabled = $hasValidItems
+
+    # Color-Coded 2-Column ListView
+    $listView = New-Object System.Windows.Forms.ListView
+    $listView.Location = New-Object System.Drawing.Point(15, 120)
+    $listView.Size = New-Object System.Drawing.Size(795, 452)
+    $listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+    $listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
+    $listView.BorderStyle = "FixedSingle"
+    $listView.Font = Get-UltixFont -Role "GridText"
+    $listView.View = [System.Windows.Forms.View]::Details
+    $listView.CheckBoxes = $true
+    $listView.FullRowSelect = $true
+    $listView.GridLines = $false
+    $listView.ShowItemToolTips = $true
+    $listView.Anchor = 'Top, Bottom, Left, Right'
+    Enable-UltixDoubleBuffer -Control $listView
+
+    $sorter = New-Object WinUltix.ListViewColumnSorter
+    $listView.ListViewItemSorter = $sorter
+
+    [void]$listView.Columns.Add("Status", 136)
+    [void]$listView.Columns.Add("Setting / Target", 632)
+
+    $listView.Add_Resize({
+        if ($listView.Columns.Count -ge 2) {
+            $listView.Columns[1].Width = [math]::Max(260, $listView.ClientSize.Width - $listView.Columns[0].Width - 4)
+        }
     }.GetNewClosure())
 
-    $chkList.Add_ItemCheck({
-        param($src, $e)
-        $delta = if ($e.NewValue -eq [System.Windows.Forms.CheckState]::Checked) { 1 } else { -1 }
-        & $updateCounter $delta
-    }.GetNewClosure())
+    $txtDetail = New-Object System.Windows.Forms.TextBox
+    $txtDetail.Location = New-Object System.Drawing.Point(15, 578)
+    $txtDetail.Size = New-Object System.Drawing.Size(795, 24)
+    $txtDetail.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $txtDetail.ForeColor = [System.Drawing.Color]::FromArgb(255, 185, 205, 225)
+    $txtDetail.BorderStyle = "FixedSingle"
+    $txtDetail.ReadOnly = $true
+    $txtDetail.Font = New-Object System.Drawing.Font("Consolas", 9.0)
+    $txtDetail.Text = "Tip: Ctrl+F to filter, click column headers to sort, Ctrl+C to copy selected item."
+    $txtDetail.Anchor = 'Bottom, Left, Right'
 
-    $btnSelAll.Add_Click({
-        $chkList.BeginUpdate()
-        for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $true) }
-        $chkList.EndUpdate()
-        & $updateCounter 0
-    }.GetNewClosure())
+    $bgEven = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+    $bgOdd  = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
+    $bgOpt  = [System.Drawing.Color]::FromArgb(255, 44, 39, 25)
 
-    $btnSelNone.Add_Click({
-        $chkList.BeginUpdate()
-        for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $false) }
-        $chkList.EndUpdate()
-        & $updateCounter 0
-    }.GetNewClosure())
+    $fgBadgeDet = [System.Drawing.Color]::LightSkyBlue
+    $fgBadgeOpt = [System.Drawing.Color]::Gold
+    $fgBadgeOk  = [System.Drawing.Color]::LightGreen
 
-    $btnSelDet.Add_Click({
-        $chkList.BeginUpdate()
+    $fgTextDet = [System.Drawing.Color]::FromArgb(255, 238, 242, 248)
+    $fgTextOpt = [System.Drawing.Color]::FromArgb(255, 252, 232, 175)
+    $fgTextOk  = [System.Drawing.Color]::FromArgb(255, 158, 170, 182)
+
+    $indexedData = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $checkedIds  = [System.Collections.Generic.HashSet[int]]::new()
+    $syncGuard   = @{ SuppressEvents = $false }
+
+    if ($hasValidItems) {
         for ($i = 0; $i -lt $AuditResults.Count; $i++) {
             $item = $AuditResults[$i]
             $isOptIn = (
                 ($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
                 ($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
             )
-            $chkList.SetItemChecked($i, ([bool]$item.IsDetected -and -not $isOptIn))
+            $statusKind = if ($item.IsDetected) {
+                if ($isOptIn) { "Optional" } else { "Detected" }
+            } else {
+                "Optimized"
+            }
+            $statusText = switch ($statusKind) {
+                "Detected"  { "[ DETECTED ]" }
+                "Optional"  { "[ OPTIONAL ]" }
+                default     { "[ OPTIMIZED ]" }
+            }
+            $indexedData.Add([PSCustomObject]@{
+                RowId      = $i
+                Item       = $item
+                StatusKind = $statusKind
+                StatusText = $statusText
+                Label      = [string]$item.UIDisplayName
+            })
+            if ($statusKind -eq "Detected") {
+                [void]$checkedIds.Add($i)
+            }
         }
-        $chkList.EndUpdate()
-        & $updateCounter 0
+    }
+
+    $updateCounter = ({
+        $lblCount.Text = "Selected: $($checkedIds.Count) / $($indexedData.Count) (Showing: $($listView.Items.Count))"
     }.GetNewClosure())
+
+    $applyRowShading = ({
+        for ($r = 0; $r -lt $listView.Items.Count; $r++) {
+            $it = $listView.Items[$r]
+            if ($null -eq $it.Tag) { continue }
+            $entry = $indexedData[[int]$it.Tag]
+            $rowBg = if ($entry.StatusKind -eq "Optional") {
+                $bgOpt
+            } elseif (($r % 2) -eq 0) {
+                $bgEven
+            } else {
+                $bgOdd
+            }
+            $it.BackColor = $rowBg
+            foreach ($sub in $it.SubItems) { $sub.BackColor = $rowBg }
+        }
+    }.GetNewClosure())
+
+    $populateList = ({
+        param([string]$FilterText = "")
+        $syncGuard.SuppressEvents = $true
+        $listView.BeginUpdate()
+        $listView.ListViewItemSorter = $null
+        $listView.Items.Clear()
+
+        if (-not $hasValidItems) {
+            $emptyItem = New-Object System.Windows.Forms.ListViewItem("[ INFO ]")
+            [void]$emptyItem.SubItems.Add("No actionable items returned from audit scanner.")
+            $emptyItem.ForeColor = [System.Drawing.Color]::DarkGray
+            [void]$listView.Items.Add($emptyItem)
+            $listView.Enabled = $false
+            $listView.EndUpdate()
+            $syncGuard.SuppressEvents = $false
+            $lblCount.Text = "Selected: 0 / 0"
+            return
+        }
+
+        $cleanFilter = $FilterText.Trim()
+        $btnSelAll.Text = if ($cleanFilter.Length -gt 0) { "Select Visible" } else { "Select All" }
+
+        $visIdx = 0
+        foreach ($entry in $indexedData) {
+            if ($cleanFilter.Length -gt 0) {
+                $hitLabel  = ($entry.Label.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+                $hitStatus = ($entry.StatusText.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+                if (-not $hitLabel -and -not $hitStatus) { continue }
+            }
+
+            $lvItem = New-Object System.Windows.Forms.ListViewItem($entry.StatusText)
+            $lvItem.UseItemStyleForSubItems = $false
+            $subLabel = $lvItem.SubItems.Add($entry.Label)
+            $lvItem.Tag = $entry.RowId
+            $lvItem.ToolTipText = "$($entry.StatusText) $($entry.Label)"
+            $lvItem.Checked = $checkedIds.Contains($entry.RowId)
+
+            $rowBg = if ($entry.StatusKind -eq "Optional") {
+                $bgOpt
+            } elseif (($visIdx % 2) -eq 0) {
+                $bgEven
+            } else {
+                $bgOdd
+            }
+
+            $lvItem.BackColor   = $rowBg
+            $subLabel.BackColor = $rowBg
+            switch ($entry.StatusKind) {
+                "Detected"  { $lvItem.ForeColor = $fgBadgeDet; $subLabel.ForeColor = $fgTextDet }
+                "Optional"  { $lvItem.ForeColor = $fgBadgeOpt; $subLabel.ForeColor = $fgTextOpt }
+                default     { $lvItem.ForeColor = $fgBadgeOk;  $subLabel.ForeColor = $fgTextOk  }
+            }
+
+            [void]$listView.Items.Add($lvItem)
+            $visIdx++
+        }
+
+        $listView.ListViewItemSorter = $sorter
+        if ($sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
+            & $applyRowShading
+        }
+        $listView.EndUpdate()
+        $syncGuard.SuppressEvents = $false
+        & $updateCounter
+    }.GetNewClosure())
+
+    $listView.Add_ItemChecked({
+        param($src, $e)
+        if ($syncGuard.SuppressEvents -or $null -eq $e.Item.Tag) { return }
+        $rowId = [int]$e.Item.Tag
+        if ($e.Item.Checked) {
+            [void]$checkedIds.Add($rowId)
+        } else {
+            [void]$checkedIds.Remove($rowId)
+        }
+        & $updateCounter
+    }.GetNewClosure())
+
+    $listView.Add_SelectedIndexChanged({
+        if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+            $entry = $indexedData[[int]$listView.SelectedItems[0].Tag]
+            $txtDetail.Text = "$($entry.StatusText) $($entry.Label)"
+        }
+    }.GetNewClosure())
+
+    $listView.Add_ColumnClick({
+        param($src, $e)
+        $listView.BeginUpdate()
+        if ($e.Column -eq $sorter.ColumnToSort) {
+            $sorter.OrderOfSort = if ($sorter.OrderOfSort -eq [System.Windows.Forms.SortOrder]::Ascending) {
+                [System.Windows.Forms.SortOrder]::Descending
+            } else {
+                [System.Windows.Forms.SortOrder]::Ascending
+            }
+        } else {
+            $sorter.ColumnToSort = $e.Column
+            $sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+        }
+        $listView.Sort()
+        & $applyRowShading
+        $listView.EndUpdate()
+    }.GetNewClosure())
+
+    $txtSearch.Add_TextChanged({ & $populateList $txtSearch.Text }.GetNewClosure())
+    $txtSearch.Add_KeyDown({
+        param($src, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+            $e.SuppressKeyPress = $true
+            [void]$listView.Focus()
+        }
+    }.GetNewClosure())
+
+    $btnClearFilter.Add_Click({
+        $txtSearch.Text = ""
+        [void]$txtSearch.Focus()
+    }.GetNewClosure())
+
+    $btnSelAll.Add_Click({
+        $syncGuard.SuppressEvents = $true
+        $listView.BeginUpdate()
+        foreach ($lvItem in $listView.Items) {
+            if ($null -eq $lvItem.Tag) { continue }
+            $lvItem.Checked = $true
+            [void]$checkedIds.Add([int]$lvItem.Tag)
+        }
+        $listView.EndUpdate()
+        $syncGuard.SuppressEvents = $false
+        & $updateCounter
+    }.GetNewClosure())
+
+    $btnSelNone.Add_Click({
+        $syncGuard.SuppressEvents = $true
+        $checkedIds.Clear()
+        $listView.BeginUpdate()
+        foreach ($lvItem in $listView.Items) { $lvItem.Checked = $false }
+        $listView.EndUpdate()
+        $syncGuard.SuppressEvents = $false
+        & $updateCounter
+    }.GetNewClosure())
+
+    $btnSelDet.Add_Click({
+        $syncGuard.SuppressEvents = $true
+        $checkedIds.Clear()
+        $listView.BeginUpdate()
+        foreach ($lvItem in $listView.Items) {
+            if ($null -eq $lvItem.Tag) { continue }
+            $rowId = [int]$lvItem.Tag
+            $isDet = ($indexedData[$rowId].StatusKind -eq "Detected")
+            $lvItem.Checked = $isDet
+            if ($isDet) { [void]$checkedIds.Add($rowId) }
+        }
+        $listView.EndUpdate()
+        $syncGuard.SuppressEvents = $false
+        & $updateCounter
+    }.GetNewClosure())
+
+    if ($null -ne $btnSelOpt) {
+        $btnSelOpt.Add_Click({
+            $syncGuard.SuppressEvents = $true
+            $checkedIds.Clear()
+            $listView.BeginUpdate()
+            foreach ($lvItem in $listView.Items) {
+                if ($null -eq $lvItem.Tag) { continue }
+                $rowId = [int]$lvItem.Tag
+                $isOpt = ($indexedData[$rowId].StatusKind -eq "Optimized")
+                $lvItem.Checked = $isOpt
+                if ($isOpt) { [void]$checkedIds.Add($rowId) }
+            }
+            $listView.EndUpdate()
+            $syncGuard.SuppressEvents = $false
+            & $updateCounter
+        }.GetNewClosure())
+    }
+
+    $modal.Add_KeyDown({
+        param($src, $e)
+        if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+            if ($txtSearch.Enabled) {
+                [void]$txtSearch.Focus()
+                $txtSearch.SelectAll()
+            }
+            $e.SuppressKeyPress = $true
+        } elseif ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C) {
+            if ($listView.Focused -and $listView.SelectedItems.Count -gt 0) {
+                $lines = [System.Collections.Generic.List[string]]::new()
+                foreach ($sel in $listView.SelectedItems) {
+                    if ($null -ne $sel.Tag) {
+                        $en = $indexedData[[int]$sel.Tag]
+                        $lines.Add("$($en.StatusText) $($en.Label)")
+                    }
+                }
+                if ($lines.Count -gt 0) {
+                    try { [System.Windows.Forms.Clipboard]::SetText($lines -join "`r`n") } catch { }
+                    $e.SuppressKeyPress = $true
+                }
+            }
+        }
+    }.GetNewClosure())
+
+    & $populateList ""
 
     $btnApply = New-Object System.Windows.Forms.Button
     $btnApply.Text = "Execute Selected"
@@ -3863,18 +4418,22 @@ function Show-ActionModal {
     $btnCancel.DialogResult = "Cancel"
     $btnCancel.Anchor = 'Bottom, Right'
 
-    $baseControls = @($lblDesc, $btnSelAll, $btnSelNone, $btnSelDet, $lblCount, $chkList)
+    $baseControls = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+    foreach ($c in @($lblDesc, $lblSearch, $txtSearch, $btnClearFilter, $lblCount, $btnSelDet, $btnSelAll, $btnSelNone, $listView, $txtDetail)) {
+        $baseControls.Add($c)
+    }
+    if ($null -ne $btnSelOpt) { $baseControls.Add($btnSelOpt) }
 
     if ($EnableRevert) {
-        $btnApply.Location = New-Object System.Drawing.Point(15, 585)
-        $btnApply.Size = New-Object System.Drawing.Size(235, 36)
+        $btnApply.Location = New-Object System.Drawing.Point(15, 610)
+        $btnApply.Size = New-Object System.Drawing.Size(256, 36)
         $btnApply.Font = Get-UltixFittedFont -Control $btnApply -Role "ModalAction"
 
         $btnRevert = New-Object System.Windows.Forms.Button
         $btnRevert.Text = "Revert Selected"
         $btnRevert.UseMnemonic = $false
-        $btnRevert.Location = New-Object System.Drawing.Point(262, 585)
-        $btnRevert.Size = New-Object System.Drawing.Size(235, 36)
+        $btnRevert.Location = New-Object System.Drawing.Point(284, 610)
+        $btnRevert.Size = New-Object System.Drawing.Size(256, 36)
         $btnRevert.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnRevert.ForeColor = [System.Drawing.Color]::White
         $btnRevert.FlatStyle = "Flat"
@@ -3882,25 +4441,28 @@ function Show-ActionModal {
         $btnRevert.DialogResult = "Yes"
         $btnRevert.Enabled = $hasValidItems
         $btnRevert.Anchor = 'Bottom, Left'
-        
-        $btnCancel.Location = New-Object System.Drawing.Point(510, 585)
-        $btnCancel.Size = New-Object System.Drawing.Size(235, 36)
+
+        $btnCancel.Location = New-Object System.Drawing.Point(554, 610)
+        $btnCancel.Size = New-Object System.Drawing.Size(256, 36)
         $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
 
-        $modal.Controls.AddRange($baseControls + @($btnApply, $btnRevert, $btnCancel))
+        $baseControls.Add($btnApply)
+        $baseControls.Add($btnRevert)
+        $baseControls.Add($btnCancel)
     } else {
-        $btnApply.Location = New-Object System.Drawing.Point(15, 585)
-        $btnApply.Size = New-Object System.Drawing.Size(355, 36)
+        $btnApply.Location = New-Object System.Drawing.Point(15, 610)
+        $btnApply.Size = New-Object System.Drawing.Size(388, 36)
         $btnApply.Font = Get-UltixFittedFont -Control $btnApply -Role "ModalAction"
 
-        $btnCancel.Location = New-Object System.Drawing.Point(390, 585)
-        $btnCancel.Size = New-Object System.Drawing.Size(355, 36)
+        $btnCancel.Location = New-Object System.Drawing.Point(422, 610)
+        $btnCancel.Size = New-Object System.Drawing.Size(388, 36)
         $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
 
-        $modal.Controls.AddRange($baseControls + @($btnApply, $btnCancel))
+        $baseControls.Add($btnApply)
+        $baseControls.Add($btnCancel)
     }
 
-    $modal.AcceptButton = $btnApply
+    $modal.Controls.AddRange($baseControls.ToArray())
     $modal.CancelButton = $btnCancel
 
     try {
@@ -3908,8 +4470,10 @@ function Show-ActionModal {
         $result   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
         if ($hasValidItems -and ($result -eq "OK" -or $result -eq "Yes")) {
             $selectedItems = [System.Collections.Generic.List[object]]::new()
-            foreach ($idx in $chkList.CheckedIndices) {
-                $selectedItems.Add($AuditResults[$idx])
+            foreach ($entry in $indexedData) {
+                if ($checkedIds.Contains($entry.RowId)) {
+                    $selectedItems.Add($entry.Item)
+                }
             }
             # Convenience for single-item modals (e.g. Clean Start Menu Compiler): auto-select the sole item if clicked directly
             if ($selectedItems.Count -eq 0 -and $AuditResults.Count -eq 1) {
@@ -3937,10 +4501,11 @@ function Show-UltixGridModal {
 
     $modal = New-Object System.Windows.Forms.Form
     $modal.Text = $Title
-    $modal.Size = New-Object System.Drawing.Size(980, 700)
-    $modal.MinimumSize = New-Object System.Drawing.Size(980, 560)
+    $modal.Size = New-Object System.Drawing.Size(980, 715)
+    $modal.MinimumSize = New-Object System.Drawing.Size(980, 590)
     $modal.StartPosition = "CenterParent"
     $modal.FormBorderStyle = "Sizable"
+    $modal.KeyPreview = $true
     $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
     $modal.ForeColor = [System.Drawing.Color]::White
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
@@ -3999,7 +4564,7 @@ function Show-UltixGridModal {
 
     $listView = New-Object System.Windows.Forms.ListView
     $listView.Location = New-Object System.Drawing.Point(15, 88)
-    $listView.Size = New-Object System.Drawing.Size(935, 500)
+    $listView.Size = New-Object System.Drawing.Size(935, 440)
     $listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
     $listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
     $listView.BorderStyle = "FixedSingle"
@@ -4222,6 +4787,135 @@ function Show-UltixGridModal {
 
     & $populateList ""
 
+    $txtRowDetail = New-Object System.Windows.Forms.TextBox
+    $txtRowDetail.Location = New-Object System.Drawing.Point(15, 534)
+    $txtRowDetail.Size = New-Object System.Drawing.Size(935, 68)
+    $txtRowDetail.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $txtRowDetail.ForeColor = [System.Drawing.Color]::FromArgb(255, 205, 220, 235)
+    $txtRowDetail.BorderStyle = "FixedSingle"
+    $txtRowDetail.Multiline = $true
+    $txtRowDetail.ReadOnly = $true
+    $txtRowDetail.WordWrap = $true
+    $txtRowDetail.ScrollBars = "Vertical"
+    $txtRowDetail.Font = New-Object System.Drawing.Font("Consolas", 8.75)
+    $txtRowDetail.Text = "Click any row to inspect full untruncated values. Use Ctrl+C (or Right-Click) to copy, Ctrl+F to filter."
+    $txtRowDetail.Anchor = 'Bottom, Left, Right'
+
+    $formatRowSummary = ({
+        param([object]$RowObj)
+        $shortParts = [System.Collections.Generic.List[string]]::new()
+        $longLines  = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($col in $Columns) {
+            $hdr = [string]$col.Header
+            $val = [string]$RowObj.($col.Property)
+            if ([string]::IsNullOrWhiteSpace($val)) { continue }
+            if ($val.Length -gt 44 -or $hdr -match '(?i)(Path|Command|Target|Key|Package|Details|Description|Location|File|Args|Publisher|Image)') {
+                $longLines.Add("${hdr}: $val")
+            } else {
+                $shortParts.Add("${hdr}: $val")
+            }
+        }
+
+        $outLines = [System.Collections.Generic.List[string]]::new()
+        if ($shortParts.Count -gt 0) { $outLines.Add($shortParts -join " | ") }
+        foreach ($ll in $longLines) { $outLines.Add($ll) }
+        return ($outLines -join "`r`n")
+    }.GetNewClosure())
+
+    $listView.Add_SelectedIndexChanged({
+        if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+            $rowObj = $indexedData[[int]$listView.SelectedItems[0].Tag].Item
+            $txtRowDetail.Text = & $formatRowSummary $rowObj
+        }
+    }.GetNewClosure())
+
+    $copySelectedRows = ({
+        if ($listView.SelectedItems.Count -eq 0) { return }
+        $buf = [System.Collections.Generic.List[string]]::new()
+        foreach ($sel in $listView.SelectedItems) {
+            if ($null -eq $sel.Tag) { continue }
+            $rowObj = $indexedData[[int]$sel.Tag].Item
+            $cells = foreach ($col in $Columns) { "$($col.Header): $([string]$rowObj.($col.Property))" }
+            $buf.Add($cells -join " | ")
+        }
+        if ($buf.Count -gt 0) {
+            try { [System.Windows.Forms.Clipboard]::SetText($buf -join "`r`n") } catch { }
+        }
+    }.GetNewClosure())
+
+    $ctxMenu = New-Object System.Windows.Forms.ContextMenuStrip
+    $miCopyRow = $ctxMenu.Items.Add("Copy Selected Row (All Fields)   [Ctrl+C]")
+    $miCopyRow.Add_Click({ & $copySelectedRows }.GetNewClosure())
+
+    $firstHdr = [string]$Columns[0].Header
+    $firstProp = [string]$Columns[0].Property
+    $miCopyFirst = $ctxMenu.Items.Add("Copy '$firstHdr'")
+    $miCopyFirst.Add_Click({
+        if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+            $val = [string]$indexedData[[int]$listView.SelectedItems[0].Tag].Item.($firstProp)
+            if (-not [string]::IsNullOrEmpty($val)) {
+                try { [System.Windows.Forms.Clipboard]::SetText($val) } catch { }
+            }
+        }
+    }.GetNewClosure())
+
+    $miCopyLast = $null
+    if ($Columns.Count -gt 1) {
+        $lastCol  = $Columns[$Columns.Count - 1]
+        $lastHdr  = [string]$lastCol.Header
+        $lastProp = [string]$lastCol.Property
+        $miCopyLast = $ctxMenu.Items.Add("Copy '$lastHdr'")
+        $miCopyLast.Add_Click({
+            if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+                $val = [string]$indexedData[[int]$listView.SelectedItems[0].Tag].Item.($lastProp)
+                if (-not [string]::IsNullOrEmpty($val)) {
+                    try { [System.Windows.Forms.Clipboard]::SetText($val) } catch { }
+                }
+            }
+        }.GetNewClosure())
+    }
+
+    [void]$ctxMenu.Items.Add("-")
+    $miCopyChecked = $ctxMenu.Items.Add("Copy All Checked Rows")
+    $miCopyChecked.Add_Click({
+        if ($checkedIds.Count -eq 0) { return }
+        $buf = [System.Collections.Generic.List[string]]::new()
+        foreach ($entry in $indexedData) {
+            if ($checkedIds.Contains($entry.RowId)) {
+                $cells = foreach ($col in $Columns) { "$($col.Header): $([string]$entry.Item.($col.Property))" }
+                $buf.Add($cells -join " | ")
+            }
+        }
+        if ($buf.Count -gt 0) {
+            try { [System.Windows.Forms.Clipboard]::SetText($buf -join "`r`n") } catch { }
+        }
+    }.GetNewClosure())
+
+    $ctxMenu.Add_Opening({
+        param($src, $e)
+        $hasSel = ($listView.SelectedItems.Count -gt 0)
+        $miCopyRow.Enabled   = $hasSel
+        $miCopyFirst.Enabled = $hasSel
+        if ($null -ne $miCopyLast) { $miCopyLast.Enabled = $hasSel }
+        $miCopyChecked.Enabled = ($checkedIds.Count -gt 0)
+    }.GetNewClosure())
+    $listView.ContextMenuStrip = $ctxMenu
+
+    $modal.Add_KeyDown({
+        param($src, $e)
+        if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+            [void]$txtSearch.Focus()
+            $txtSearch.SelectAll()
+            $e.SuppressKeyPress = $true
+        } elseif ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C) {
+            if ($listView.Focused -and $listView.SelectedItems.Count -gt 0) {
+                & $copySelectedRows
+                $e.SuppressKeyPress = $true
+            }
+        }
+    }.GetNewClosure())
+
     $btnPrimary = New-Object System.Windows.Forms.Button
     $btnPrimary.Text = $PrimaryButtonText
     $btnPrimary.UseMnemonic = $false
@@ -4241,17 +4935,17 @@ function Show-UltixGridModal {
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $btnCancel.Anchor = 'Bottom, Right'
 
-    $controlsToAdd = @($lblDesc, $lblSearch, $txtSearch, $btnSelVis, $btnSelNone, $lblCount, $listView, $btnPrimary, $btnCancel)
+    $controlsToAdd = @($lblDesc, $lblSearch, $txtSearch, $btnSelVis, $btnSelNone, $lblCount, $listView, $txtRowDetail, $btnPrimary, $btnCancel)
 
     if (-not [string]::IsNullOrWhiteSpace($SecondaryButtonText)) {
-        $btnPrimary.Location = New-Object System.Drawing.Point(15, 602)
+        $btnPrimary.Location = New-Object System.Drawing.Point(15, 612)
         $btnPrimary.Size = New-Object System.Drawing.Size(295, 38)
         $btnPrimary.Font = Get-UltixFittedFont -Control $btnPrimary -Role "ModalAction"
 
         $btnSecondary = New-Object System.Windows.Forms.Button
         $btnSecondary.Text = $SecondaryButtonText
         $btnSecondary.UseMnemonic = $false
-        $btnSecondary.Location = New-Object System.Drawing.Point(322, 602)
+        $btnSecondary.Location = New-Object System.Drawing.Point(322, 612)
         $btnSecondary.Size = New-Object System.Drawing.Size(295, 38)
         $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
         $btnSecondary.ForeColor = [System.Drawing.Color]::White
@@ -4261,16 +4955,16 @@ function Show-UltixGridModal {
         $btnSecondary.Enabled = ($SecondaryAlwaysEnabled.IsPresent -or $indexedData.Count -gt 0)
         $btnSecondary.Anchor = 'Bottom, Left'
 
-        $btnCancel.Location = New-Object System.Drawing.Point(630, 602)
+        $btnCancel.Location = New-Object System.Drawing.Point(630, 612)
         $btnCancel.Size = New-Object System.Drawing.Size(320, 38)
         $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
         $controlsToAdd += $btnSecondary
     } else {
-        $btnPrimary.Location = New-Object System.Drawing.Point(15, 602)
+        $btnPrimary.Location = New-Object System.Drawing.Point(15, 612)
         $btnPrimary.Size = New-Object System.Drawing.Size(455, 38)
         $btnPrimary.Font = Get-UltixFittedFont -Control $btnPrimary -Role "ModalAction"
 
-        $btnCancel.Location = New-Object System.Drawing.Point(495, 602)
+        $btnCancel.Location = New-Object System.Drawing.Point(495, 612)
         $btnCancel.Size = New-Object System.Drawing.Size(455, 38)
         $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
     }
@@ -4308,6 +5002,7 @@ function Show-UltixGridModal {
         }
         return $null
     } finally {
+        $ctxMenu.Dispose()
         $modal.Dispose()
     }
 }
@@ -4444,7 +5139,7 @@ function Export-WinUltixProfile {
             $dnsProfile = [ordered]@{
                 Provider   = $primaryNic.ProviderName
                 EnableDoH  = [bool]$primaryNic.IsDohActive
-                EnableIPv6 = ($primaryNic.DnsV6.Count -gt 0)
+                EnableIPv6 = (-not [string]::IsNullOrWhiteSpace($primaryNic.StaticNameServerV6))
             }
         }
 
@@ -4496,6 +5191,309 @@ function Export-WinUltixProfile {
     }.GetNewClosure())
 }
 
+function Show-WinUltixProfileImportModal {
+    param([Parameter(Mandatory=$true)]$ProfileData)
+
+    $categories = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    $regList = @($ProfileData.RegistryTweaks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($regList.Count -gt 0) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "RegistryTweaks"
+            Title   = "Registry Tweaks (Shell, Privacy, Gaming)"
+            Count   = "$($regList.Count) rules"
+            Details = ($regList | ForEach-Object { " - $_" }) -join "`r`n"
+        })
+    }
+
+    if ($ProfileData.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $ProfileData.Win32PrioritySeparation) {
+        $qVal = [int]$ProfileData.Win32PrioritySeparation
+        $qHex = ("0x{0:X2}" -f $qVal)
+        $categories.Add([PSCustomObject]@{
+            Key     = "QuantumScheduler"
+            Title   = "Quantum Scheduler (Win32PrioritySeparation)"
+            Count   = $qHex
+            Details = "Target value: Win32PrioritySeparation = $qHex ($qVal dec)`r`nRegistry path: HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
+        })
+    }
+
+    $pwrList = if ($ProfileData.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0) { @($ProfileData.PowerDisplayTweaks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() }
+    if ($pwrList.Count -gt 0) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "PowerDisplay"
+            Title   = "Power & Display Optimizations"
+            Count   = "$($pwrList.Count) rules"
+            Details = ($pwrList | ForEach-Object { " - $_" }) -join "`r`n"
+        })
+    }
+
+    $usbList = if ($ProfileData.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0) { @($ProfileData.UsbSecurityLocks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() }
+    if ($usbList.Count -gt 0) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "UsbSecurity"
+            Title   = "USB & BadUSB Perimeter Locks"
+            Count   = "$($usbList.Count) layers"
+            Details = ($usbList | ForEach-Object { " - Layer: $_" }) -join "`r`n"
+        })
+    }
+
+    $srpList = @($ProfileData.ActiveSrpLocks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $customSrpLines = [System.Collections.Generic.List[string]]::new()
+    if ($null -ne $ProfileData.CustomSrpRoster) {
+        foreach ($prop in $ProfileData.CustomSrpRoster.PSObject.Properties) {
+            $customSrpLines.Add(" - [Custom] $($prop.Name) => $($prop.Value)")
+        }
+    }
+    if ($srpList.Count -gt 0 -or $customSrpLines.Count -gt 0) {
+        $srpDetail = [System.Collections.Generic.List[string]]::new()
+        foreach ($s in $srpList) { $srpDetail.Add(" - $s") }
+        foreach ($c in $customSrpLines) { $srpDetail.Add($c) }
+        $categories.Add([PSCustomObject]@{
+            Key     = "SrpLocks"
+            Title   = "SRP + IFEO Execution Locks"
+            Count   = "$($srpList.Count) active"
+            Details = $srpDetail -join "`r`n"
+        })
+    }
+
+    $svcList = @($ProfileData.DisabledServices | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($svcList.Count -gt 0) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "Services"
+            Title   = "Disabled System Services"
+            Count   = "$($svcList.Count) svcs"
+            Details = ($svcList | Sort-Object | ForEach-Object { " - $_" }) -join "`r`n"
+        })
+    }
+
+    $tskList = if ($ProfileData.PSObject.Properties.Match("DisabledTasks").Count -gt 0) { @($ProfileData.DisabledTasks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() }
+    if ($tskList.Count -gt 0) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "Tasks"
+            Title   = "Disabled Telemetry Scheduled Tasks"
+            Count   = "$($tskList.Count) groups"
+            Details = ($tskList | ForEach-Object { " - $_" }) -join "`r`n"
+        })
+    }
+
+    if ($ProfileData.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $ProfileData.StartMenuClean -eq $true) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "StartMenu"
+            Title   = "Start Menu 3-Icon Clean Layout"
+            Count   = "Enabled"
+            Details = "Compiles native 3-icon start2.bin layout (Edge, Settings, Explorer), sets AllAppsViewMode=2, and archives start2_backup.bin."
+        })
+    }
+
+    if ($ProfileData.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $ProfileData.DnsProfile -and -not [string]::IsNullOrWhiteSpace($ProfileData.DnsProfile.Provider)) {
+        $dp = $ProfileData.DnsProfile
+        $dnsInfo = "Provider    : $($dp.Provider)`r`nNative DoH  : $(if($dp.EnableDoH){'Enabled'}else{'Disabled'})`r`nIPv6 DNS    : $(if($dp.EnableIPv6){'Enabled'}else{'Disabled'})"
+        $categories.Add([PSCustomObject]@{
+            Key     = "DnsProfile"
+            Title   = "DNS & Native DoH Profile"
+            Count   = ($dp.Provider -replace '\s*\([^)]*\)$', '')
+            Details = $dnsInfo
+        })
+    }
+
+    $affList = @($ProfileData.AffinityLasso | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($affList.Count -gt 0) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "AffinityLasso"
+            Title   = "CPU Affinity Lasso Roster"
+            Count   = "$($affList.Count) apps"
+            Details = ($affList | Sort-Object | ForEach-Object { " - $_" }) -join "`r`n"
+        })
+    }
+
+    $hwDetail = [System.Collections.Generic.List[string]]::new()
+    if ($ProfileData.PSObject.Properties.Match("HardwareLocks").Count -gt 0 -and $null -ne $ProfileData.HardwareLocks) {
+        $hl = $ProfileData.HardwareLocks
+        foreach ($x in @($hl.CPPCUnhidden))  { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [CPPC] Unhide: $x") } }
+        foreach ($x in @($hl.TimerTweaks))   { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [Timer] $x") } }
+        foreach ($x in @($hl.NVMeTweaks))    { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [NVMe/IO] $x") } }
+        foreach ($x in @($hl.GlobalNetwork)) { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [TCP] $x") } }
+    }
+    if ($hwDetail.Count -gt 0) {
+        $categories.Add([PSCustomObject]@{
+            Key     = "HardwareLocks"
+            Title   = "Hardware Locks (CPPC / Timer / NVMe / TCP)"
+            Count   = "$($hwDetail.Count) locks"
+            Details = $hwDetail -join "`r`n"
+        })
+    }
+
+    $modal = New-Object System.Windows.Forms.Form
+    $modal.Text = "WinUltix - Inspect & Select Profile Categories to Import"
+    $modal.Size = New-Object System.Drawing.Size(860, 620)
+    $modal.MinimumSize = New-Object System.Drawing.Size(820, 520)
+    $modal.StartPosition = "CenterParent"
+    $modal.FormBorderStyle = "Sizable"
+    $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
+    $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
+
+    $srcMachine = if ($ProfileData.SourceMachine) { [string]$ProfileData.SourceMachine } else { "Unknown" }
+    $srcVer     = if ($ProfileData.AppVersion) { [string]$ProfileData.AppVersion } else { "Unknown" }
+    $srcTs      = if ($ProfileData.ExportTimestamp) { [string]$ProfileData.ExportTimestamp } else { "Unknown" }
+
+    $lblMeta = New-Object System.Windows.Forms.Label
+    $lblMeta.Text = "Snapshot: $srcMachine  |  App: $srcVer  |  Exported: $srcTs`r`nZero Black Boxes: Click any category on the left to inspect its exact items, and uncheck anything you want to skip."
+    $lblMeta.UseMnemonic = $false
+    $lblMeta.Location = New-Object System.Drawing.Point(15, 10)
+    $lblMeta.Size = New-Object System.Drawing.Size(815, 38)
+    $lblMeta.Font = Get-UltixFont -Role "ModalDesc"
+    $lblMeta.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
+    $lblMeta.Anchor = 'Top, Left, Right'
+
+    $btnSelAll = New-Object System.Windows.Forms.Button
+    $btnSelAll.Text = "Select All"
+    $btnSelAll.UseMnemonic = $false
+    $btnSelAll.Location = New-Object System.Drawing.Point(15, 54)
+    $btnSelAll.Size = New-Object System.Drawing.Size(110, 28)
+    $btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelAll.ForeColor = [System.Drawing.Color]::White
+    $btnSelAll.FlatStyle = "Flat"
+    $btnSelAll.Font = Get-UltixFittedFont -Control $btnSelAll -Role "ToolbarButton"
+    $btnSelAll.Enabled = ($categories.Count -gt 0)
+
+    $btnSelNone = New-Object System.Windows.Forms.Button
+    $btnSelNone.Text = "Deselect All"
+    $btnSelNone.UseMnemonic = $false
+    $btnSelNone.Location = New-Object System.Drawing.Point(132, 54)
+    $btnSelNone.Size = New-Object System.Drawing.Size(115, 28)
+    $btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+    $btnSelNone.ForeColor = [System.Drawing.Color]::White
+    $btnSelNone.FlatStyle = "Flat"
+    $btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
+    $btnSelNone.Enabled = ($categories.Count -gt 0)
+
+    $lblPreviewHdr = New-Object System.Windows.Forms.Label
+    $lblPreviewHdr.Text = "Category Contents Preview:"
+    $lblPreviewHdr.UseMnemonic = $false
+    $lblPreviewHdr.Location = New-Object System.Drawing.Point(415, 59)
+    $lblPreviewHdr.Size = New-Object System.Drawing.Size(415, 20)
+    $lblPreviewHdr.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblPreviewHdr.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $lblPreviewHdr.Anchor = 'Top, Left, Right'
+
+    $lvCats = New-Object System.Windows.Forms.ListView
+    $lvCats.Location = New-Object System.Drawing.Point(15, 88)
+    $lvCats.Size = New-Object System.Drawing.Size(390, 428)
+    $lvCats.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+    $lvCats.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
+    $lvCats.BorderStyle = "FixedSingle"
+    $lvCats.Font = Get-UltixFont -Role "GridText"
+    $lvCats.View = [System.Windows.Forms.View]::Details
+    $lvCats.CheckBoxes = $true
+    $lvCats.FullRowSelect = $true
+    $lvCats.GridLines = $false
+    $lvCats.Anchor = 'Top, Bottom, Left'
+    Enable-UltixDoubleBuffer -Control $lvCats
+
+    [void]$lvCats.Columns.Add("Category", 275)
+    [void]$lvCats.Columns.Add("Scope", 92)
+
+    $txtPreview = New-Object System.Windows.Forms.TextBox
+    $txtPreview.Location = New-Object System.Drawing.Point(415, 88)
+    $txtPreview.Size = New-Object System.Drawing.Size(415, 428)
+    $txtPreview.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $txtPreview.ForeColor = [System.Drawing.Color]::FromArgb(255, 210, 222, 235)
+    $txtPreview.BorderStyle = "FixedSingle"
+    $txtPreview.Multiline = $true
+    $txtPreview.ReadOnly = $true
+    $txtPreview.WordWrap = $false
+    $txtPreview.ScrollBars = "Both"
+    $txtPreview.Font = New-Object System.Drawing.Font("Consolas", 9.0)
+    $txtPreview.Anchor = 'Top, Bottom, Left, Right'
+
+    $bgEven = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+    $bgOdd  = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
+
+    for ($i = 0; $i -lt $categories.Count; $i++) {
+        $cat = $categories[$i]
+        $it = New-Object System.Windows.Forms.ListViewItem($cat.Title)
+        [void]$it.SubItems.Add($cat.Count)
+        $it.Tag = $cat
+        $it.Checked = $true
+        $it.BackColor = if (($i % 2) -eq 0) { $bgEven } else { $bgOdd }
+        [void]$lvCats.Items.Add($it)
+    }
+
+    if ($lvCats.Items.Count -gt 0) {
+        $lvCats.Items[0].Selected = $true
+        $lblPreviewHdr.Text = "Contents: $($categories[0].Title) ($($categories[0].Count))"
+        $txtPreview.Text = $categories[0].Details
+    } else {
+        $txtPreview.Text = "This JSON snapshot contains zero active settings to import."
+    }
+
+    $lvCats.Add_SelectedIndexChanged({
+        if ($lvCats.SelectedItems.Count -gt 0 -and $null -ne $lvCats.SelectedItems[0].Tag) {
+            $cObj = $lvCats.SelectedItems[0].Tag
+            $lblPreviewHdr.Text = "Contents: $($cObj.Title) ($($cObj.Count))"
+            $txtPreview.Text = $cObj.Details
+        }
+    }.GetNewClosure())
+
+    $btnSelAll.Add_Click({
+        $lvCats.BeginUpdate()
+        foreach ($it in $lvCats.Items) { $it.Checked = $true }
+        $lvCats.EndUpdate()
+    }.GetNewClosure())
+
+    $btnSelNone.Add_Click({
+        $lvCats.BeginUpdate()
+        foreach ($it in $lvCats.Items) { $it.Checked = $false }
+        $lvCats.EndUpdate()
+    }.GetNewClosure())
+
+    $btnImport = New-Object System.Windows.Forms.Button
+    $btnImport.Text = "Import Selected Categories"
+    $btnImport.UseMnemonic = $false
+    $btnImport.Location = New-Object System.Drawing.Point(15, 530)
+    $btnImport.Size = New-Object System.Drawing.Size(390, 38)
+    $btnImport.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
+    $btnImport.ForeColor = [System.Drawing.Color]::White
+    $btnImport.FlatStyle = "Flat"
+    $btnImport.Font = Get-UltixFittedFont -Control $btnImport -Role "ModalAction"
+    $btnImport.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $btnImport.Enabled = ($categories.Count -gt 0)
+    $btnImport.Anchor = 'Bottom, Left'
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.UseMnemonic = $false
+    $btnCancel.Location = New-Object System.Drawing.Point(415, 530)
+    $btnCancel.Size = New-Object System.Drawing.Size(415, 38)
+    $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+    $btnCancel.ForeColor = [System.Drawing.Color]::White
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnCancel.Anchor = 'Bottom, Left, Right'
+
+    $modal.Controls.AddRange(@($lblMeta, $btnSelAll, $btnSelNone, $lblPreviewHdr, $lvCats, $txtPreview, $btnImport, $btnCancel))
+    $modal.CancelButton = $btnCancel
+
+    try {
+        $useOwner = ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired)
+        $dlgRes   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
+        if ($dlgRes -eq [System.Windows.Forms.DialogResult]::OK) {
+            $chosen = [System.Collections.Generic.List[string]]::new()
+            foreach ($it in $lvCats.Items) {
+                if ($it.Checked -and $null -ne $it.Tag) {
+                    $chosen.Add([string]$it.Tag.Key)
+                }
+            }
+            return @($chosen)
+        }
+        return $null
+    } finally {
+        $modal.Dispose()
+    }
+}
+
 function Import-WinUltixProfile {
     param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 
@@ -4522,61 +5520,39 @@ function Import-WinUltixProfile {
         return
     }
 
-    $regCount = @($profileData.RegistryTweaks).Count
-    $pwrCount = if ($profileData.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0) { @($profileData.PowerDisplayTweaks).Count } else { 0 }
-    $usbCount = if ($profileData.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0)   { @($profileData.UsbSecurityLocks).Count }   else { 0 }
-    $svcCount = @($profileData.DisabledServices).Count
-    $tskCount = if ($profileData.PSObject.Properties.Match("DisabledTasks").Count -gt 0)      { @($profileData.DisabledTasks).Count }      else { 0 }
-    $srpCount = @($profileData.ActiveSrpLocks).Count
-    $affCount = @($profileData.AffinityLasso).Count
-
-    $hwCount = 0
-    if ($profileData.PSObject.Properties.Match("HardwareLocks").Count -gt 0 -and $null -ne $profileData.HardwareLocks) {
-        $hl = $profileData.HardwareLocks
-        $hwCount = @($hl.CPPCUnhidden).Count + @($hl.TimerTweaks).Count + @($hl.NVMeTweaks).Count + @($hl.GlobalNetwork).Count
-    }
-
-    $smLabel = if ($profileData.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $profileData.StartMenuClean -eq $true) {
-        "3-Icon Clean Layout"
-    } else {
-        "Unchanged"
-    }
-
-    $dnsLabel = if ($profileData.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $profileData.DnsProfile -and -not [string]::IsNullOrWhiteSpace($profileData.DnsProfile.Provider)) {
-        $dohTag = if ($profileData.DnsProfile.EnableDoH) { " [DoH]" } else { "" }
-        "$($profileData.DnsProfile.Provider)$dohTag"
-    } else {
-        "Unchanged"
-    }
-
-    $confirmMsg = "Loaded snapshot from '$($profileData.SourceMachine)' ($($profileData.ExportTimestamp)):`n`n" +
-                  " - Registry Tweaks: $regCount`n" +
-                  " - Power & Display Optimizations: $pwrCount`n" +
-                  " - USB Perimeter Locks: $usbCount`n" +
-                  " - Disabled Services / Tasks: $svcCount / $tskCount`n" +
-                  " - SRP+IFEO Locks: $srpCount`n" +
-                  " - Affinity Lasso / Hardware Locks: $affCount / $hwCount`n" +
-                  " - Start Menu Layout: $smLabel`n" +
-                  " - DNS Profile: $dnsLabel`n`n" +
-                  "Do you want to enforce this profile on the current machine?"
-
-    $ans = [System.Windows.Forms.MessageBox]::Show($confirmMsg, "WinUltix - Import Profile", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+    $selectedCats = Show-WinUltixProfileImportModal -ProfileData $profileData
+    if ($null -eq $selectedCats -or $selectedCats.Count -eq 0) {
         Write-GUI " -> Profile import cancelled.`n"
         return
     }
 
-    Write-GUI "=== IMPORTING PROFILE FROM $($profileData.SourceMachine) (Background Thread) ==="
+    Write-GUI "=== IMPORTING $($selectedCats.Count) CATEGORY(IES) FROM $($profileData.SourceMachine) (Background Thread) ==="
     Update-Progress 5
 
-    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($profileData) -ScriptBlock {
-        param($Snapshot)
+    Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($profileData, @($selectedCats)) -ScriptBlock {
+        param($Snapshot, [string[]]$SelectedCategories)
 
-        $modifiedRegItems = @()
+        $catSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($ck in $SelectedCategories) { [void]$catSet.Add($ck) }
+
+        $modifiedRegItems   = @()
+        $didClearStartMenu  = $false
         $UltixSync.Progress = 10
 
-        # 1. Custom SRP Roster
-        if ($null -ne $Snapshot.CustomSrpRoster) {
+        $invokeLocked = {
+            param([scriptblock]$Action)
+            $savedProg = $UltixSync.Progress
+            $UltixSync.LockProgress = $true
+            try {
+                & $Action
+            } finally {
+                $UltixSync.Progress     = $savedProg
+                $UltixSync.LockProgress = $false
+            }
+        }
+
+        # 1. Custom SRP Roster (only when SRP Locks category is selected)
+        if ($catSet.Contains("SrpLocks") -and $null -ne $Snapshot.CustomSrpRoster) {
             $customSrpKey = "HKLM:\SOFTWARE\WinUltix\SRP"
             foreach ($prop in $Snapshot.CustomSrpRoster.PSObject.Properties) {
                 Set-UltixRegValue -Path $customSrpKey -Name $prop.Name -Value $prop.Value -Type String -Module "PROFILE"
@@ -4584,7 +5560,7 @@ function Import-WinUltixProfile {
         }
 
         # 2. Registry Tweaks + Exact Win32PrioritySeparation Preservation
-        if (@($Snapshot.RegistryTweaks).Count -gt 0) {
+        if ($catSet.Contains("RegistryTweaks") -and @($Snapshot.RegistryTweaks).Count -gt 0) {
             $targetSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($t in $Snapshot.RegistryTweaks) { [void]$targetSet.Add([string]$t) }
 
@@ -4600,12 +5576,12 @@ function Import-WinUltixProfile {
             })
 
             if ($toApplyReg.Count -gt 0) {
-                Invoke-ApplyRegistry -SelectedItems $toApplyReg -CategoryName "Imported Profile" -Operation "Apply"
+                & $invokeLocked { Invoke-ApplyRegistry -SelectedItems $toApplyReg -CategoryName "Imported Profile" -Operation "Apply" }
                 $modifiedRegItems = $toApplyReg
             }
         }
 
-        if ($Snapshot.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $Snapshot.Win32PrioritySeparation) {
+        if ($catSet.Contains("QuantumScheduler") -and $Snapshot.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $Snapshot.Win32PrioritySeparation) {
             $savedQuantum = [int]$Snapshot.Win32PrioritySeparation
             $prioKey = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
             Set-UltixRegValue -Path $prioKey -Name "Win32PrioritySeparation" -Value $savedQuantum -Type DWord -Module "PROFILE"
@@ -4615,7 +5591,7 @@ function Import-WinUltixProfile {
         $UltixSync.Progress = 35
 
         # 3. 7-Point Power & Display Tweaks
-        if ($Snapshot.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0 -and @($Snapshot.PowerDisplayTweaks).Count -gt 0 -and (Get-Command Get-PowerDisplayState -ErrorAction SilentlyContinue)) {
+        if ($catSet.Contains("PowerDisplay") -and $Snapshot.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0 -and @($Snapshot.PowerDisplayTweaks).Count -gt 0 -and (Get-Command Get-PowerDisplayState -ErrorAction SilentlyContinue)) {
             $pwrSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($p in $Snapshot.PowerDisplayTweaks) {
                 [void]$pwrSet.Add((([string]$p) -replace '\s*\(Current[^)]*\)\s*$', '').Trim())
@@ -4625,40 +5601,40 @@ function Import-WinUltixProfile {
                 $pwrSet.Contains($cleanName) -and $_.IsDetected
             })
             if ($toApplyPwr.Count -gt 0) {
-                Invoke-ApplyPowerDisplay -SelectedItems $toApplyPwr -Operation "Apply"
+                & $invokeLocked { Invoke-ApplyPowerDisplay -SelectedItems $toApplyPwr -Operation "Apply" }
             }
         }
 
         $UltixSync.Progress = 50
 
         # 4. 4-Layer USB Security Guard
-        if ($Snapshot.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0 -and @($Snapshot.UsbSecurityLocks).Count -gt 0 -and (Get-Command Get-UsbSecurityState -ErrorAction SilentlyContinue)) {
+        if ($catSet.Contains("UsbSecurity") -and $Snapshot.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0 -and @($Snapshot.UsbSecurityLocks).Count -gt 0 -and (Get-Command Get-UsbSecurityState -ErrorAction SilentlyContinue)) {
             $usbSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($u in $Snapshot.UsbSecurityLocks) { [void]$usbSet.Add([string]$u) }
             $toApplyUsb = @(Get-UsbSecurityState | Where-Object {
                 ($usbSet.Contains($_.ActionData.Layer) -or $usbSet.Contains($_.UIDisplayName)) -and $_.IsDetected
             })
             if ($toApplyUsb.Count -gt 0) {
-                Invoke-ApplyUsbSecurity -SelectedItems $toApplyUsb -Operation "Apply"
+                & $invokeLocked { Invoke-ApplyUsbSecurity -SelectedItems $toApplyUsb -Operation "Apply" }
             }
         }
 
         $UltixSync.Progress = 65
 
         # 5. SRP + IFEO Locks
-        if (@($Snapshot.ActiveSrpLocks).Count -gt 0 -and (Get-Command Get-RegState_SRP -ErrorAction SilentlyContinue)) {
+        if ($catSet.Contains("SrpLocks") -and @($Snapshot.ActiveSrpLocks).Count -gt 0 -and (Get-Command Get-RegState_SRP -ErrorAction SilentlyContinue)) {
             $srpSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($s in $Snapshot.ActiveSrpLocks) { [void]$srpSet.Add([string]$s) }
             $toApplySrp = @(Get-RegState_SRP | Where-Object { $srpSet.Contains($_.UIDisplayName) -and $_.IsDetected })
             if ($toApplySrp.Count -gt 0) {
-                Invoke-ApplySRP -SelectedItems $toApplySrp -Operation "Apply"
+                & $invokeLocked { Invoke-ApplySRP -SelectedItems $toApplySrp -Operation "Apply" }
             }
         }
 
         $UltixSync.Progress = 80
 
         # 6. Services (Merged Light + Heavy catalog)
-        if (@($Snapshot.DisabledServices).Count -gt 0) {
+        if ($catSet.Contains("Services") -and @($Snapshot.DisabledServices).Count -gt 0) {
             $svcTargetSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($sv in $Snapshot.DisabledServices) { [void]$svcTargetSet.Add([string]$sv) }
 
@@ -4676,50 +5652,74 @@ function Import-WinUltixProfile {
 
             $toApplySvc = @($mergedSvcCatalog | Where-Object { $svcTargetSet.Contains($_.ActionData.Name) -and $_.IsDetected })
             if ($toApplySvc.Count -gt 0) {
-                Invoke-ApplyServices -SelectedItems $toApplySvc -ProfileName "Imported Profile" -Operation "Apply"
+                & $invokeLocked { Invoke-ApplyServices -SelectedItems $toApplySvc -ProfileName "Imported Profile" -Operation "Apply" }
             }
         }
 
         # 7. Telemetry Scheduled Tasks
-        if (@($Snapshot.DisabledTasks).Count -gt 0 -and (Get-Command Get-TelemetryTasksState -ErrorAction SilentlyContinue)) {
+        if ($catSet.Contains("Tasks") -and @($Snapshot.DisabledTasks).Count -gt 0 -and (Get-Command Get-TelemetryTasksState -ErrorAction SilentlyContinue)) {
             $taskSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($tk in $Snapshot.DisabledTasks) { [void]$taskSet.Add([string]$tk) }
             $toApplyTasks = @(Get-TelemetryTasksState | Where-Object { $taskSet.Contains($_.UIDisplayName) -and $_.IsDetected })
             if ($toApplyTasks.Count -gt 0) {
-                Invoke-ApplyTasks -SelectedItems $toApplyTasks -Operation "Apply"
+                & $invokeLocked { Invoke-ApplyTasks -SelectedItems $toApplyTasks -Operation "Apply" }
             }
         }
 
         $UltixSync.Progress = 90
 
         # 8. Start Menu 3-Icon Layout & Active DNS/DoH Profile
-        if ($Snapshot.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $Snapshot.StartMenuClean -eq $true -and (Get-Command Clear-StartMenu -ErrorAction SilentlyContinue)) {
+        if ($catSet.Contains("StartMenu") -and $Snapshot.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $Snapshot.StartMenuClean -eq $true -and (Get-Command Clear-StartMenu -ErrorAction SilentlyContinue)) {
             $smCur = @(Get-StartMenuState) | Select-Object -First 1
             if ($null -ne $smCur -and $smCur.IsDetected) {
-                Clear-StartMenu -Operation "Apply"
+                & $invokeLocked { [void](Clear-StartMenu -Operation "Apply") }
+                $didClearStartMenu = $true
             }
         }
 
-        if ($Snapshot.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $Snapshot.DnsProfile -and -not [string]::IsNullOrWhiteSpace($Snapshot.DnsProfile.Provider) -and (Get-Command Set-CustomDNS -ErrorAction SilentlyContinue)) {
-            Set-CustomDNS -Provider ([string]$Snapshot.DnsProfile.Provider) -EnableDoH ([bool]$Snapshot.DnsProfile.EnableDoH) -EnableIPv6 ([bool]$Snapshot.DnsProfile.EnableIPv6)
+        if ($catSet.Contains("DnsProfile") -and $Snapshot.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $Snapshot.DnsProfile -and -not [string]::IsNullOrWhiteSpace($Snapshot.DnsProfile.Provider) -and (Get-Command Set-CustomDNS -ErrorAction SilentlyContinue)) {
+           & $invokeLocked { Set-CustomDNS -Provider ([string]$Snapshot.DnsProfile.Provider) -EnableDoH ([bool]$Snapshot.DnsProfile.EnableDoH) -EnableIPv6 ([bool]$Snapshot.DnsProfile.EnableIPv6) }
         }
 
-        # 9. Hardware & Affinity Snapshot
-        if (Get-Command Import-UltixHardwareSnapshot -ErrorAction SilentlyContinue) {
-            Import-UltixHardwareSnapshot -ProfileData $Snapshot
-        } elseif (@($Snapshot.AffinityLasso).Count -gt 0) {
-            $affPath = "HKCU:\Software\WinUltix\AffinityLasso"
-            foreach ($exe in $Snapshot.AffinityLasso) {
-                Set-UltixRegValue -Path $affPath -Name $exe -Value 1 -Type DWord -Module "PROFILE"
+        # 9. Hardware & Affinity Snapshot (filtered per selected categories)
+        $wantAff = $catSet.Contains("AffinityLasso")
+        $wantHw  = $catSet.Contains("HardwareLocks")
+        if ($wantAff -or $wantHw) {
+            $filteredHwSnapshot = [PSCustomObject]@{
+                AffinityLasso = if ($wantAff) { @($Snapshot.AffinityLasso) } else { @() }
+                HardwareLocks = if ($wantHw)  { $Snapshot.HardwareLocks }      else { $null }
             }
-            $UltixSync.Logs.Enqueue(" -> Restored $(@($Snapshot.AffinityLasso).Count) process(es) to Affinity Lasso roster.")
+            if (Get-Command Import-UltixHardwareSnapshot -ErrorAction SilentlyContinue) {
+                Import-UltixHardwareSnapshot -ProfileData $filteredHwSnapshot
+            } elseif ($wantAff -and @($Snapshot.AffinityLasso).Count -gt 0) {
+                $affPath = "HKCU:\Software\WinUltix\AffinityLasso"
+                foreach ($exe in $Snapshot.AffinityLasso) {
+                    Set-UltixRegValue -Path $affPath -Name $exe -Value 1 -Type DWord -Module "PROFILE"
+                }
+                $UltixSync.Logs.Enqueue(" -> Restored $(@($Snapshot.AffinityLasso).Count) process(es) to Affinity Lasso roster.")
+            }
         }
 
         $UltixSync.Progress = 100
-        return ,$modifiedRegItems
+        return [PSCustomObject]@{
+            UltixImportResult  = $true
+            ModifiedRegItems   = @($modifiedRegItems)
+            DidClearStartMenu  = $didClearStartMenu
+        }
     } -OnComplete ({
-        param($modReg)
+        param($taskOut)
         Update-Progress 0
+        $resObj = @($taskOut | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties.Match("UltixImportResult").Count -gt 0 }) | Select-Object -Last 1
+        if ($null -ne $resObj -and @($resObj.ModifiedRegItems).Count -gt 0) {
+            if ($resObj.DidClearStartMenu) {
+                # Explorer was already restarted by Clear-StartMenu; avoid a duplicate restart
+                try { [WinUltix.ShellInterop]::BroadcastShellRefresh() } catch { }
+                $needsSearch = @($resObj.ModifiedRegItems | Where-Object { $null -ne $_.ActionData -and $_.ActionData.RestartSearch -eq $true }).Count -gt 0
+                if ($needsSearch) { [void](Stop-UltixProcess -Name "SearchHost" -Module "PROFILE") }
+            } else {
+                Update-ShellEnvironment -ModifiedItems $resObj.ModifiedRegItems -Module "PROFILE"
+            }
+        }
         Update-DNSLabel
         Write-GUI "=== PROFILE IMPORT COMPLETED ===`n"
     }.GetNewClosure())

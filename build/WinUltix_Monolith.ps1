@@ -16,6 +16,7 @@ foreach ($fn in (Get-ChildItem -Path Function:\)) {
 }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.ServiceProcess
 if (-not ([System.Management.Automation.PSTypeName]'WinUltix.NativeMethods').Type) {
 Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -TypeDefinition @"
     using System;
@@ -2287,7 +2288,7 @@ param(
 [switch]$IncludePerUserInstances,
 [string]$Module = ""
 )
-$targets = [System.Collections.Generic.List[System.ServiceProcess.ServiceController]]::new()
+$targets = [System.Collections.Generic.List[object]]::new()
 try {
 $mainSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($null -ne $mainSvc) { $targets.Add($mainSvc) }
@@ -2486,7 +2487,7 @@ Set-Item -LiteralPath $Path -Value ([string]$Value) -Force -ErrorAction Stop | O
 Write-UltixExpertResult -OutputText "(Default) = '$Value'" -ExitCode 0 -Module $Module
 } else {
 $writeVal = $Value
-if ($Type -eq "DWord" -and $writeVal -is [long] -and $writeVal -gt [int]::MaxValue) {
+if ($Type -eq "DWord" -and ($writeVal -is [long] -or $writeVal -is [uint32] -or $writeVal -is [uint64]) -and $writeVal -gt [int]::MaxValue -and $writeVal -le [uint32]::MaxValue) {
 $writeVal = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$writeVal), 0)
 }
 Set-ItemProperty -LiteralPath $Path -Name $Name -Value $writeVal -Type $Type -Force -ErrorAction Stop | Out-Null
@@ -2716,7 +2717,10 @@ $clean = $basePart
 return $clean.Trim()
 }
 function Write-UltixSystemBanner {
-param([string]$StatusMessage = "Ready for deployment. Modular architecture loaded successfully.")
+param(
+[string]$StatusMessage = "Ready for deployment. Modular architecture loaded successfully.",
+[switch]$ShowQuickGuide
+)
 if ($null -eq $global:infoBox -or $global:infoBox.IsDisposed) { return }
 $ntCur = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "ProductName", "DisplayVersion", "ReleaseId", "CurrentBuild", "UBR" -ErrorAction SilentlyContinue
 $prodName = if ($null -ne $ntCur -and $ntCur.ProductName) { [string]$ntCur.ProductName } else { "Windows OS" }
@@ -2885,6 +2889,45 @@ if (-not [string]::IsNullOrWhiteSpace($StatusMessage)) {
 $global:infoBox.SelectionColor = [System.Drawing.Color]::LightGreen
 $global:infoBox.AppendText("$StatusMessage`r`n")
 }
+if ($null -ne $global:UltixRebootReasons -and $global:UltixRebootReasons.Count -gt 0) {
+$global:infoBox.SelectionColor = [System.Drawing.Color]::Orange
+$global:infoBox.AppendText("[*] Reboot Recommended to finalize: $(@($global:UltixRebootReasons) -join ', ')`r`n")
+}
+if ($ShowQuickGuide.IsPresent) {
+$cHead = [System.Drawing.Color]::Cyan
+$cKey  = [System.Drawing.Color]::LightSkyBlue
+$cText = [System.Drawing.Color]::FromArgb(255, 195, 200, 208)
+$appendSeg = {
+param([string]$Text, [System.Drawing.Color]$Color)
+$global:infoBox.SelectionStart  = $global:infoBox.TextLength
+$global:infoBox.SelectionLength = 0
+$global:infoBox.SelectionColor  = $Color
+$global:infoBox.AppendText($Text)
+}
+& $appendSeg "`r`n--- QUICK START (ZERO BLACK BOXES) ---`r`n" $cHead
+& $appendSeg "  * Checklists     : " $cKey
+& $appendSeg "Cleanup, Debloat, Tweaks, Services & Security ask before changing.`r`n" $cText
+& $appendSeg "  * [ ? ] Buttons  : " $cKey
+& $appendSeg "Read-only audit printed directly into this log (zero OS changes).`r`n" $cText
+& $appendSeg "  * [ OPTIONAL ]   : " ([System.Drawing.Color]::Gold)
+& $appendSeg "Opt-In items stay unchecked (Camera, Mic, Printer, Xbox, VBS, USB).`r`n" $cText
+& $appendSeg "  * 1-Click Revert : " ([System.Drawing.Color]::LightGreen)
+& $appendSeg "Tweaks, Services, Security & Hardware support symmetric rollback.`r`n" $cText
+& $appendSeg "  * [ Expert: ON ] : " ([System.Drawing.Color]::Orange)
+& $appendSeg "Live Win32 console showing exact commands, reg writes & exit codes.`r`n`r`n" $cText
+& $appendSeg "  Button Colors    : " $cKey
+& $appendSeg "Slate" ([System.Drawing.Color]::Silver)
+& $appendSeg " = Standard | " $cText
+& $appendSeg "Blue" ([System.Drawing.Color]::LightSkyBlue)
+& $appendSeg " = Inspector / Read-Only | " $cText
+& $appendSeg "Red" ([System.Drawing.Color]::IndianRed)
+& $appendSeg " = Aggressive`r`n" $cText
+& $appendSeg "  Typical Order    : " $cKey
+& $appendSeg "Debloat -> Tweaks -> Services -> Security -> Hardware (Scan First)`r`n" $cText
+$global:infoBox.SelectionStart  = $global:infoBox.TextLength
+$global:infoBox.SelectionLength = 0
+$global:infoBox.SelectionColor  = [System.Drawing.Color]::LightGray
+}
 }
 function Show-Description {
 param([string]$Desc)
@@ -2892,9 +2935,27 @@ if ($null -ne $global:descBox -and -not $global:descBox.IsDisposed) {
 $global:descBox.Text = $Desc -replace "(?<!`r)`n", "`r`n"
 }
 }
+$global:UltixTabDescriptions = @{
+"Cleanup"   = "[CLEANUP] Disk, cache & orphan hygiene (WU, Temp, Browsers, Shaders, DriverStore, MSI).`r`nEvery tool scans first and opens a checklist or grid so you review items before removal.`r`nHover any button for details, or click [?] for a read-only audit into the log below."
+"Debloat"   = "[DEBLOAT] OneDrive removal, 64 UWP/AI targets (Recall/Copilot), FOD & Appx GC.`r`nCore OS/Store/Xbox runtimes are protected; daily apps (Photos/Camera/Xbox) are Opt-In.`r`nBottom grids are manual inspectors for targeted review only (do not Select All)."
+"Tweaks"    = "[TWEAKS] Taskbar, Start Menu, Explorer, Power/Display, Raw Mouse & Gaming Registry.`r`nEvery category supports read-only [?] audits and 1-click Symmetric Revert to defaults.`r`nHover any button for details before opening its interactive checklist."
+"Services"  = "[SERVICES] Reversible Office (12) & Gaming (60) profiles, Telemetry Tasks & 3 managers.`r`nCritical OS services are locked in Red; Printer, Camera, RDP & Xbox are Opt-In.`r`nUse the bottom grids for targeted manual control of services, tasks & startup items."
+"Security"  = "[SECURITY] Privacy/AppPrivacy, UEFI WPBT block, 4-Layer USB Guard, SRP+IFEO & DoH DNS.`r`nAll policy locks support 1-click Revert; restrictive USB & device locks are Opt-In.`r`nBottom buttons launch classic Win32 Control Panel & MMC tools directly."
+"Integrity" = "[INTEGRITY] OS recovery (ChkDisk/DISM/SFC, WinSxS, WMI, WU, Network, Spooler, Store).`r`nRun [?] health audits first (read-only); heavy/disruptive repairs prompt before running.`r`nHover any button to inspect exact recovery actions before launching."
+"Hardware"  = "[HARDWARE] Low-level latency cockpit. Read-only diagnostics: USB Map, WHEA & Live DPC.`r`nTuners (Affinity, CPPC, Quantum, MSI/IRQ, Timer, NVMe, NDIS) include backup & restore.`r`nHover any button to check whether changes apply live or require a reboot."
+}
 function Restore-Log {
 if ($null -ne $global:descBox -and -not $global:descBox.IsDisposed) {
+$tabKey = if ($null -ne $global:tabControl -and -not $global:tabControl.IsDisposed -and $null -ne $global:tabControl.SelectedTab) {
+[string]$global:tabControl.SelectedTab.Text
+} else {
+""
+}
+if (-not [string]::IsNullOrWhiteSpace($tabKey) -and $global:UltixTabDescriptions.ContainsKey($tabKey)) {
+$global:descBox.Text = $global:UltixTabDescriptions[$tabKey]
+} else {
 $global:descBox.Text = "Hover over any button to see operation details."
+}
 }
 }
 function Update-Progress {
@@ -2906,7 +2967,186 @@ $global:progBar.Invalidate()
 $global:progBar.Update()
 }
 }
+$global:UltixRebootReasons = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+function Set-UltixRebootRequired {
+param([string]$Reason = "Pending Changes")
+if ($null -eq $global:UltixRebootReasons) {
+$global:UltixRebootReasons = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+}
+$cleanReason = if ([string]::IsNullOrWhiteSpace($Reason)) { "Pending Changes" } else { $Reason.Trim() }
+[void]$global:UltixRebootReasons.Add($cleanReason)
+if ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired) {
+$baseTitle = "WinUltix - Ultimate System Toolkit $Global:AppVersion"
+$tag = if ($global:UltixRebootReasons.Count -le 3) {
+"  [Reboot Recommended: $(@($global:UltixRebootReasons) -join ', ')]"
+} else {
+"  [Reboot Recommended ($($global:UltixRebootReasons.Count) subsystems)]"
+}
+$global:form.Text = "$baseTitle$tag"
+}
+}
+function Get-UltixDnsCatalog {
+return [ordered]@{
+"Quad9 (9.9.9.9)" = @{
+IPv4     = @("9.9.9.9", "149.112.112.112")
+IPv6     = @("2620:fe::fe", "2620:fe::9")
+Template = "https://dns.quad9.net/dns-query"
+Badge    = "[SECURITY | CH]"
+Category = "Security"
+Summary  = "Blocks malware, phishing & C2 domains (Swiss non-profit, DNSSEC, zero-log)."
+}
+"Cloudflare (1.1.1.1)" = @{
+IPv4     = @("1.1.1.1", "1.0.0.1")
+IPv6     = @("2606:4700:4700::1111", "2606:4700:4700::1001")
+Template = "https://cloudflare-dns.com/dns-query"
+Badge    = "[FAST | UNFILTERED]"
+Category = "Standard"
+Summary  = "Unfiltered ultra-low latency global Anycast resolver (no content blocking)."
+}
+"Cloudflare Security (1.1.1.2)" = @{
+IPv4     = @("1.1.1.2", "1.0.0.2")
+IPv6     = @("2606:4700:4700::1112", "2606:4700:4700::1002")
+Template = "https://security.cloudflare-dns.com/dns-query"
+Badge    = "[SECURITY]"
+Category = "Security"
+Summary  = "Fast Anycast resolver with automatic malware & phishing domain blocking."
+}
+"Cloudflare Family (1.1.1.3)" = @{
+IPv4     = @("1.1.1.3", "1.0.0.3")
+IPv6     = @("2606:4700:4700::1113", "2606:4700:4700::1003")
+Template = "https://family.cloudflare-dns.com/dns-query"
+Badge    = "[PARENTAL | 18+]"
+Category = "Parental"
+Summary  = "Parental Control: blocks malware, phishing and adult (18+) websites."
+}
+"AdGuard (94.140.14.14)" = @{
+IPv4     = @("94.140.14.14", "94.140.15.15")
+IPv6     = @("2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff")
+Template = "https://dns.adguard-dns.com/dns-query"
+Badge    = "[ADBLOCK]"
+Category = "AdBlock"
+Summary  = "System-wide DNS blocking of ads, trackers, telemetry and phishing domains."
+}
+"AdGuard Family (94.140.14.15)" = @{
+IPv4     = @("94.140.14.15", "94.140.15.16")
+IPv6     = @("2a10:50c0::bad1:ff", "2a10:50c0::bad2:ff")
+Template = "https://family.adguard-dns.com/dns-query"
+Badge    = "[PARENTAL | ADS+18+]"
+Category = "Parental"
+Summary  = "Parental Control: blocks ads, trackers, adult (18+) & enforces SafeSearch."
+}
+"DNS4EU Protective (86.54.11.1)" = @{
+IPv4     = @("86.54.11.1", "86.54.11.201")
+IPv6     = @("2a13:1001::86:54:11:1", "2a13:1001::86:54:11:201")
+Template = "https://protective.joindns4.eu/dns-query"
+Badge    = "[SECURITY | EU]"
+Category = "Security"
+Summary  = "EU sovereign GDPR resolver: blocks malware, phishing & C2 domains."
+}
+"DNS4EU AdBlock (86.54.11.13)" = @{
+IPv4     = @("86.54.11.13", "86.54.11.213")
+IPv6     = @("2a13:1001::86:54:11:13", "2a13:1001::86:54:11:213")
+Template = "https://noads.joindns4.eu/dns-query"
+Badge    = "[ADBLOCK | EU]"
+Category = "AdBlock"
+Summary  = "EU GDPR resolver: blocks malware, phishing, web/app ads & trackers."
+}
+"DNS4EU Child (86.54.11.12)" = @{
+IPv4     = @("86.54.11.12", "86.54.11.212")
+IPv6     = @("2a13:1001::86:54:11:12", "2a13:1001::86:54:11:212")
+Template = "https://child.joindns4.eu/dns-query"
+Badge    = "[PARENTAL | EU 18+]"
+Category = "Parental"
+Summary  = "EU Parental Control: blocks malware, explicit (18+), violence & drug sites."
+}
+"DNS4EU Child+Ads (86.54.11.11)" = @{
+IPv4     = @("86.54.11.11", "86.54.11.211")
+IPv6     = @("2a13:1001::86:54:11:11", "2a13:1001::86:54:11:211")
+Template = "https://child-noads.joindns4.eu/dns-query"
+Badge    = "[PARENTAL | EU ALL]"
+Category = "Parental"
+Summary  = "EU Full Filter: blocks malware, ads/trackers, 18+, violence & drug sites."
+}
+"Control D Ads+Malware (76.76.2.2)" = @{
+IPv4     = @("76.76.2.2", "76.76.10.2")
+IPv6     = @("2606:1a40::2", "2606:1a40:1::2")
+Template = "https://freedns.controld.com/p2"
+Badge    = "[ADBLOCK]"
+Category = "AdBlock"
+Summary  = "Global Anycast DNS blocking malware, ads & tracking domains (DNSSEC, no ECS)."
+}
+"Control D Family (76.76.2.4)" = @{
+IPv4     = @("76.76.2.4", "76.76.10.4")
+IPv6     = @("2606:1a40::4", "2606:1a40:1::4")
+Template = "https://freedns.controld.com/family"
+Badge    = "[PARENTAL | ADS+18+]"
+Category = "Parental"
+Summary  = "Parental Control: blocks malware, ads, trackers, adult (18+) & drug sites."
+}
+"CleanBrowsing Family (185.228.168.168)" = @{
+IPv4     = @("185.228.168.168", "185.228.169.168")
+IPv6     = @("2a0d:2a00:1::", "2a0d:2a00:2::")
+Template = "https://doh.cleanbrowsing.org/doh/family-filter/"
+Badge    = "[PARENTAL | STRICT]"
+Category = "Parental"
+Summary  = "Strict Parental Filter: blocks 18+, proxies/VPNs, mixed-content & SafeSearch."
+}
+"OpenDNS (208.67.222.222)" = @{
+IPv4     = @("208.67.222.222", "208.67.220.220")
+IPv6     = @("2620:119:35::35", "2620:119:53::53")
+Template = "https://doh.opendns.com/dns-query"
+Badge    = "[SECURITY | CISCO]"
+Category = "Security"
+Summary  = "Cisco Umbrella Home resolver blocking phishing & known malicious domains."
+}
+"OpenDNS Family (208.67.222.123)" = @{
+IPv4     = @("208.67.222.123", "208.67.220.123")
+IPv6     = @()
+Template = "https://doh.familyshield.opendns.com/dns-query"
+Badge    = "[PARENTAL | IPv4]"
+Category = "Parental"
+Summary  = "Cisco FamilyShield: blocks adult (18+), proxies & phishing (IPv4-only)."
+}
+"Google (8.8.8.8)" = @{
+IPv4     = @("8.8.8.8", "8.8.4.4")
+IPv6     = @("2001:4860:4860::8888", "2001:4860:4860::8844")
+Template = "https://dns.google/dns-query"
+Badge    = "[FAST | UNFILTERED]"
+Category = "Standard"
+Summary  = "Unfiltered Google Public DNS (high availability, DNSSEC, no parental filter)."
+}
+"Default (DHCP)" = @{
+IPv4     = @()
+IPv6     = @()
+Template = ""
+Badge    = "[ISP / ROUTER]"
+Category = "Dhcp"
+Summary  = "Reverts all active adapters to router/ISP DHCP DNS and clears DoH locks."
+}
+}
+}
+function Format-UltixDnsDescription {
+param([AllowEmptyString()][string]$Provider)
+$catalog = Get-UltixDnsCatalog
+if ([string]::IsNullOrWhiteSpace($Provider) -or -not $catalog.Contains($Provider)) {
+return "Select a hardened or parental-control DNS profile, then click Apply DNS."
+}
+$cfg = $catalog[$Provider]
+if ($cfg.Category -eq "Dhcp") {
+return "[DNS] $Provider $($cfg.Badge)`r`n$($cfg.Summary)`r`nClears static IPv4/IPv6 NameServer entries & Dnscache DoH policies on all active NICs."
+}
+$v4Text = ($cfg.IPv4 -join ", ")
+$v6Text = if (@($cfg.IPv6).Count -gt 0) { ($cfg.IPv6 -join ", ") } else { "Not offered (IPv4-only; disable DHCPv6 if needed)" }
+return "[DNS] $Provider $($cfg.Badge) - $($cfg.Summary)`r`nIPv4: $v4Text | IPv6: $v6Text`r`nDoH : $($cfg.Template)"
+}
 function Get-UltixActiveNetworkAdapters {
+$dnsCatalog = Get-UltixDnsCatalog
+$ipToProvider = @{}
+foreach ($kvp in $dnsCatalog.GetEnumerator()) {
+foreach ($ip in @($kvp.Value.IPv4)) {
+if (-not [string]::IsNullOrWhiteSpace($ip)) { $ipToProvider[$ip] = $kvp.Key }
+}
+}
 $adapters = [System.Collections.Generic.List[PSCustomObject]]::new()
 foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
 if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
@@ -2927,21 +3167,18 @@ $v4Addrs.Add($dnsIp.ToString())
 $v6Addrs.Add($dnsIp.ToString())
 }
 }
-$ifGuid = [string]$nic.Id
-$v4RegKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$ifGuid"
-$staticNs = [string](Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
-$primaryV4 = if ($v4Addrs.Count -gt 0) { $v4Addrs[0] } else { "" }
+$ifGuid     = [string]$nic.Id
+$v4RegKey   = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$ifGuid"
+$v6RegKey   = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$ifGuid"
+$staticNs   = [string](Get-ItemProperty -LiteralPath $v4RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
+$staticNsV6 = [string](Get-ItemProperty -LiteralPath $v6RegKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
+$primaryV4  = if ($v4Addrs.Count -gt 0) { $v4Addrs[0] } else { "" }
 $providerName = if ([string]::IsNullOrWhiteSpace($staticNs)) {
 "Default (DHCP)"
+} elseif ($ipToProvider.ContainsKey($primaryV4)) {
+$ipToProvider[$primaryV4]
 } else {
-switch ($primaryV4) {
-"9.9.9.9"        { "Quad9 (9.9.9.9)" }
-"1.1.1.1"        { "Cloudflare (1.1.1.1)" }
-"94.140.14.14"   { "AdGuard (94.140.14.14)" }
-"8.8.8.8"        { "Google (8.8.8.8)" }
-"208.67.222.222" { "OpenDNS (208.67.222.222)" }
-default          { "Custom" }
-}
+"Custom"
 }
 $isDohActive = $false
 if (-not [string]::IsNullOrWhiteSpace($ifGuid) -and -not [string]::IsNullOrWhiteSpace($primaryV4)) {
@@ -2958,6 +3195,7 @@ DnsV4            = @($v4Addrs)
 DnsV6            = @($v6Addrs)
 PrimaryV4        = $primaryV4
 StaticNameServer = $staticNs
+StaticNameServerV6 = $staticNsV6
 ProviderName     = $providerName
 IsDohActive      = $isDohActive
 })
@@ -2971,19 +3209,23 @@ try {
 $activeNic = @(Get-UltixActiveNetworkAdapters) | Select-Object -First 1
 if ($null -eq $activeNic) {
 $global:lblCurrentDNS.Text = "Current DNS: No active internet route"
+$global:lblCurrentDNS.AccessibleDescription = "No active network adapter with a default gateway was detected."
 $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::DarkGray
 return
 }
 if ([string]::IsNullOrWhiteSpace($activeNic.StaticNameServer)) {
-$dhcpHint = if (-not [string]::IsNullOrWhiteSpace($activeNic.PrimaryV4)) { " (DHCP - $($activeNic.PrimaryV4))" } else { " (DHCP)" }
-$global:lblCurrentDNS.Text = "Current DNS: Default provider$dhcpHint"
+$dhcpIp = if (-not [string]::IsNullOrWhiteSpace($activeNic.PrimaryV4)) { $activeNic.PrimaryV4 } else { "Auto" }
+$global:lblCurrentDNS.Text = "Current DNS: Default (DHCP)`r`nActive IP  : $dhcpIp [$($activeNic.InterfaceAlias)]"
+$global:lblCurrentDNS.AccessibleDescription = "[ACTIVE DNS] Adapter: $($activeNic.InterfaceName) ($($activeNic.InterfaceAlias))`r`nMode: Automatic DHCP | IPv4: $(($activeNic.DnsV4 -join ', '))`r`nIPv6: $(if($activeNic.DnsV6.Count -gt 0){ $activeNic.DnsV6 -join ', ' }else{ 'None' })"
 $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
 return
 }
 $shortProv  = ($activeNic.ProviderName -replace '\s*\([^)]*\)$', '')
-$stackBadge = if ($activeNic.DnsV6.Count -gt 0) { "IPv4+v6" } else { "IPv4" }
-$dohBadge   = if ($activeNic.IsDohActive) { " [DoH Encrypted]" } else { " [Plaintext]" }
-$global:lblCurrentDNS.Text = "Current DNS: $shortProv ($($activeNic.PrimaryV4) | $stackBadge)$dohBadge"
+$stackBadge = if (-not [string]::IsNullOrWhiteSpace($activeNic.StaticNameServerV6)) { "IPv4+v6" } else { "IPv4" }
+$dohShort   = if ($activeNic.IsDohActive) { "[DoH]" } else { "[Plain]" }
+$dohFull    = if ($activeNic.IsDohActive) { "Native DoH Encrypted" } else { "Plaintext UDP/53" }
+$global:lblCurrentDNS.Text = "Current DNS: $shortProv $dohShort`r`nActive IP  : $($activeNic.PrimaryV4) ($stackBadge)"
+$global:lblCurrentDNS.AccessibleDescription = "[ACTIVE DNS] $($activeNic.ProviderName) | $dohFull`r`nAdapter: $($activeNic.InterfaceName) ($($activeNic.InterfaceAlias))`r`nIPv4: $(($activeNic.DnsV4 -join ', ')) | IPv6: $(if($activeNic.DnsV6.Count -gt 0){ $activeNic.DnsV6 -join ', ' }else{ 'None' })"
 $global:lblCurrentDNS.ForeColor = if ($activeNic.IsDohActive) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::LightSkyBlue }
 } catch {
 $global:lblCurrentDNS.Text = "Current DNS: Unknown"
@@ -3262,9 +3504,10 @@ foreach ($ctrl in $ControlsToDisable) {
 if ($null -ne $ctrl -and -not $ctrl.IsDisposed) { $ctrl.Enabled = $false }
 }
 $syncContext = [hashtable]::Synchronized(@{
-Logs         = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-Progress     = -1
-LockProgress = $false
+Logs          = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+RebootReasons = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+Progress      = -1
+LockProgress  = $false
 })
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
 $fnRoster = if ($null -ne $Global:UltixToolkitFunctions -and $Global:UltixToolkitFunctions.Count -gt 0) {
@@ -3273,7 +3516,7 @@ $Global:UltixToolkitFunctions
 @("Get-UltixUserProfiles", "Get-UltixFastSize", "Set-ProtectedServiceStart", "Get-UltixPowerAcIndex")
 }
 foreach ($fnName in $fnRoster) {
-if ($fnName -in @("Write-GUI", "Update-Progress", "Show-Description", "Restore-Log")) { continue }
+if ($fnName -in @("Write-GUI", "Update-Progress", "Show-Description", "Restore-Log", "Set-UltixRebootRequired")) { continue }
 $cmd = Get-Command -Name $fnName -CommandType Function -ErrorAction SilentlyContinue
 if ($null -ne $cmd) {
 $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fnName, $cmd.Definition))
@@ -3281,6 +3524,7 @@ $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStat
 }
 $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Write-GUI", 'param([AllowEmptyString()][string]$Message, [switch]$DeferUpdate) if ($null -ne $UltixSync -and -not [string]::IsNullOrWhiteSpace($Message)) { $UltixSync.Logs.Enqueue($Message) }'))
 $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Update-Progress", 'param([int]$Percent) if ($null -ne $UltixSync -and -not $UltixSync.LockProgress) { $UltixSync.Progress = $Percent }'))
+$iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Set-UltixRebootRequired", 'param([string]$Reason = "Pending Changes") if ($null -ne $UltixSync -and $null -ne $UltixSync.RebootReasons) { $UltixSync.RebootReasons.Enqueue($Reason) }'))
 if ($null -eq $global:UltixActiveTasks) {
 $global:UltixActiveTasks = [System.Collections.Generic.List[hashtable]]::new()
 }
@@ -3340,7 +3584,11 @@ if ($dequeuedAny -and $null -ne $global:infoBox -and -not $global:infoBox.IsDisp
 $global:infoBox.ScrollToCaret()
 $global:infoBox.Update()
 }
-if ($sync.Progress -ge 0 -and $sync.Progress -ne $state.LastProgress) {
+$rbReason = $null
+while ($sync.RebootReasons.TryDequeue([ref]$rbReason)) {
+Set-UltixRebootRequired -Reason $rbReason
+}
+if (-not $sync.LockProgress -and $sync.Progress -ge 0 -and $sync.Progress -ne $state.LastProgress) {
 $state.LastProgress = $sync.Progress
 Update-Progress $sync.Progress
 }
@@ -3357,6 +3605,10 @@ $dequeuedFinal = $false
 while ($sync.Logs.TryDequeue([ref]$logLine)) {
 Write-GUI -Message $logLine -DeferUpdate
 $dequeuedFinal = $true
+}
+$rbReasonFinal = $null
+while ($sync.RebootReasons.TryDequeue([ref]$rbReasonFinal)) {
+Set-UltixRebootRequired -Reason $rbReasonFinal
 }
 if ($dequeuedFinal -and $null -ne $global:infoBox -and -not $global:infoBox.IsDisposed) {
 $global:infoBox.ScrollToCaret()
@@ -3478,10 +3730,11 @@ param (
 )
 $modal = New-Object System.Windows.Forms.Form
 $modal.Text = $Title
-$modal.Size = New-Object System.Drawing.Size(780, 680)
-$modal.MinimumSize = New-Object System.Drawing.Size(780, 520)
+$modal.Size = New-Object System.Drawing.Size(840, 695)
+$modal.MinimumSize = New-Object System.Drawing.Size(840, 540)
 $modal.StartPosition = "CenterParent"
 $modal.FormBorderStyle = "Sizable"
+$modal.KeyPreview = $true
 $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
 $modal.ForeColor = [System.Drawing.Color]::White
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
@@ -3489,117 +3742,363 @@ $lblDesc = New-Object System.Windows.Forms.Label
 $lblDesc.Text = $Description
 $lblDesc.UseMnemonic = $false
 $lblDesc.Location = New-Object System.Drawing.Point(15, 10)
-$lblDesc.Size = New-Object System.Drawing.Size(730, 38)
+$lblDesc.Size = New-Object System.Drawing.Size(795, 38)
 $lblDesc.Font = Get-UltixFont -Role "ModalDesc"
 $lblDesc.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
 $lblDesc.Anchor = 'Top, Left, Right'
 $hasValidItems = ($null -ne $AuditResults -and $AuditResults.Count -gt 0)
-$btnSelAll = New-Object System.Windows.Forms.Button
-$btnSelAll.Text = "Select All"
-$btnSelAll.UseMnemonic = $false
-$btnSelAll.Location = New-Object System.Drawing.Point(15, 51)
-$btnSelAll.Size = New-Object System.Drawing.Size(118, 30)
-$btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
-$btnSelAll.ForeColor = [System.Drawing.Color]::White
-$btnSelAll.FlatStyle = "Flat"
-$btnSelAll.Font = Get-UltixFittedFont -Control $btnSelAll -Role "ToolbarButton"
-$btnSelAll.Enabled = $hasValidItems
-$btnSelNone = New-Object System.Windows.Forms.Button
-$btnSelNone.Text = "Deselect All"
-$btnSelNone.UseMnemonic = $false
-$btnSelNone.Location = New-Object System.Drawing.Point(140, 51)
-$btnSelNone.Size = New-Object System.Drawing.Size(118, 30)
-$btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
-$btnSelNone.ForeColor = [System.Drawing.Color]::White
-$btnSelNone.FlatStyle = "Flat"
-$btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
-$btnSelNone.Enabled = $hasValidItems
+$lblSearch = New-Object System.Windows.Forms.Label
+$lblSearch.Text = "Filter:"
+$lblSearch.UseMnemonic = $false
+$lblSearch.Location = New-Object System.Drawing.Point(15, 54)
+$lblSearch.Size = New-Object System.Drawing.Size(48, 22)
+$lblSearch.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblSearch.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$txtSearch = New-Object System.Windows.Forms.TextBox
+$txtSearch.Location = New-Object System.Drawing.Point(65, 51)
+$txtSearch.Size = New-Object System.Drawing.Size(270, 26)
+$txtSearch.BackColor = [System.Drawing.Color]::FromArgb(255, 38, 40, 45)
+$txtSearch.ForeColor = [System.Drawing.Color]::White
+$txtSearch.BorderStyle = "FixedSingle"
+$txtSearch.Font = New-Object System.Drawing.Font("Segoe UI", 10.0)
+$txtSearch.Enabled = $hasValidItems
+$btnClearFilter = New-Object System.Windows.Forms.Button
+$btnClearFilter.Text = "X"
+$btnClearFilter.UseMnemonic = $false
+$btnClearFilter.Location = New-Object System.Drawing.Point(340, 51)
+$btnClearFilter.Size = New-Object System.Drawing.Size(28, 25)
+$btnClearFilter.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
+$btnClearFilter.ForeColor = [System.Drawing.Color]::LightGray
+$btnClearFilter.FlatStyle = "Flat"
+$btnClearFilter.Font = Get-UltixFont -Role "IconButton" -CustomSize 8.5
+$btnClearFilter.Enabled = $hasValidItems
+$lblCount = New-Object System.Windows.Forms.Label
+$lblCount.Location = New-Object System.Drawing.Point(380, 54)
+$lblCount.Size = New-Object System.Drawing.Size(430, 22)
+$lblCount.Font = New-Object System.Drawing.Font("Consolas", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblCount.ForeColor = [System.Drawing.Color]::LightGray
+$lblCount.TextAlign = "MiddleRight"
+$lblCount.Anchor = 'Top, Right'
 $btnSelDet = New-Object System.Windows.Forms.Button
 $btnSelDet.Text = "Select Detected"
 $btnSelDet.UseMnemonic = $false
-$btnSelDet.Location = New-Object System.Drawing.Point(265, 51)
-$btnSelDet.Size = New-Object System.Drawing.Size(140, 30)
+$btnSelDet.Location = New-Object System.Drawing.Point(15, 85)
+$btnSelDet.Size = New-Object System.Drawing.Size(142, 28)
 $btnSelDet.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
 $btnSelDet.ForeColor = [System.Drawing.Color]::White
 $btnSelDet.FlatStyle = "Flat"
 $btnSelDet.Font = Get-UltixFittedFont -Control $btnSelDet -Role "ToolbarButton"
 $btnSelDet.Enabled = $hasValidItems
-$lblCount = New-Object System.Windows.Forms.Label
-$lblCount.Location = New-Object System.Drawing.Point(545, 56)
-$lblCount.Size = New-Object System.Drawing.Size(200, 22)
-$lblCount.Font = New-Object System.Drawing.Font("Consolas", 10.0, [System.Drawing.FontStyle]::Bold)
-$lblCount.ForeColor = [System.Drawing.Color]::LightGray
-$lblCount.TextAlign = "MiddleRight"
-$lblCount.Anchor = 'Top, Right'
-$chkList = New-Object System.Windows.Forms.CheckedListBox
-$chkList.Location = New-Object System.Drawing.Point(15, 88)
-$chkList.Size = New-Object System.Drawing.Size(730, 480)
-$chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38)
-$chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
-$chkList.BorderStyle = "FixedSingle"
-$chkList.Font = Get-UltixFont -Role "GridMono"
-$chkList.CheckOnClick = $false
-$chkList.HorizontalScrollbar = $true
-$chkList.Anchor = 'Top, Bottom, Left, Right'
+$nextX = 164
+$btnSelOpt = $null
+if ($EnableRevert) {
+$btnSelOpt = New-Object System.Windows.Forms.Button
+$btnSelOpt.Text = "Select Optimized"
+$btnSelOpt.UseMnemonic = $false
+$btnSelOpt.Location = New-Object System.Drawing.Point($nextX, 85)
+$btnSelOpt.Size = New-Object System.Drawing.Size(148, 28)
+$btnSelOpt.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 95, 60)
+$btnSelOpt.ForeColor = [System.Drawing.Color]::White
+$btnSelOpt.FlatStyle = "Flat"
+$btnSelOpt.Font = Get-UltixFittedFont -Control $btnSelOpt -Role "ToolbarButton"
+$btnSelOpt.Enabled = $hasValidItems
+$nextX += 155
+}
+$btnSelAll = New-Object System.Windows.Forms.Button
+$btnSelAll.Text = "Select All"
+$btnSelAll.UseMnemonic = $false
+$btnSelAll.Location = New-Object System.Drawing.Point($nextX, 85)
+$btnSelAll.Size = New-Object System.Drawing.Size(124, 28)
+$btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+$btnSelAll.ForeColor = [System.Drawing.Color]::White
+$btnSelAll.FlatStyle = "Flat"
+$btnSelAll.Font = Get-UltixFittedFont -Control $btnSelAll -Role "ToolbarButton"
+$btnSelAll.Enabled = $hasValidItems
+$nextX += 131
+$btnSelNone = New-Object System.Windows.Forms.Button
+$btnSelNone.Text = "Deselect All"
+$btnSelNone.UseMnemonic = $false
+$btnSelNone.Location = New-Object System.Drawing.Point($nextX, 85)
+$btnSelNone.Size = New-Object System.Drawing.Size(118, 28)
+$btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+$btnSelNone.ForeColor = [System.Drawing.Color]::White
+$btnSelNone.FlatStyle = "Flat"
+$btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
+$btnSelNone.Enabled = $hasValidItems
+$listView = New-Object System.Windows.Forms.ListView
+$listView.Location = New-Object System.Drawing.Point(15, 120)
+$listView.Size = New-Object System.Drawing.Size(795, 452)
+$listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+$listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
+$listView.BorderStyle = "FixedSingle"
+$listView.Font = Get-UltixFont -Role "GridText"
+$listView.View = [System.Windows.Forms.View]::Details
+$listView.CheckBoxes = $true
+$listView.FullRowSelect = $true
+$listView.GridLines = $false
+$listView.ShowItemToolTips = $true
+$listView.Anchor = 'Top, Bottom, Left, Right'
+Enable-UltixDoubleBuffer -Control $listView
+$sorter = New-Object WinUltix.ListViewColumnSorter
+$listView.ListViewItemSorter = $sorter
+[void]$listView.Columns.Add("Status", 136)
+[void]$listView.Columns.Add("Setting / Target", 632)
+$listView.Add_Resize({
+if ($listView.Columns.Count -ge 2) {
+$listView.Columns[1].Width = [math]::Max(260, $listView.ClientSize.Width - $listView.Columns[0].Width - 4)
+}
+}.GetNewClosure())
+$txtDetail = New-Object System.Windows.Forms.TextBox
+$txtDetail.Location = New-Object System.Drawing.Point(15, 578)
+$txtDetail.Size = New-Object System.Drawing.Size(795, 24)
+$txtDetail.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$txtDetail.ForeColor = [System.Drawing.Color]::FromArgb(255, 185, 205, 225)
+$txtDetail.BorderStyle = "FixedSingle"
+$txtDetail.ReadOnly = $true
+$txtDetail.Font = New-Object System.Drawing.Font("Consolas", 9.0)
+$txtDetail.Text = "Tip: Ctrl+F to filter, click column headers to sort, Ctrl+C to copy selected item."
+$txtDetail.Anchor = 'Bottom, Left, Right'
+$bgEven = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+$bgOdd  = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
+$bgOpt  = [System.Drawing.Color]::FromArgb(255, 44, 39, 25)
+$fgBadgeDet = [System.Drawing.Color]::LightSkyBlue
+$fgBadgeOpt = [System.Drawing.Color]::Gold
+$fgBadgeOk  = [System.Drawing.Color]::LightGreen
+$fgTextDet = [System.Drawing.Color]::FromArgb(255, 238, 242, 248)
+$fgTextOpt = [System.Drawing.Color]::FromArgb(255, 252, 232, 175)
+$fgTextOk  = [System.Drawing.Color]::FromArgb(255, 158, 170, 182)
+$indexedData = [System.Collections.Generic.List[PSCustomObject]]::new()
+$checkedIds  = [System.Collections.Generic.HashSet[int]]::new()
+$syncGuard   = @{ SuppressEvents = $false }
 if ($hasValidItems) {
-$chkList.BeginUpdate()
-foreach ($item in $AuditResults) {
-$isOptIn = (
-($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
-($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
-)
-if ($item.IsDetected) {
-if ($isOptIn) {
-[void]$chkList.Items.Add("[ OPTIONAL ]  " + $item.UIDisplayName, $false)
-} else {
-[void]$chkList.Items.Add("[ DETECTED ]  " + $item.UIDisplayName, $true)
-}
-} else {
-[void]$chkList.Items.Add("[ OPTIMIZED ] " + $item.UIDisplayName, $false)
-}
-}
-$chkList.EndUpdate()
-$lblCount.Text = "Selected: $($chkList.CheckedIndices.Count) / $($AuditResults.Count)"
-} else {
-[void]$chkList.Items.Add("No actionable items returned from audit scanner.", $false)
-$chkList.Enabled = $false
-$lblCount.Text = "Selected: 0 / 0"
-}
-$updateCounter = ({
-param([int]$Delta = 0)
-$totalChecked = $chkList.CheckedIndices.Count + $Delta
-$lblCount.Text = "Selected: $totalChecked / $($chkList.Items.Count)"
-}.GetNewClosure())
-$chkList.Add_ItemCheck({
-param($src, $e)
-$delta = if ($e.NewValue -eq [System.Windows.Forms.CheckState]::Checked) { 1 } else { -1 }
-& $updateCounter $delta
-}.GetNewClosure())
-$btnSelAll.Add_Click({
-$chkList.BeginUpdate()
-for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $true) }
-$chkList.EndUpdate()
-& $updateCounter 0
-}.GetNewClosure())
-$btnSelNone.Add_Click({
-$chkList.BeginUpdate()
-for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $false) }
-$chkList.EndUpdate()
-& $updateCounter 0
-}.GetNewClosure())
-$btnSelDet.Add_Click({
-$chkList.BeginUpdate()
 for ($i = 0; $i -lt $AuditResults.Count; $i++) {
 $item = $AuditResults[$i]
 $isOptIn = (
 ($item.PSObject.Properties.Match("OptIn").Count -gt 0 -and [bool]$item.OptIn) -or
 ($null -ne $item.ActionData -and $item.ActionData -is [hashtable] -and $item.ActionData.OptIn -eq $true)
 )
-$chkList.SetItemChecked($i, ([bool]$item.IsDetected -and -not $isOptIn))
+$statusKind = if ($item.IsDetected) {
+if ($isOptIn) { "Optional" } else { "Detected" }
+} else {
+"Optimized"
 }
-$chkList.EndUpdate()
-& $updateCounter 0
+$statusText = switch ($statusKind) {
+"Detected"  { "[ DETECTED ]" }
+"Optional"  { "[ OPTIONAL ]" }
+default     { "[ OPTIMIZED ]" }
+}
+$indexedData.Add([PSCustomObject]@{
+RowId      = $i
+Item       = $item
+StatusKind = $statusKind
+StatusText = $statusText
+Label      = [string]$item.UIDisplayName
+})
+if ($statusKind -eq "Detected") {
+[void]$checkedIds.Add($i)
+}
+}
+}
+$updateCounter = ({
+$lblCount.Text = "Selected: $($checkedIds.Count) / $($indexedData.Count) (Showing: $($listView.Items.Count))"
 }.GetNewClosure())
+$applyRowShading = ({
+for ($r = 0; $r -lt $listView.Items.Count; $r++) {
+$it = $listView.Items[$r]
+if ($null -eq $it.Tag) { continue }
+$entry = $indexedData[[int]$it.Tag]
+$rowBg = if ($entry.StatusKind -eq "Optional") {
+$bgOpt
+} elseif (($r % 2) -eq 0) {
+$bgEven
+} else {
+$bgOdd
+}
+$it.BackColor = $rowBg
+foreach ($sub in $it.SubItems) { $sub.BackColor = $rowBg }
+}
+}.GetNewClosure())
+$populateList = ({
+param([string]$FilterText = "")
+$syncGuard.SuppressEvents = $true
+$listView.BeginUpdate()
+$listView.ListViewItemSorter = $null
+$listView.Items.Clear()
+if (-not $hasValidItems) {
+$emptyItem = New-Object System.Windows.Forms.ListViewItem("[ INFO ]")
+[void]$emptyItem.SubItems.Add("No actionable items returned from audit scanner.")
+$emptyItem.ForeColor = [System.Drawing.Color]::DarkGray
+[void]$listView.Items.Add($emptyItem)
+$listView.Enabled = $false
+$listView.EndUpdate()
+$syncGuard.SuppressEvents = $false
+$lblCount.Text = "Selected: 0 / 0"
+return
+}
+$cleanFilter = $FilterText.Trim()
+$btnSelAll.Text = if ($cleanFilter.Length -gt 0) { "Select Visible" } else { "Select All" }
+$visIdx = 0
+foreach ($entry in $indexedData) {
+if ($cleanFilter.Length -gt 0) {
+$hitLabel  = ($entry.Label.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+$hitStatus = ($entry.StatusText.IndexOf($cleanFilter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+if (-not $hitLabel -and -not $hitStatus) { continue }
+}
+$lvItem = New-Object System.Windows.Forms.ListViewItem($entry.StatusText)
+$lvItem.UseItemStyleForSubItems = $false
+$subLabel = $lvItem.SubItems.Add($entry.Label)
+$lvItem.Tag = $entry.RowId
+$lvItem.ToolTipText = "$($entry.StatusText) $($entry.Label)"
+$lvItem.Checked = $checkedIds.Contains($entry.RowId)
+$rowBg = if ($entry.StatusKind -eq "Optional") {
+$bgOpt
+} elseif (($visIdx % 2) -eq 0) {
+$bgEven
+} else {
+$bgOdd
+}
+$lvItem.BackColor   = $rowBg
+$subLabel.BackColor = $rowBg
+switch ($entry.StatusKind) {
+"Detected"  { $lvItem.ForeColor = $fgBadgeDet; $subLabel.ForeColor = $fgTextDet }
+"Optional"  { $lvItem.ForeColor = $fgBadgeOpt; $subLabel.ForeColor = $fgTextOpt }
+default     { $lvItem.ForeColor = $fgBadgeOk;  $subLabel.ForeColor = $fgTextOk  }
+}
+[void]$listView.Items.Add($lvItem)
+$visIdx++
+}
+$listView.ListViewItemSorter = $sorter
+if ($sorter.OrderOfSort -ne [System.Windows.Forms.SortOrder]::None) {
+& $applyRowShading
+}
+$listView.EndUpdate()
+$syncGuard.SuppressEvents = $false
+& $updateCounter
+}.GetNewClosure())
+$listView.Add_ItemChecked({
+param($src, $e)
+if ($syncGuard.SuppressEvents -or $null -eq $e.Item.Tag) { return }
+$rowId = [int]$e.Item.Tag
+if ($e.Item.Checked) {
+[void]$checkedIds.Add($rowId)
+} else {
+[void]$checkedIds.Remove($rowId)
+}
+& $updateCounter
+}.GetNewClosure())
+$listView.Add_SelectedIndexChanged({
+if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+$entry = $indexedData[[int]$listView.SelectedItems[0].Tag]
+$txtDetail.Text = "$($entry.StatusText) $($entry.Label)"
+}
+}.GetNewClosure())
+$listView.Add_ColumnClick({
+param($src, $e)
+$listView.BeginUpdate()
+if ($e.Column -eq $sorter.ColumnToSort) {
+$sorter.OrderOfSort = if ($sorter.OrderOfSort -eq [System.Windows.Forms.SortOrder]::Ascending) {
+[System.Windows.Forms.SortOrder]::Descending
+} else {
+[System.Windows.Forms.SortOrder]::Ascending
+}
+} else {
+$sorter.ColumnToSort = $e.Column
+$sorter.OrderOfSort = [System.Windows.Forms.SortOrder]::Ascending
+}
+$listView.Sort()
+& $applyRowShading
+$listView.EndUpdate()
+}.GetNewClosure())
+$txtSearch.Add_TextChanged({ & $populateList $txtSearch.Text }.GetNewClosure())
+$txtSearch.Add_KeyDown({
+param($src, $e)
+if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+$e.SuppressKeyPress = $true
+[void]$listView.Focus()
+}
+}.GetNewClosure())
+$btnClearFilter.Add_Click({
+$txtSearch.Text = ""
+[void]$txtSearch.Focus()
+}.GetNewClosure())
+$btnSelAll.Add_Click({
+$syncGuard.SuppressEvents = $true
+$listView.BeginUpdate()
+foreach ($lvItem in $listView.Items) {
+if ($null -eq $lvItem.Tag) { continue }
+$lvItem.Checked = $true
+[void]$checkedIds.Add([int]$lvItem.Tag)
+}
+$listView.EndUpdate()
+$syncGuard.SuppressEvents = $false
+& $updateCounter
+}.GetNewClosure())
+$btnSelNone.Add_Click({
+$syncGuard.SuppressEvents = $true
+$checkedIds.Clear()
+$listView.BeginUpdate()
+foreach ($lvItem in $listView.Items) { $lvItem.Checked = $false }
+$listView.EndUpdate()
+$syncGuard.SuppressEvents = $false
+& $updateCounter
+}.GetNewClosure())
+$btnSelDet.Add_Click({
+$syncGuard.SuppressEvents = $true
+$checkedIds.Clear()
+$listView.BeginUpdate()
+foreach ($lvItem in $listView.Items) {
+if ($null -eq $lvItem.Tag) { continue }
+$rowId = [int]$lvItem.Tag
+$isDet = ($indexedData[$rowId].StatusKind -eq "Detected")
+$lvItem.Checked = $isDet
+if ($isDet) { [void]$checkedIds.Add($rowId) }
+}
+$listView.EndUpdate()
+$syncGuard.SuppressEvents = $false
+& $updateCounter
+}.GetNewClosure())
+if ($null -ne $btnSelOpt) {
+$btnSelOpt.Add_Click({
+$syncGuard.SuppressEvents = $true
+$checkedIds.Clear()
+$listView.BeginUpdate()
+foreach ($lvItem in $listView.Items) {
+if ($null -eq $lvItem.Tag) { continue }
+$rowId = [int]$lvItem.Tag
+$isOpt = ($indexedData[$rowId].StatusKind -eq "Optimized")
+$lvItem.Checked = $isOpt
+if ($isOpt) { [void]$checkedIds.Add($rowId) }
+}
+$listView.EndUpdate()
+$syncGuard.SuppressEvents = $false
+& $updateCounter
+}.GetNewClosure())
+}
+$modal.Add_KeyDown({
+param($src, $e)
+if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+if ($txtSearch.Enabled) {
+[void]$txtSearch.Focus()
+$txtSearch.SelectAll()
+}
+$e.SuppressKeyPress = $true
+} elseif ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C) {
+if ($listView.Focused -and $listView.SelectedItems.Count -gt 0) {
+$lines = [System.Collections.Generic.List[string]]::new()
+foreach ($sel in $listView.SelectedItems) {
+if ($null -ne $sel.Tag) {
+$en = $indexedData[[int]$sel.Tag]
+$lines.Add("$($en.StatusText) $($en.Label)")
+}
+}
+if ($lines.Count -gt 0) {
+try { [System.Windows.Forms.Clipboard]::SetText($lines -join "`r`n") } catch { }
+$e.SuppressKeyPress = $true
+}
+}
+}
+}.GetNewClosure())
+& $populateList ""
 $btnApply = New-Object System.Windows.Forms.Button
 $btnApply.Text = "Execute Selected"
 $btnApply.UseMnemonic = $false
@@ -3617,16 +4116,20 @@ $btnCancel.ForeColor = [System.Drawing.Color]::White
 $btnCancel.FlatStyle = "Flat"
 $btnCancel.DialogResult = "Cancel"
 $btnCancel.Anchor = 'Bottom, Right'
-$baseControls = @($lblDesc, $btnSelAll, $btnSelNone, $btnSelDet, $lblCount, $chkList)
+$baseControls = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+foreach ($c in @($lblDesc, $lblSearch, $txtSearch, $btnClearFilter, $lblCount, $btnSelDet, $btnSelAll, $btnSelNone, $listView, $txtDetail)) {
+$baseControls.Add($c)
+}
+if ($null -ne $btnSelOpt) { $baseControls.Add($btnSelOpt) }
 if ($EnableRevert) {
-$btnApply.Location = New-Object System.Drawing.Point(15, 585)
-$btnApply.Size = New-Object System.Drawing.Size(235, 36)
+$btnApply.Location = New-Object System.Drawing.Point(15, 610)
+$btnApply.Size = New-Object System.Drawing.Size(256, 36)
 $btnApply.Font = Get-UltixFittedFont -Control $btnApply -Role "ModalAction"
 $btnRevert = New-Object System.Windows.Forms.Button
 $btnRevert.Text = "Revert Selected"
 $btnRevert.UseMnemonic = $false
-$btnRevert.Location = New-Object System.Drawing.Point(262, 585)
-$btnRevert.Size = New-Object System.Drawing.Size(235, 36)
+$btnRevert.Location = New-Object System.Drawing.Point(284, 610)
+$btnRevert.Size = New-Object System.Drawing.Size(256, 36)
 $btnRevert.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
 $btnRevert.ForeColor = [System.Drawing.Color]::White
 $btnRevert.FlatStyle = "Flat"
@@ -3634,28 +4137,33 @@ $btnRevert.Font = Get-UltixFittedFont -Control $btnRevert -Role "ModalAction"
 $btnRevert.DialogResult = "Yes"
 $btnRevert.Enabled = $hasValidItems
 $btnRevert.Anchor = 'Bottom, Left'
-$btnCancel.Location = New-Object System.Drawing.Point(510, 585)
-$btnCancel.Size = New-Object System.Drawing.Size(235, 36)
+$btnCancel.Location = New-Object System.Drawing.Point(554, 610)
+$btnCancel.Size = New-Object System.Drawing.Size(256, 36)
 $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
-$modal.Controls.AddRange($baseControls + @($btnApply, $btnRevert, $btnCancel))
+$baseControls.Add($btnApply)
+$baseControls.Add($btnRevert)
+$baseControls.Add($btnCancel)
 } else {
-$btnApply.Location = New-Object System.Drawing.Point(15, 585)
-$btnApply.Size = New-Object System.Drawing.Size(355, 36)
+$btnApply.Location = New-Object System.Drawing.Point(15, 610)
+$btnApply.Size = New-Object System.Drawing.Size(388, 36)
 $btnApply.Font = Get-UltixFittedFont -Control $btnApply -Role "ModalAction"
-$btnCancel.Location = New-Object System.Drawing.Point(390, 585)
-$btnCancel.Size = New-Object System.Drawing.Size(355, 36)
+$btnCancel.Location = New-Object System.Drawing.Point(422, 610)
+$btnCancel.Size = New-Object System.Drawing.Size(388, 36)
 $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
-$modal.Controls.AddRange($baseControls + @($btnApply, $btnCancel))
+$baseControls.Add($btnApply)
+$baseControls.Add($btnCancel)
 }
-$modal.AcceptButton = $btnApply
+$modal.Controls.AddRange($baseControls.ToArray())
 $modal.CancelButton = $btnCancel
 try {
 $useOwner = ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired)
 $result   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
 if ($hasValidItems -and ($result -eq "OK" -or $result -eq "Yes")) {
 $selectedItems = [System.Collections.Generic.List[object]]::new()
-foreach ($idx in $chkList.CheckedIndices) {
-$selectedItems.Add($AuditResults[$idx])
+foreach ($entry in $indexedData) {
+if ($checkedIds.Contains($entry.RowId)) {
+$selectedItems.Add($entry.Item)
+}
 }
 if ($selectedItems.Count -eq 0 -and $AuditResults.Count -eq 1) {
 $selectedItems.Add($AuditResults[0])
@@ -3680,10 +4188,11 @@ param(
 )
 $modal = New-Object System.Windows.Forms.Form
 $modal.Text = $Title
-$modal.Size = New-Object System.Drawing.Size(980, 700)
-$modal.MinimumSize = New-Object System.Drawing.Size(980, 560)
+$modal.Size = New-Object System.Drawing.Size(980, 715)
+$modal.MinimumSize = New-Object System.Drawing.Size(980, 590)
 $modal.StartPosition = "CenterParent"
 $modal.FormBorderStyle = "Sizable"
+$modal.KeyPreview = $true
 $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
 $modal.ForeColor = [System.Drawing.Color]::White
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
@@ -3735,7 +4244,7 @@ $lblCount.TextAlign = "MiddleRight"
 $lblCount.Anchor = 'Top, Right'
 $listView = New-Object System.Windows.Forms.ListView
 $listView.Location = New-Object System.Drawing.Point(15, 88)
-$listView.Size = New-Object System.Drawing.Size(935, 500)
+$listView.Size = New-Object System.Drawing.Size(935, 440)
 $listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
 $listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
 $listView.BorderStyle = "FixedSingle"
@@ -3932,6 +4441,123 @@ $syncGuard.SuppressEvents = $false
 & $updateCounter
 }.GetNewClosure())
 & $populateList ""
+$txtRowDetail = New-Object System.Windows.Forms.TextBox
+$txtRowDetail.Location = New-Object System.Drawing.Point(15, 534)
+$txtRowDetail.Size = New-Object System.Drawing.Size(935, 68)
+$txtRowDetail.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$txtRowDetail.ForeColor = [System.Drawing.Color]::FromArgb(255, 205, 220, 235)
+$txtRowDetail.BorderStyle = "FixedSingle"
+$txtRowDetail.Multiline = $true
+$txtRowDetail.ReadOnly = $true
+$txtRowDetail.WordWrap = $true
+$txtRowDetail.ScrollBars = "Vertical"
+$txtRowDetail.Font = New-Object System.Drawing.Font("Consolas", 8.75)
+$txtRowDetail.Text = "Click any row to inspect full untruncated values. Use Ctrl+C (or Right-Click) to copy, Ctrl+F to filter."
+$txtRowDetail.Anchor = 'Bottom, Left, Right'
+$formatRowSummary = ({
+param([object]$RowObj)
+$shortParts = [System.Collections.Generic.List[string]]::new()
+$longLines  = [System.Collections.Generic.List[string]]::new()
+foreach ($col in $Columns) {
+$hdr = [string]$col.Header
+$val = [string]$RowObj.($col.Property)
+if ([string]::IsNullOrWhiteSpace($val)) { continue }
+if ($val.Length -gt 44 -or $hdr -match '(?i)(Path|Command|Target|Key|Package|Details|Description|Location|File|Args|Publisher|Image)') {
+$longLines.Add("${hdr}: $val")
+} else {
+$shortParts.Add("${hdr}: $val")
+}
+}
+$outLines = [System.Collections.Generic.List[string]]::new()
+if ($shortParts.Count -gt 0) { $outLines.Add($shortParts -join " | ") }
+foreach ($ll in $longLines) { $outLines.Add($ll) }
+return ($outLines -join "`r`n")
+}.GetNewClosure())
+$listView.Add_SelectedIndexChanged({
+if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+$rowObj = $indexedData[[int]$listView.SelectedItems[0].Tag].Item
+$txtRowDetail.Text = & $formatRowSummary $rowObj
+}
+}.GetNewClosure())
+$copySelectedRows = ({
+if ($listView.SelectedItems.Count -eq 0) { return }
+$buf = [System.Collections.Generic.List[string]]::new()
+foreach ($sel in $listView.SelectedItems) {
+if ($null -eq $sel.Tag) { continue }
+$rowObj = $indexedData[[int]$sel.Tag].Item
+$cells = foreach ($col in $Columns) { "$($col.Header): $([string]$rowObj.($col.Property))" }
+$buf.Add($cells -join " | ")
+}
+if ($buf.Count -gt 0) {
+try { [System.Windows.Forms.Clipboard]::SetText($buf -join "`r`n") } catch { }
+}
+}.GetNewClosure())
+$ctxMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miCopyRow = $ctxMenu.Items.Add("Copy Selected Row (All Fields)   [Ctrl+C]")
+$miCopyRow.Add_Click({ & $copySelectedRows }.GetNewClosure())
+$firstHdr = [string]$Columns[0].Header
+$firstProp = [string]$Columns[0].Property
+$miCopyFirst = $ctxMenu.Items.Add("Copy '$firstHdr'")
+$miCopyFirst.Add_Click({
+if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+$val = [string]$indexedData[[int]$listView.SelectedItems[0].Tag].Item.($firstProp)
+if (-not [string]::IsNullOrEmpty($val)) {
+try { [System.Windows.Forms.Clipboard]::SetText($val) } catch { }
+}
+}
+}.GetNewClosure())
+$miCopyLast = $null
+if ($Columns.Count -gt 1) {
+$lastCol  = $Columns[$Columns.Count - 1]
+$lastHdr  = [string]$lastCol.Header
+$lastProp = [string]$lastCol.Property
+$miCopyLast = $ctxMenu.Items.Add("Copy '$lastHdr'")
+$miCopyLast.Add_Click({
+if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+$val = [string]$indexedData[[int]$listView.SelectedItems[0].Tag].Item.($lastProp)
+if (-not [string]::IsNullOrEmpty($val)) {
+try { [System.Windows.Forms.Clipboard]::SetText($val) } catch { }
+}
+}
+}.GetNewClosure())
+}
+[void]$ctxMenu.Items.Add("-")
+$miCopyChecked = $ctxMenu.Items.Add("Copy All Checked Rows")
+$miCopyChecked.Add_Click({
+if ($checkedIds.Count -eq 0) { return }
+$buf = [System.Collections.Generic.List[string]]::new()
+foreach ($entry in $indexedData) {
+if ($checkedIds.Contains($entry.RowId)) {
+$cells = foreach ($col in $Columns) { "$($col.Header): $([string]$entry.Item.($col.Property))" }
+$buf.Add($cells -join " | ")
+}
+}
+if ($buf.Count -gt 0) {
+try { [System.Windows.Forms.Clipboard]::SetText($buf -join "`r`n") } catch { }
+}
+}.GetNewClosure())
+$ctxMenu.Add_Opening({
+param($src, $e)
+$hasSel = ($listView.SelectedItems.Count -gt 0)
+$miCopyRow.Enabled   = $hasSel
+$miCopyFirst.Enabled = $hasSel
+if ($null -ne $miCopyLast) { $miCopyLast.Enabled = $hasSel }
+$miCopyChecked.Enabled = ($checkedIds.Count -gt 0)
+}.GetNewClosure())
+$listView.ContextMenuStrip = $ctxMenu
+$modal.Add_KeyDown({
+param($src, $e)
+if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+[void]$txtSearch.Focus()
+$txtSearch.SelectAll()
+$e.SuppressKeyPress = $true
+} elseif ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C) {
+if ($listView.Focused -and $listView.SelectedItems.Count -gt 0) {
+& $copySelectedRows
+$e.SuppressKeyPress = $true
+}
+}
+}.GetNewClosure())
 $btnPrimary = New-Object System.Windows.Forms.Button
 $btnPrimary.Text = $PrimaryButtonText
 $btnPrimary.UseMnemonic = $false
@@ -3949,15 +4575,15 @@ $btnCancel.ForeColor = [System.Drawing.Color]::White
 $btnCancel.FlatStyle = "Flat"
 $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
 $btnCancel.Anchor = 'Bottom, Right'
-$controlsToAdd = @($lblDesc, $lblSearch, $txtSearch, $btnSelVis, $btnSelNone, $lblCount, $listView, $btnPrimary, $btnCancel)
+$controlsToAdd = @($lblDesc, $lblSearch, $txtSearch, $btnSelVis, $btnSelNone, $lblCount, $listView, $txtRowDetail, $btnPrimary, $btnCancel)
 if (-not [string]::IsNullOrWhiteSpace($SecondaryButtonText)) {
-$btnPrimary.Location = New-Object System.Drawing.Point(15, 602)
+$btnPrimary.Location = New-Object System.Drawing.Point(15, 612)
 $btnPrimary.Size = New-Object System.Drawing.Size(295, 38)
 $btnPrimary.Font = Get-UltixFittedFont -Control $btnPrimary -Role "ModalAction"
 $btnSecondary = New-Object System.Windows.Forms.Button
 $btnSecondary.Text = $SecondaryButtonText
 $btnSecondary.UseMnemonic = $false
-$btnSecondary.Location = New-Object System.Drawing.Point(322, 602)
+$btnSecondary.Location = New-Object System.Drawing.Point(322, 612)
 $btnSecondary.Size = New-Object System.Drawing.Size(295, 38)
 $btnSecondary.BackColor = [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
 $btnSecondary.ForeColor = [System.Drawing.Color]::White
@@ -3966,15 +4592,15 @@ $btnSecondary.Font = Get-UltixFittedFont -Control $btnSecondary -Role "ModalActi
 $btnSecondary.DialogResult = [System.Windows.Forms.DialogResult]::Yes
 $btnSecondary.Enabled = ($SecondaryAlwaysEnabled.IsPresent -or $indexedData.Count -gt 0)
 $btnSecondary.Anchor = 'Bottom, Left'
-$btnCancel.Location = New-Object System.Drawing.Point(630, 602)
+$btnCancel.Location = New-Object System.Drawing.Point(630, 612)
 $btnCancel.Size = New-Object System.Drawing.Size(320, 38)
 $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
 $controlsToAdd += $btnSecondary
 } else {
-$btnPrimary.Location = New-Object System.Drawing.Point(15, 602)
+$btnPrimary.Location = New-Object System.Drawing.Point(15, 612)
 $btnPrimary.Size = New-Object System.Drawing.Size(455, 38)
 $btnPrimary.Font = Get-UltixFittedFont -Control $btnPrimary -Role "ModalAction"
-$btnCancel.Location = New-Object System.Drawing.Point(495, 602)
+$btnCancel.Location = New-Object System.Drawing.Point(495, 612)
 $btnCancel.Size = New-Object System.Drawing.Size(455, 38)
 $btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
 }
@@ -4010,6 +4636,7 @@ Items  = @($selectedList)
 }
 return $null
 } finally {
+$ctxMenu.Dispose()
 $modal.Dispose()
 }
 }
@@ -4118,7 +4745,7 @@ if ($null -ne $primaryNic -and $primaryNic.ProviderName -notin @("Default (DHCP)
 $dnsProfile = [ordered]@{
 Provider   = $primaryNic.ProviderName
 EnableDoH  = [bool]$primaryNic.IsDohActive
-EnableIPv6 = ($primaryNic.DnsV6.Count -gt 0)
+EnableIPv6 = (-not [string]::IsNullOrWhiteSpace($primaryNic.StaticNameServerV6))
 }
 }
 $snapshot = [ordered]@{
@@ -4166,6 +4793,277 @@ Write-GUI " -> [OK] Profile exported ($($res.RegCount) Reg, $($res.PwrCount) Pow
 }
 }.GetNewClosure())
 }
+function Show-WinUltixProfileImportModal {
+param([Parameter(Mandatory=$true)]$ProfileData)
+$categories = [System.Collections.Generic.List[PSCustomObject]]::new()
+$regList = @($ProfileData.RegistryTweaks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($regList.Count -gt 0) {
+$categories.Add([PSCustomObject]@{
+Key     = "RegistryTweaks"
+Title   = "Registry Tweaks (Shell, Privacy, Gaming)"
+Count   = "$($regList.Count) rules"
+Details = ($regList | ForEach-Object { " - $_" }) -join "`r`n"
+})
+}
+if ($ProfileData.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $ProfileData.Win32PrioritySeparation) {
+$qVal = [int]$ProfileData.Win32PrioritySeparation
+$qHex = ("0x{0:X2}" -f $qVal)
+$categories.Add([PSCustomObject]@{
+Key     = "QuantumScheduler"
+Title   = "Quantum Scheduler (Win32PrioritySeparation)"
+Count   = $qHex
+Details = "Target value: Win32PrioritySeparation = $qHex ($qVal dec)`r`nRegistry path: HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
+})
+}
+$pwrList = if ($ProfileData.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0) { @($ProfileData.PowerDisplayTweaks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() }
+if ($pwrList.Count -gt 0) {
+$categories.Add([PSCustomObject]@{
+Key     = "PowerDisplay"
+Title   = "Power & Display Optimizations"
+Count   = "$($pwrList.Count) rules"
+Details = ($pwrList | ForEach-Object { " - $_" }) -join "`r`n"
+})
+}
+$usbList = if ($ProfileData.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0) { @($ProfileData.UsbSecurityLocks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() }
+if ($usbList.Count -gt 0) {
+$categories.Add([PSCustomObject]@{
+Key     = "UsbSecurity"
+Title   = "USB & BadUSB Perimeter Locks"
+Count   = "$($usbList.Count) layers"
+Details = ($usbList | ForEach-Object { " - Layer: $_" }) -join "`r`n"
+})
+}
+$srpList = @($ProfileData.ActiveSrpLocks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+$customSrpLines = [System.Collections.Generic.List[string]]::new()
+if ($null -ne $ProfileData.CustomSrpRoster) {
+foreach ($prop in $ProfileData.CustomSrpRoster.PSObject.Properties) {
+$customSrpLines.Add(" - [Custom] $($prop.Name) => $($prop.Value)")
+}
+}
+if ($srpList.Count -gt 0 -or $customSrpLines.Count -gt 0) {
+$srpDetail = [System.Collections.Generic.List[string]]::new()
+foreach ($s in $srpList) { $srpDetail.Add(" - $s") }
+foreach ($c in $customSrpLines) { $srpDetail.Add($c) }
+$categories.Add([PSCustomObject]@{
+Key     = "SrpLocks"
+Title   = "SRP + IFEO Execution Locks"
+Count   = "$($srpList.Count) active"
+Details = $srpDetail -join "`r`n"
+})
+}
+$svcList = @($ProfileData.DisabledServices | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($svcList.Count -gt 0) {
+$categories.Add([PSCustomObject]@{
+Key     = "Services"
+Title   = "Disabled System Services"
+Count   = "$($svcList.Count) svcs"
+Details = ($svcList | Sort-Object | ForEach-Object { " - $_" }) -join "`r`n"
+})
+}
+$tskList = if ($ProfileData.PSObject.Properties.Match("DisabledTasks").Count -gt 0) { @($ProfileData.DisabledTasks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() }
+if ($tskList.Count -gt 0) {
+$categories.Add([PSCustomObject]@{
+Key     = "Tasks"
+Title   = "Disabled Telemetry Scheduled Tasks"
+Count   = "$($tskList.Count) groups"
+Details = ($tskList | ForEach-Object { " - $_" }) -join "`r`n"
+})
+}
+if ($ProfileData.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $ProfileData.StartMenuClean -eq $true) {
+$categories.Add([PSCustomObject]@{
+Key     = "StartMenu"
+Title   = "Start Menu 3-Icon Clean Layout"
+Count   = "Enabled"
+Details = "Compiles native 3-icon start2.bin layout (Edge, Settings, Explorer), sets AllAppsViewMode=2, and archives start2_backup.bin."
+})
+}
+if ($ProfileData.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $ProfileData.DnsProfile -and -not [string]::IsNullOrWhiteSpace($ProfileData.DnsProfile.Provider)) {
+$dp = $ProfileData.DnsProfile
+$dnsInfo = "Provider    : $($dp.Provider)`r`nNative DoH  : $(if($dp.EnableDoH){'Enabled'}else{'Disabled'})`r`nIPv6 DNS    : $(if($dp.EnableIPv6){'Enabled'}else{'Disabled'})"
+$categories.Add([PSCustomObject]@{
+Key     = "DnsProfile"
+Title   = "DNS & Native DoH Profile"
+Count   = ($dp.Provider -replace '\s*\([^)]*\)$', '')
+Details = $dnsInfo
+})
+}
+$affList = @($ProfileData.AffinityLasso | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($affList.Count -gt 0) {
+$categories.Add([PSCustomObject]@{
+Key     = "AffinityLasso"
+Title   = "CPU Affinity Lasso Roster"
+Count   = "$($affList.Count) apps"
+Details = ($affList | Sort-Object | ForEach-Object { " - $_" }) -join "`r`n"
+})
+}
+$hwDetail = [System.Collections.Generic.List[string]]::new()
+if ($ProfileData.PSObject.Properties.Match("HardwareLocks").Count -gt 0 -and $null -ne $ProfileData.HardwareLocks) {
+$hl = $ProfileData.HardwareLocks
+foreach ($x in @($hl.CPPCUnhidden))  { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [CPPC] Unhide: $x") } }
+foreach ($x in @($hl.TimerTweaks))   { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [Timer] $x") } }
+foreach ($x in @($hl.NVMeTweaks))    { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [NVMe/IO] $x") } }
+foreach ($x in @($hl.GlobalNetwork)) { if (-not [string]::IsNullOrWhiteSpace($x)) { $hwDetail.Add(" - [TCP] $x") } }
+}
+if ($hwDetail.Count -gt 0) {
+$categories.Add([PSCustomObject]@{
+Key     = "HardwareLocks"
+Title   = "Hardware Locks (CPPC / Timer / NVMe / TCP)"
+Count   = "$($hwDetail.Count) locks"
+Details = $hwDetail -join "`r`n"
+})
+}
+$modal = New-Object System.Windows.Forms.Form
+$modal.Text = "WinUltix - Inspect & Select Profile Categories to Import"
+$modal.Size = New-Object System.Drawing.Size(860, 620)
+$modal.MinimumSize = New-Object System.Drawing.Size(820, 520)
+$modal.StartPosition = "CenterParent"
+$modal.FormBorderStyle = "Sizable"
+$modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
+$modal.ForeColor = [System.Drawing.Color]::White
+$modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
+$srcMachine = if ($ProfileData.SourceMachine) { [string]$ProfileData.SourceMachine } else { "Unknown" }
+$srcVer     = if ($ProfileData.AppVersion) { [string]$ProfileData.AppVersion } else { "Unknown" }
+$srcTs      = if ($ProfileData.ExportTimestamp) { [string]$ProfileData.ExportTimestamp } else { "Unknown" }
+$lblMeta = New-Object System.Windows.Forms.Label
+$lblMeta.Text = "Snapshot: $srcMachine  |  App: $srcVer  |  Exported: $srcTs`r`nZero Black Boxes: Click any category on the left to inspect its exact items, and uncheck anything you want to skip."
+$lblMeta.UseMnemonic = $false
+$lblMeta.Location = New-Object System.Drawing.Point(15, 10)
+$lblMeta.Size = New-Object System.Drawing.Size(815, 38)
+$lblMeta.Font = Get-UltixFont -Role "ModalDesc"
+$lblMeta.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 225, 232)
+$lblMeta.Anchor = 'Top, Left, Right'
+$btnSelAll = New-Object System.Windows.Forms.Button
+$btnSelAll.Text = "Select All"
+$btnSelAll.UseMnemonic = $false
+$btnSelAll.Location = New-Object System.Drawing.Point(15, 54)
+$btnSelAll.Size = New-Object System.Drawing.Size(110, 28)
+$btnSelAll.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+$btnSelAll.ForeColor = [System.Drawing.Color]::White
+$btnSelAll.FlatStyle = "Flat"
+$btnSelAll.Font = Get-UltixFittedFont -Control $btnSelAll -Role "ToolbarButton"
+$btnSelAll.Enabled = ($categories.Count -gt 0)
+$btnSelNone = New-Object System.Windows.Forms.Button
+$btnSelNone.Text = "Deselect All"
+$btnSelNone.UseMnemonic = $false
+$btnSelNone.Location = New-Object System.Drawing.Point(132, 54)
+$btnSelNone.Size = New-Object System.Drawing.Size(115, 28)
+$btnSelNone.BackColor = [System.Drawing.Color]::FromArgb(255, 50, 53, 58)
+$btnSelNone.ForeColor = [System.Drawing.Color]::White
+$btnSelNone.FlatStyle = "Flat"
+$btnSelNone.Font = Get-UltixFittedFont -Control $btnSelNone -Role "ToolbarButton"
+$btnSelNone.Enabled = ($categories.Count -gt 0)
+$lblPreviewHdr = New-Object System.Windows.Forms.Label
+$lblPreviewHdr.Text = "Category Contents Preview:"
+$lblPreviewHdr.UseMnemonic = $false
+$lblPreviewHdr.Location = New-Object System.Drawing.Point(415, 59)
+$lblPreviewHdr.Size = New-Object System.Drawing.Size(415, 20)
+$lblPreviewHdr.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblPreviewHdr.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$lblPreviewHdr.Anchor = 'Top, Left, Right'
+$lvCats = New-Object System.Windows.Forms.ListView
+$lvCats.Location = New-Object System.Drawing.Point(15, 88)
+$lvCats.Size = New-Object System.Drawing.Size(390, 428)
+$lvCats.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+$lvCats.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
+$lvCats.BorderStyle = "FixedSingle"
+$lvCats.Font = Get-UltixFont -Role "GridText"
+$lvCats.View = [System.Windows.Forms.View]::Details
+$lvCats.CheckBoxes = $true
+$lvCats.FullRowSelect = $true
+$lvCats.GridLines = $false
+$lvCats.Anchor = 'Top, Bottom, Left'
+Enable-UltixDoubleBuffer -Control $lvCats
+[void]$lvCats.Columns.Add("Category", 275)
+[void]$lvCats.Columns.Add("Scope", 92)
+$txtPreview = New-Object System.Windows.Forms.TextBox
+$txtPreview.Location = New-Object System.Drawing.Point(415, 88)
+$txtPreview.Size = New-Object System.Drawing.Size(415, 428)
+$txtPreview.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$txtPreview.ForeColor = [System.Drawing.Color]::FromArgb(255, 210, 222, 235)
+$txtPreview.BorderStyle = "FixedSingle"
+$txtPreview.Multiline = $true
+$txtPreview.ReadOnly = $true
+$txtPreview.WordWrap = $false
+$txtPreview.ScrollBars = "Both"
+$txtPreview.Font = New-Object System.Drawing.Font("Consolas", 9.0)
+$txtPreview.Anchor = 'Top, Bottom, Left, Right'
+$bgEven = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+$bgOdd  = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
+for ($i = 0; $i -lt $categories.Count; $i++) {
+$cat = $categories[$i]
+$it = New-Object System.Windows.Forms.ListViewItem($cat.Title)
+[void]$it.SubItems.Add($cat.Count)
+$it.Tag = $cat
+$it.Checked = $true
+$it.BackColor = if (($i % 2) -eq 0) { $bgEven } else { $bgOdd }
+[void]$lvCats.Items.Add($it)
+}
+if ($lvCats.Items.Count -gt 0) {
+$lvCats.Items[0].Selected = $true
+$lblPreviewHdr.Text = "Contents: $($categories[0].Title) ($($categories[0].Count))"
+$txtPreview.Text = $categories[0].Details
+} else {
+$txtPreview.Text = "This JSON snapshot contains zero active settings to import."
+}
+$lvCats.Add_SelectedIndexChanged({
+if ($lvCats.SelectedItems.Count -gt 0 -and $null -ne $lvCats.SelectedItems[0].Tag) {
+$cObj = $lvCats.SelectedItems[0].Tag
+$lblPreviewHdr.Text = "Contents: $($cObj.Title) ($($cObj.Count))"
+$txtPreview.Text = $cObj.Details
+}
+}.GetNewClosure())
+$btnSelAll.Add_Click({
+$lvCats.BeginUpdate()
+foreach ($it in $lvCats.Items) { $it.Checked = $true }
+$lvCats.EndUpdate()
+}.GetNewClosure())
+$btnSelNone.Add_Click({
+$lvCats.BeginUpdate()
+foreach ($it in $lvCats.Items) { $it.Checked = $false }
+$lvCats.EndUpdate()
+}.GetNewClosure())
+$btnImport = New-Object System.Windows.Forms.Button
+$btnImport.Text = "Import Selected Categories"
+$btnImport.UseMnemonic = $false
+$btnImport.Location = New-Object System.Drawing.Point(15, 530)
+$btnImport.Size = New-Object System.Drawing.Size(390, 38)
+$btnImport.BackColor = [System.Drawing.Color]::FromArgb(255, 150, 60, 60)
+$btnImport.ForeColor = [System.Drawing.Color]::White
+$btnImport.FlatStyle = "Flat"
+$btnImport.Font = Get-UltixFittedFont -Control $btnImport -Role "ModalAction"
+$btnImport.DialogResult = [System.Windows.Forms.DialogResult]::OK
+$btnImport.Enabled = ($categories.Count -gt 0)
+$btnImport.Anchor = 'Bottom, Left'
+$btnCancel = New-Object System.Windows.Forms.Button
+$btnCancel.Text = "Cancel"
+$btnCancel.UseMnemonic = $false
+$btnCancel.Location = New-Object System.Drawing.Point(415, 530)
+$btnCancel.Size = New-Object System.Drawing.Size(415, 38)
+$btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
+$btnCancel.ForeColor = [System.Drawing.Color]::White
+$btnCancel.FlatStyle = "Flat"
+$btnCancel.Font = Get-UltixFittedFont -Control $btnCancel -Role "ModalAction"
+$btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$btnCancel.Anchor = 'Bottom, Left, Right'
+$modal.Controls.AddRange(@($lblMeta, $btnSelAll, $btnSelNone, $lblPreviewHdr, $lvCats, $txtPreview, $btnImport, $btnCancel))
+$modal.CancelButton = $btnCancel
+try {
+$useOwner = ($null -ne $global:form -and -not $global:form.IsDisposed -and -not $global:form.InvokeRequired)
+$dlgRes   = if ($useOwner) { $modal.ShowDialog($global:form) } else { $modal.ShowDialog() }
+if ($dlgRes -eq [System.Windows.Forms.DialogResult]::OK) {
+$chosen = [System.Collections.Generic.List[string]]::new()
+foreach ($it in $lvCats.Items) {
+if ($it.Checked -and $null -ne $it.Tag) {
+$chosen.Add([string]$it.Tag.Key)
+}
+}
+return @($chosen)
+}
+return $null
+} finally {
+$modal.Dispose()
+}
+}
 function Import-WinUltixProfile {
 param([System.Windows.Forms.Control[]]$ControlsToDisable = @())
 $ofd = New-Object System.Windows.Forms.OpenFileDialog
@@ -4188,57 +5086,38 @@ throw "Unsupported or corrupted WinUltix profile schema."
 Write-GUI " -> [!] Profile import failed: $($_.Exception.Message)`n"
 return
 }
-$regCount = @($profileData.RegistryTweaks).Count
-$pwrCount = if ($profileData.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0) { @($profileData.PowerDisplayTweaks).Count } else { 0 }
-$usbCount = if ($profileData.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0)   { @($profileData.UsbSecurityLocks).Count }   else { 0 }
-$svcCount = @($profileData.DisabledServices).Count
-$tskCount = if ($profileData.PSObject.Properties.Match("DisabledTasks").Count -gt 0)      { @($profileData.DisabledTasks).Count }      else { 0 }
-$srpCount = @($profileData.ActiveSrpLocks).Count
-$affCount = @($profileData.AffinityLasso).Count
-$hwCount = 0
-if ($profileData.PSObject.Properties.Match("HardwareLocks").Count -gt 0 -and $null -ne $profileData.HardwareLocks) {
-$hl = $profileData.HardwareLocks
-$hwCount = @($hl.CPPCUnhidden).Count + @($hl.TimerTweaks).Count + @($hl.NVMeTweaks).Count + @($hl.GlobalNetwork).Count
-}
-$smLabel = if ($profileData.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $profileData.StartMenuClean -eq $true) {
-"3-Icon Clean Layout"
-} else {
-"Unchanged"
-}
-$dnsLabel = if ($profileData.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $profileData.DnsProfile -and -not [string]::IsNullOrWhiteSpace($profileData.DnsProfile.Provider)) {
-$dohTag = if ($profileData.DnsProfile.EnableDoH) { " [DoH]" } else { "" }
-"$($profileData.DnsProfile.Provider)$dohTag"
-} else {
-"Unchanged"
-}
-$confirmMsg = "Loaded snapshot from '$($profileData.SourceMachine)' ($($profileData.ExportTimestamp)):`n`n" +
-" - Registry Tweaks: $regCount`n" +
-" - Power & Display Optimizations: $pwrCount`n" +
-" - USB Perimeter Locks: $usbCount`n" +
-" - Disabled Services / Tasks: $svcCount / $tskCount`n" +
-" - SRP+IFEO Locks: $srpCount`n" +
-" - Affinity Lasso / Hardware Locks: $affCount / $hwCount`n" +
-" - Start Menu Layout: $smLabel`n" +
-" - DNS Profile: $dnsLabel`n`n" +
-"Do you want to enforce this profile on the current machine?"
-$ans = [System.Windows.Forms.MessageBox]::Show($confirmMsg, "WinUltix - Import Profile", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+$selectedCats = Show-WinUltixProfileImportModal -ProfileData $profileData
+if ($null -eq $selectedCats -or $selectedCats.Count -eq 0) {
 Write-GUI " -> Profile import cancelled.`n"
 return
 }
-Write-GUI "=== IMPORTING PROFILE FROM $($profileData.SourceMachine) (Background Thread) ==="
+Write-GUI "=== IMPORTING $($selectedCats.Count) CATEGORY(IES) FROM $($profileData.SourceMachine) (Background Thread) ==="
 Update-Progress 5
-Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($profileData) -ScriptBlock {
-param($Snapshot)
-$modifiedRegItems = @()
+Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($profileData, @($selectedCats)) -ScriptBlock {
+param($Snapshot, [string[]]$SelectedCategories)
+$catSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($ck in $SelectedCategories) { [void]$catSet.Add($ck) }
+$modifiedRegItems   = @()
+$didClearStartMenu  = $false
 $UltixSync.Progress = 10
-if ($null -ne $Snapshot.CustomSrpRoster) {
+$invokeLocked = {
+param([scriptblock]$Action)
+$savedProg = $UltixSync.Progress
+$UltixSync.LockProgress = $true
+try {
+& $Action
+} finally {
+$UltixSync.Progress     = $savedProg
+$UltixSync.LockProgress = $false
+}
+}
+if ($catSet.Contains("SrpLocks") -and $null -ne $Snapshot.CustomSrpRoster) {
 $customSrpKey = "HKLM:\SOFTWARE\WinUltix\SRP"
 foreach ($prop in $Snapshot.CustomSrpRoster.PSObject.Properties) {
 Set-UltixRegValue -Path $customSrpKey -Name $prop.Name -Value $prop.Value -Type String -Module "PROFILE"
 }
 }
-if (@($Snapshot.RegistryTweaks).Count -gt 0) {
+if ($catSet.Contains("RegistryTweaks") -and @($Snapshot.RegistryTweaks).Count -gt 0) {
 $targetSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($t in $Snapshot.RegistryTweaks) { [void]$targetSet.Add([string]$t) }
 $allRegStates = [System.Collections.Generic.List[object]]::new()
@@ -4251,18 +5130,18 @@ $toApplyReg = @($allRegStates | Where-Object {
 $targetSet.Contains($_.UIDisplayName) -and $_.IsDetected -and $_.ActionData.Name -ne "Win32PrioritySeparation"
 })
 if ($toApplyReg.Count -gt 0) {
-Invoke-ApplyRegistry -SelectedItems $toApplyReg -CategoryName "Imported Profile" -Operation "Apply"
+& $invokeLocked { Invoke-ApplyRegistry -SelectedItems $toApplyReg -CategoryName "Imported Profile" -Operation "Apply" }
 $modifiedRegItems = $toApplyReg
 }
 }
-if ($Snapshot.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $Snapshot.Win32PrioritySeparation) {
+if ($catSet.Contains("QuantumScheduler") -and $Snapshot.PSObject.Properties.Match("Win32PrioritySeparation").Count -gt 0 -and $null -ne $Snapshot.Win32PrioritySeparation) {
 $savedQuantum = [int]$Snapshot.Win32PrioritySeparation
 $prioKey = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
 Set-UltixRegValue -Path $prioKey -Name "Win32PrioritySeparation" -Value $savedQuantum -Type DWord -Module "PROFILE"
 $UltixSync.Logs.Enqueue((" -> Restored Quantum Scheduler (Win32PrioritySeparation = 0x{0:X2} / {0} dec)." -f $savedQuantum))
 }
 $UltixSync.Progress = 35
-if ($Snapshot.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0 -and @($Snapshot.PowerDisplayTweaks).Count -gt 0 -and (Get-Command Get-PowerDisplayState -ErrorAction SilentlyContinue)) {
+if ($catSet.Contains("PowerDisplay") -and $Snapshot.PSObject.Properties.Match("PowerDisplayTweaks").Count -gt 0 -and @($Snapshot.PowerDisplayTweaks).Count -gt 0 -and (Get-Command Get-PowerDisplayState -ErrorAction SilentlyContinue)) {
 $pwrSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($p in $Snapshot.PowerDisplayTweaks) {
 [void]$pwrSet.Add((([string]$p) -replace '\s*\(Current[^)]*\)\s*$', '').Trim())
@@ -4272,31 +5151,31 @@ $cleanName = ($_.UIDisplayName -replace '\s*\(Current[^)]*\)\s*$', '').Trim()
 $pwrSet.Contains($cleanName) -and $_.IsDetected
 })
 if ($toApplyPwr.Count -gt 0) {
-Invoke-ApplyPowerDisplay -SelectedItems $toApplyPwr -Operation "Apply"
+& $invokeLocked { Invoke-ApplyPowerDisplay -SelectedItems $toApplyPwr -Operation "Apply" }
 }
 }
 $UltixSync.Progress = 50
-if ($Snapshot.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0 -and @($Snapshot.UsbSecurityLocks).Count -gt 0 -and (Get-Command Get-UsbSecurityState -ErrorAction SilentlyContinue)) {
+if ($catSet.Contains("UsbSecurity") -and $Snapshot.PSObject.Properties.Match("UsbSecurityLocks").Count -gt 0 -and @($Snapshot.UsbSecurityLocks).Count -gt 0 -and (Get-Command Get-UsbSecurityState -ErrorAction SilentlyContinue)) {
 $usbSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($u in $Snapshot.UsbSecurityLocks) { [void]$usbSet.Add([string]$u) }
 $toApplyUsb = @(Get-UsbSecurityState | Where-Object {
 ($usbSet.Contains($_.ActionData.Layer) -or $usbSet.Contains($_.UIDisplayName)) -and $_.IsDetected
 })
 if ($toApplyUsb.Count -gt 0) {
-Invoke-ApplyUsbSecurity -SelectedItems $toApplyUsb -Operation "Apply"
+& $invokeLocked { Invoke-ApplyUsbSecurity -SelectedItems $toApplyUsb -Operation "Apply" }
 }
 }
 $UltixSync.Progress = 65
-if (@($Snapshot.ActiveSrpLocks).Count -gt 0 -and (Get-Command Get-RegState_SRP -ErrorAction SilentlyContinue)) {
+if ($catSet.Contains("SrpLocks") -and @($Snapshot.ActiveSrpLocks).Count -gt 0 -and (Get-Command Get-RegState_SRP -ErrorAction SilentlyContinue)) {
 $srpSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($s in $Snapshot.ActiveSrpLocks) { [void]$srpSet.Add([string]$s) }
 $toApplySrp = @(Get-RegState_SRP | Where-Object { $srpSet.Contains($_.UIDisplayName) -and $_.IsDetected })
 if ($toApplySrp.Count -gt 0) {
-Invoke-ApplySRP -SelectedItems $toApplySrp -Operation "Apply"
+& $invokeLocked { Invoke-ApplySRP -SelectedItems $toApplySrp -Operation "Apply" }
 }
 }
 $UltixSync.Progress = 80
-if (@($Snapshot.DisabledServices).Count -gt 0) {
+if ($catSet.Contains("Services") -and @($Snapshot.DisabledServices).Count -gt 0) {
 $svcTargetSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($sv in $Snapshot.DisabledServices) { [void]$svcTargetSet.Add([string]$sv) }
 $mergedSvcCatalog = [System.Collections.Generic.List[object]]::new()
@@ -4312,41 +5191,64 @@ $mergedSvcCatalog.Add($sObj)
 }
 $toApplySvc = @($mergedSvcCatalog | Where-Object { $svcTargetSet.Contains($_.ActionData.Name) -and $_.IsDetected })
 if ($toApplySvc.Count -gt 0) {
-Invoke-ApplyServices -SelectedItems $toApplySvc -ProfileName "Imported Profile" -Operation "Apply"
+& $invokeLocked { Invoke-ApplyServices -SelectedItems $toApplySvc -ProfileName "Imported Profile" -Operation "Apply" }
 }
 }
-if (@($Snapshot.DisabledTasks).Count -gt 0 -and (Get-Command Get-TelemetryTasksState -ErrorAction SilentlyContinue)) {
+if ($catSet.Contains("Tasks") -and @($Snapshot.DisabledTasks).Count -gt 0 -and (Get-Command Get-TelemetryTasksState -ErrorAction SilentlyContinue)) {
 $taskSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($tk in $Snapshot.DisabledTasks) { [void]$taskSet.Add([string]$tk) }
 $toApplyTasks = @(Get-TelemetryTasksState | Where-Object { $taskSet.Contains($_.UIDisplayName) -and $_.IsDetected })
 if ($toApplyTasks.Count -gt 0) {
-Invoke-ApplyTasks -SelectedItems $toApplyTasks -Operation "Apply"
+& $invokeLocked { Invoke-ApplyTasks -SelectedItems $toApplyTasks -Operation "Apply" }
 }
 }
 $UltixSync.Progress = 90
-if ($Snapshot.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $Snapshot.StartMenuClean -eq $true -and (Get-Command Clear-StartMenu -ErrorAction SilentlyContinue)) {
+if ($catSet.Contains("StartMenu") -and $Snapshot.PSObject.Properties.Match("StartMenuClean").Count -gt 0 -and $Snapshot.StartMenuClean -eq $true -and (Get-Command Clear-StartMenu -ErrorAction SilentlyContinue)) {
 $smCur = @(Get-StartMenuState) | Select-Object -First 1
 if ($null -ne $smCur -and $smCur.IsDetected) {
-Clear-StartMenu -Operation "Apply"
+& $invokeLocked { [void](Clear-StartMenu -Operation "Apply") }
+$didClearStartMenu = $true
 }
 }
-if ($Snapshot.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $Snapshot.DnsProfile -and -not [string]::IsNullOrWhiteSpace($Snapshot.DnsProfile.Provider) -and (Get-Command Set-CustomDNS -ErrorAction SilentlyContinue)) {
-Set-CustomDNS -Provider ([string]$Snapshot.DnsProfile.Provider) -EnableDoH ([bool]$Snapshot.DnsProfile.EnableDoH) -EnableIPv6 ([bool]$Snapshot.DnsProfile.EnableIPv6)
+if ($catSet.Contains("DnsProfile") -and $Snapshot.PSObject.Properties.Match("DnsProfile").Count -gt 0 -and $null -ne $Snapshot.DnsProfile -and -not [string]::IsNullOrWhiteSpace($Snapshot.DnsProfile.Provider) -and (Get-Command Set-CustomDNS -ErrorAction SilentlyContinue)) {
+& $invokeLocked { Set-CustomDNS -Provider ([string]$Snapshot.DnsProfile.Provider) -EnableDoH ([bool]$Snapshot.DnsProfile.EnableDoH) -EnableIPv6 ([bool]$Snapshot.DnsProfile.EnableIPv6) }
+}
+$wantAff = $catSet.Contains("AffinityLasso")
+$wantHw  = $catSet.Contains("HardwareLocks")
+if ($wantAff -or $wantHw) {
+$filteredHwSnapshot = [PSCustomObject]@{
+AffinityLasso = if ($wantAff) { @($Snapshot.AffinityLasso) } else { @() }
+HardwareLocks = if ($wantHw)  { $Snapshot.HardwareLocks }      else { $null }
 }
 if (Get-Command Import-UltixHardwareSnapshot -ErrorAction SilentlyContinue) {
-Import-UltixHardwareSnapshot -ProfileData $Snapshot
-} elseif (@($Snapshot.AffinityLasso).Count -gt 0) {
+Import-UltixHardwareSnapshot -ProfileData $filteredHwSnapshot
+} elseif ($wantAff -and @($Snapshot.AffinityLasso).Count -gt 0) {
 $affPath = "HKCU:\Software\WinUltix\AffinityLasso"
 foreach ($exe in $Snapshot.AffinityLasso) {
 Set-UltixRegValue -Path $affPath -Name $exe -Value 1 -Type DWord -Module "PROFILE"
 }
 $UltixSync.Logs.Enqueue(" -> Restored $(@($Snapshot.AffinityLasso).Count) process(es) to Affinity Lasso roster.")
 }
+}
 $UltixSync.Progress = 100
-return ,$modifiedRegItems
+return [PSCustomObject]@{
+UltixImportResult  = $true
+ModifiedRegItems   = @($modifiedRegItems)
+DidClearStartMenu  = $didClearStartMenu
+}
 } -OnComplete ({
-param($modReg)
+param($taskOut)
 Update-Progress 0
+$resObj = @($taskOut | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties.Match("UltixImportResult").Count -gt 0 }) | Select-Object -Last 1
+if ($null -ne $resObj -and @($resObj.ModifiedRegItems).Count -gt 0) {
+if ($resObj.DidClearStartMenu) {
+try { [WinUltix.ShellInterop]::BroadcastShellRefresh() } catch { }
+$needsSearch = @($resObj.ModifiedRegItems | Where-Object { $null -ne $_.ActionData -and $_.ActionData.RestartSearch -eq $true }).Count -gt 0
+if ($needsSearch) { [void](Stop-UltixProcess -Name "SearchHost" -Module "PROFILE") }
+} else {
+Update-ShellEnvironment -ModifiedItems $resObj.ModifiedRegItems -Module "PROFILE"
+}
+}
 Update-DNSLabel
 Write-GUI "=== PROFILE IMPORT COMPLETED ===`n"
 }.GetNewClosure())
@@ -5565,7 +6467,7 @@ $exePath = $exePath.Trim('"')
 if (Test-IsOrphanedDiskPath -RawPath $exePath) {
 $extraProps = @{}
 foreach ($pName in $sub.Property) {
-if (-not [string]::IsNullOrEmpty($pName)) {
+if (-not [string]::IsNullOrEmpty($pName) -and $pName -ne "(Default)") {
 $extraProps[$pName] = [string]$sub.GetValue($pName)
 }
 }
@@ -5660,6 +6562,7 @@ if ($entry.EntryType -eq "SubKey") {
 Set-UltixRegValue -Path $entry.RegPath -Name "(Default)" -Value ([string]$entry.RawValueData) -Type String -Module "Z1_Cleanup"
 if ($entry.PSObject.Properties.Match("SubValues").Count -gt 0 -and $null -ne $entry.SubValues) {
 foreach ($sp in $entry.SubValues.PSObject.Properties) {
+if ([string]::IsNullOrEmpty($sp.Name) -or $sp.Name -eq "(Default)") { continue }
 Set-UltixRegValue -Path $entry.RegPath -Name $sp.Name -Value ([string]$sp.Value) -Type String -Module "Z1_Cleanup"
 }
 }
@@ -6865,14 +7768,16 @@ $UltixSync.Logs.Enqueue("    [*] Stripping Windows Recall Optional Feature paylo
 }
 try {
 Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -Remove -NoRestart" -Module "Z2_Bloatware"
-Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -Remove -NoRestart -ErrorAction Stop | Out-Null
+$recallRes = Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -Remove -NoRestart -ErrorAction Stop
 Write-UltixExpertResult -OutputText "Recall feature disabled and payload removed" -ExitCode 0 -Module "Z2_Bloatware"
+if ($null -ne $recallRes -and $recallRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Recall Feature" }
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled and payload removed.") }
 } catch {
 try {
 Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -NoRestart" -Module "Z2_Bloatware"
-Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -NoRestart -ErrorAction Stop | Out-Null
+$recallRes = Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -NoRestart -ErrorAction Stop
 Write-UltixExpertResult -OutputText "Recall feature disabled" -ExitCode 0 -Module "Z2_Bloatware"
+if ($null -ne $recallRes -and $recallRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Recall Feature" }
 if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled.") }
 } catch {
 Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
@@ -6934,8 +7839,9 @@ Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorActio
 [void]$provisionedSet.Remove($prov.PackageName)
 Write-UltixExpertResult -OutputText "Deprovisioned base image: $($prov.DisplayName)" -ExitCode 0 -Module "Z2_Bloatware"
 $pkgParts = $prov.PackageName -split '_'
-if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
-$provPfn = "$($pkgParts[0])_$($pkgParts[4])"
+if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[-1])) {
+$provName = ($pkgParts[0..($pkgParts.Count - 5)] -join '_')
+$provPfn  = "${provName}_$($pkgParts[-1])"
 $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
 if (-not (Test-Path -LiteralPath $deprovPath)) {
 Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
@@ -7107,8 +8013,9 @@ Write-UltixExpertCommand -CommandText "Remove-AppxProvisionedPackage -Online -Pa
 Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
 Write-UltixExpertResult -OutputText "$($app.DisplayName) deprovisioned from base image" -ExitCode 0 -Module "Z2_Bloatware"
 $pkgParts = $app.PackageName -split '_'
-if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
-$provPfn = "$($pkgParts[0])_$($pkgParts[4])"
+if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[-1])) {
+$provName = ($pkgParts[0..($pkgParts.Count - 5)] -join '_')
+$provPfn  = "${provName}_$($pkgParts[-1])"
 $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
 if (-not (Test-Path -LiteralPath $deprovPath)) {
 Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
@@ -7264,14 +8171,16 @@ try {
 if ($Action -eq "Primary") {
 $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
 Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -NoRestart" -Module "Z2_Bloatware"
-Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+$featRes = Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop
 Write-UltixExpertResult -OutputText "$($feat.FeatureName) disabled" -ExitCode 0 -Module "Z2_Bloatware"
+if ($null -ne $featRes -and $featRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Optional Features" }
 $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
 } else {
 $UltixSync.Logs.Enqueue(" -> Enabling feature: $($feat.FeatureName)")
 Write-UltixExpertCommand -CommandText "Enable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -All -NoRestart" -Module "Z2_Bloatware"
-Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop | Out-Null
+$featRes = Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop
 Write-UltixExpertResult -OutputText "$($feat.FeatureName) enabled" -ExitCode 0 -Module "Z2_Bloatware"
+if ($null -ne $featRes -and $featRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Optional Features" }
 $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) enabled (Reboot may be required).")
 }
 } catch {
@@ -7832,6 +8741,13 @@ throw
 }
 }
 }
+$markRebootIfNeeded = {
+param($RuleObj)
+if ($RuleObj.Name -in @("PlatformAoAcOverride", "DisableWpbtExecution", "SvcHostSplitThresholdInKB", "HwSchMode", "OverlayTestMode", "DisablePagingExecutive", "EnableVirtualizationBasedSecurity") -or
+$RuleObj.Path -match 'HypervisorEnforcedCodeIntegrity') {
+Set-UltixRebootRequired -Reason "Kernel/Boot Reg"
+}
+}
 foreach ($item in $Items) {
 $current++
 if ($null -ne $UltixSync) {
@@ -7877,6 +8793,7 @@ Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $cleanedDx -Type String
 & $invokeWithAclEscalation $reg.Path {
 Remove-UltixRegItem -Path $reg.Path -Name $reg.Name -IgnoreMissing -Module "Z3_Registry"
 }
+& $markRebootIfNeeded $reg
 }
 }
 continue
@@ -7899,12 +8816,14 @@ continue
 }
 $altSynced = $false
 if ($reg.ContainsKey("AltName")) {
-$ucpdSvc = Get-Service -Name "UCPD" -ErrorAction SilentlyContinue
-if ($null -ne $ucpdSvc -and $ucpdSvc.Status -eq 'Running') {
+$ucpdRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\UCPD"
+$ucpdStart   = (Get-ItemProperty -LiteralPath $ucpdRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+if ($null -ne $ucpdStart -and [int]$ucpdStart -ne 4) {
 Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4 -Module "Z3_Registry"
 Invoke-UltixStep -Command "Disable-ScheduledTask -TaskPath '\Microsoft\Windows\AppxDeploymentClient\' -TaskName 'UCPD velocity'" -Action {
 Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
 } -SuccessOutput "Disarmed UCPD velocity task" -Module "Z3_Registry"
+Set-UltixRebootRequired -Reason "UCPD Filter"
 }
 if ($Op -eq 'Apply') {
 try {
@@ -7933,6 +8852,7 @@ Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $newDx -Type String -Mo
 & $invokeWithAclEscalation $reg.Path {
 Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $targetValue -Type $reg.Type -Module "Z3_Registry"
 }
+& $markRebootIfNeeded $reg
 }
 } catch {
 if ($reg.ContainsKey("AltName")) {
@@ -7955,6 +8875,7 @@ Remove-UltixRegItem -Path $reg.Path -Name $reg.AltName -IgnoreMissing -Module "Z
 Remove-UltixRegItem -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -IgnoreMissing -Module "Z3_Registry"
 }
 & $logLine "    [+] Reverted $($reg.AltName) policy & disarmed UCPD filter (Reboot unlocks $($reg.Name))."
+Set-UltixRebootRequired -Reason "UCPD Filter"
 }
 } catch {
 & $logLine "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
@@ -8093,7 +9014,7 @@ $bakBin         = "$env:LOCALAPPDATA\WinUltix\start2_backup.bin"
 $UltixSync.Progress = 40
 Invoke-UltixStep -Command "Stop-UltixProcess -Name 'StartMenuExperienceHost','ShellExperienceHost','explorer'" -Action {
 if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
-Stop-UltixProcess -Name @("StartMenuExperienceHost", "ShellExperienceHost", "explorer")
+[void](Stop-UltixProcess -Name @("StartMenuExperienceHost", "ShellExperienceHost", "explorer"))
 } else {
 Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
 }
@@ -8242,7 +9163,7 @@ $UltixSync.Logs.Enqueue(" -> [4/7] Recycling Explorer & wiping locked start2.bin
 $stopShellHosts = {
 param([string[]]$Names)
 if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
-Stop-UltixProcess -Name $Names
+[void](Stop-UltixProcess -Name $Names)
 } else {
 Stop-Process -Name $Names -Force -ErrorAction SilentlyContinue
 }
@@ -8334,7 +9255,7 @@ if ($createdEnrollment -and (Test-Path -LiteralPath $enrollmentPath)) {
 Remove-Item -LiteralPath $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
 }
 if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
-Stop-UltixProcess -Name @("StartMenuExperienceHost")
+[void](Stop-UltixProcess -Name @("StartMenuExperienceHost"))
 } else {
 Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
 }
@@ -8414,7 +9335,7 @@ ActionData    = @{ Type = "PowerCfg"; Sub = "501a4d13-42af-4429-9fd1-a8218c268e2
 $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
 $cabcReg = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
 $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)
-$cabcStatus = "AC: $(if($null -ne $cabcVal){$cabcVal}else{'N/A'}), Reg: $(if($cabcReg -eq 1){'Disabled'}else{'Default'})"
+$cabcStatus = "Current AC: $(if($null -ne $cabcVal){$cabcVal}else{'N/A'}), Reg: $(if($cabcReg -eq 1){'Disabled'}else{'Default'})"
 $results.Add([PSCustomObject]@{
 UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming) ($cabcStatus)"
 IsDetected    = (-not $isCabcOpt)
@@ -8862,6 +9783,9 @@ continue
 try {
 $shouldAutoStart = ($Op -eq 'Revert' -and $targetValue -eq 2)
 Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue -StartService:$shouldAutoStart -Module "Z4_Services"
+if ($Op -eq 'Revert' -and $svc.Name -match '^(?i)(WaaSMedicSvc|DoSvc)$') {
+Set-UltixRebootRequired -Reason "Services (TI)"
+}
 $svcType = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
 $isPerUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
 if ($isPerUserTemplate) {
@@ -8871,8 +9795,13 @@ Set-UltixRegValue -Path $svcRegPath -Name "UserServiceFlags" -Value $flagVal -Ty
 } catch { }
 }
 if ($isPerUserTemplate) {
-Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue | ForEach-Object {
-Set-ProtectedServiceStart -ServiceName $_.Name -StartValue $targetValue -Module "Z4_Services"
+$subSvcs = @(Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue)
+try {
+foreach ($sub in $subSvcs) {
+Set-ProtectedServiceStart -ServiceName $sub.Name -StartValue $targetValue -Module "Z4_Services"
+}
+} finally {
+foreach ($sub in $subSvcs) { if ($null -ne $sub) { $sub.Dispose() } }
 }
 }
 if ($Op -eq 'Apply') {
@@ -8949,6 +9878,7 @@ IsLocked    = $isCrit
 })
 }
 } finally {
+foreach ($s in $rawServices) { if ($null -ne $s) { $s.Dispose() } }
 if ($null -ne $svcRoot) { $svcRoot.Dispose() }
 }
 return @($svcs | Sort-Object Status, Name)
@@ -8968,6 +9898,7 @@ $modal.Size = New-Object System.Drawing.Size(980, 700)
 $modal.MinimumSize = New-Object System.Drawing.Size(980, 580)
 $modal.StartPosition = "CenterParent"
 $modal.FormBorderStyle = "Sizable"
+$modal.KeyPreview = $true
 $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
 $modal.ForeColor = [System.Drawing.Color]::White
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
@@ -9249,6 +10180,9 @@ $curStart  = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Start" -ErrorActi
 $baseStart = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
 if ($curStart -eq 4 -or $baseStart -eq 4) {
 $UltixSync.Logs.Enqueue(" -> Auto-unlocking Disabled service '$sName' to Manual (Start=3) & Starting...")
+if ($baseSvcName -match '^(?i)(WaaSMedicSvc|DoSvc)$') {
+Set-UltixRebootRequired -Reason "Services (TI)"
+}
 $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
 $isUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
 if ($isUserTemplate) {
@@ -9290,12 +10224,14 @@ $flagVal   = if ($targetStart -eq 4) { 0 } else { 3 }
 $modeLabel = if ($targetStart -eq 2) { "Automatic (2)" } elseif ($targetStart -eq 3) { "Manual (3)" } else { "Disabled (4)" }
 $UltixSync.Logs.Enqueue(" -> Setting StartType [$modeLabel]: $sName ($($svc.DisplayName))")
 Set-ProtectedServiceStart -ServiceName $sName -StartValue $targetStart -Module "Z4_Services"
+$isPerUserTemplate = $false
 if (Test-Path -LiteralPath $baseRegPath) {
 if ($baseSvcName -ne $sName) {
 Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart -Module "Z4_Services"
 }
 $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
-if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
+$isPerUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
+if ($isPerUserTemplate) {
 try {
 Set-UltixRegValue -Path $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Module "Z4_Services"
 } catch { }
@@ -9307,9 +10243,12 @@ Remove-UltixRegItem -Path $baseRegPath -Name "DelayedAutostart" -IgnoreMissing -
 }
 }
 if ($targetStart -eq 4) {
-Stop-UltixService -ServiceName $baseSvcName -IncludePerUserInstances:($baseSvcName -ne $sName) -Module "Z4_Services"
+Stop-UltixService -ServiceName $baseSvcName -IncludePerUserInstances:($isPerUserTemplate -or $baseSvcName -ne $sName) -Module "Z4_Services"
 $UltixSync.Logs.Enqueue("    [OK] $sName locked to Disabled (Start=4) and stopped.")
 } else {
+if ($baseSvcName -match '^(?i)(WaaSMedicSvc|DoSvc)$') {
+Set-UltixRebootRequired -Reason "Services (TI)"
+}
 $UltixSync.Logs.Enqueue("    [OK] $sName StartType updated to $modeLabel in Registry & live SCM.")
 }
 }
@@ -9374,6 +10313,52 @@ $state.ListView.Sort()
 $state.ListView.EndUpdate()
 }.GetNewClosure())
 $txtSearch.Add_TextChanged({ & $state.PopulateList $state.TxtSearch.Text }.GetNewClosure())
+$txtSearch.Add_KeyDown({
+param($src, $e)
+if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+$e.SuppressKeyPress = $true
+[void]$state.ListView.Focus()
+}
+}.GetNewClosure())
+$copySelectedServices = ({
+if ($state.ListView.SelectedItems.Count -eq 0) { return }
+$buf = [System.Collections.Generic.List[string]]::new()
+foreach ($sel in $state.ListView.SelectedItems) {
+$buf.Add("$($sel.Text) | $($sel.SubItems[1].Text) | $($sel.SubItems[2].Text) | $($sel.SubItems[3].Text)")
+}
+if ($buf.Count -gt 0) {
+try { [System.Windows.Forms.Clipboard]::SetText($buf -join "`r`n") } catch { }
+}
+}.GetNewClosure())
+$svcCtxMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miCopySvcRow = $svcCtxMenu.Items.Add("Copy Selected Row   [Ctrl+C]")
+$miCopySvcRow.Add_Click({ & $copySelectedServices }.GetNewClosure())
+$miCopySvcName = $svcCtxMenu.Items.Add("Copy Service Name")
+$miCopySvcName.Add_Click({
+if ($state.ListView.SelectedItems.Count -gt 0) {
+try { [System.Windows.Forms.Clipboard]::SetText([string]$state.ListView.SelectedItems[0].Text) } catch { }
+}
+}.GetNewClosure())
+$svcCtxMenu.Add_Opening({
+param($src, $e)
+$hasSel = ($state.ListView.SelectedItems.Count -gt 0)
+$miCopySvcRow.Enabled  = $hasSel
+$miCopySvcName.Enabled = $hasSel
+}.GetNewClosure())
+$listView.ContextMenuStrip = $svcCtxMenu
+$modal.Add_KeyDown({
+param($src, $e)
+if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+[void]$state.TxtSearch.Focus()
+$state.TxtSearch.SelectAll()
+$e.SuppressKeyPress = $true
+} elseif ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C) {
+if ($state.ListView.Focused -and $state.ListView.SelectedItems.Count -gt 0) {
+& $copySelectedServices
+$e.SuppressKeyPress = $true
+}
+}
+}.GetNewClosure())
 $btnSelVis.Add_Click({
 $state.SuppressEvents = $true
 $state.ListView.BeginUpdate()
@@ -9415,6 +10400,7 @@ $modal.CancelButton = $btnClose
 try {
 [void]$modal.ShowDialog($global:form)
 } finally {
+$svcCtxMenu.Dispose()
 $modal.Dispose()
 }
 }.GetNewClosure())
@@ -10070,6 +11056,7 @@ Remove-UltixRegItem -Path $wpdKey -Name "Deny_Write" -IgnoreMissing -Module "Z5_
 }
 }
 }
+Set-UltixRebootRequired -Reason "USB Guard"
 }
 "LockScreenGuard" {
 if ($Op -eq 'Apply') {
@@ -10079,6 +11066,7 @@ Set-UltixRegValue -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -Value 1 -Ty
 Remove-UltixRegItem -Path $fveKey -Name "DisableExternalDMAUnderLock" -IgnoreMissing -Module "Z5_Utilities"
 Remove-UltixRegItem -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -IgnoreMissing -Module "Z5_Utilities"
 }
+Set-UltixRebootRequired -Reason "USB Guard"
 }
 }
 }
@@ -10100,35 +11088,9 @@ Write-GUI " -> Applying DNS profile '$Provider' (DoH: $EnableDoH, IPv6: $EnableI
 Update-Progress 20
 Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($Provider, $EnableDoH, $EnableIPv6) -ScriptBlock {
 param([string]$TargetProvider, [bool]$UseDoH, [bool]$UseIPv6)
-$dnsCatalog = @{
-"Quad9 (9.9.9.9)" = @{
-IPv4     = @("9.9.9.9", "149.112.112.112")
-IPv6     = @("2620:fe::fe", "2620:fe::9")
-Template = "https://dns.quad9.net/dns-query"
-}
-"Cloudflare (1.1.1.1)" = @{
-IPv4     = @("1.1.1.1", "1.0.0.1")
-IPv6     = @("2606:4700:4700::1111", "2606:4700:4700::1001")
-Template = "https://cloudflare-dns.com/dns-query"
-}
-"AdGuard (94.140.14.14)" = @{
-IPv4     = @("94.140.14.14", "94.140.15.15")
-IPv6     = @("2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff")
-Template = "https://dns.adguard-dns.com/dns-query"
-}
-"Google (8.8.8.8)" = @{
-IPv4     = @("8.8.8.8", "8.8.4.4")
-IPv6     = @("2001:4860:4860::8888", "2001:4860:4860::8844")
-Template = "https://dns.google/dns-query"
-}
-"OpenDNS (208.67.222.222)" = @{
-IPv4     = @("208.67.222.222", "208.67.220.220")
-IPv6     = @("2620:119:35::35", "2620:119:53::53")
-Template = "https://doh.opendns.com/dns-query"
-}
-}
-$isDhcp = ($TargetProvider -eq "Default (DHCP)")
-$cfg    = if (-not $isDhcp) { $dnsCatalog[$TargetProvider] } else { $null }
+$dnsCatalog = Get-UltixDnsCatalog
+$isDhcp     = ($TargetProvider -eq "Default (DHCP)")
+$cfg        = if (-not $isDhcp -and $dnsCatalog.Contains($TargetProvider)) { $dnsCatalog[$TargetProvider] } else { $null }
 if (-not $isDhcp -and $null -eq $cfg) {
 $UltixSync.Logs.Enqueue(" [!] Unknown DNS provider profile '$TargetProvider'. Aborting without changes.")
 return
@@ -10168,7 +11130,15 @@ continue
 }
 $allServers = [System.Collections.Generic.List[string]]::new()
 $v4List     = @($cfg.IPv4)
+$v6List     = @($cfg.IPv6)
 $v4Literal  = ($v4List | ForEach-Object { "'$_'" }) -join ","
+if ((-not $UseIPv6 -or $v6List.Count -eq 0) -and -not [string]::IsNullOrWhiteSpace($nicInfo.StaticNameServerV6)) {
+try {
+Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses" -Action {
+Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses -ErrorAction Stop
+} -SuccessOutput "Cleared live static IPv6 DNS in NSI on [$ifName]" -Module "Z5_Utilities"
+} catch { }
+}
 try {
 Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($v4Literal)" -Action {
 Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $v4List -ErrorAction Stop
@@ -10177,8 +11147,7 @@ foreach ($ip4 in $v4List) { $allServers.Add($ip4) }
 } catch {
 $UltixSync.Logs.Enqueue(" [!] [$ifName]: Error setting IPv4 DNS servers: $($_.Exception.Message)")
 }
-if ($UseIPv6) {
-$v6List    = @($cfg.IPv6)
+if ($UseIPv6 -and $v6List.Count -gt 0) {
 $v6Literal = ($v6List | ForEach-Object { "'$_'" }) -join ","
 try {
 Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($v6Literal)" -Action {
@@ -10189,6 +11158,9 @@ foreach ($ip6 in $v6List) { $allServers.Add($ip6) }
 $UltixSync.Logs.Enqueue(" [!] [$ifName]: IPv6 stack unbound or unavailable ($($_.Exception.Message)).")
 }
 } else {
+if ($UseIPv6 -and $v6List.Count -eq 0) {
+$UltixSync.Logs.Enqueue(" [!] [$ifName]: '$TargetProvider' is IPv4-only (no native IPv6 DNS). Cleared static IPv6 override to prevent filter bypass.")
+}
 $tcp6IfKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$ifGuid"
 if (Test-Path -LiteralPath $tcp6IfKey) {
 $curV6Ns = (Get-ItemProperty -LiteralPath $tcp6IfKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
@@ -10427,54 +11399,157 @@ Invoke-UltixAuditFlow `
 -AuditOnly `
 -AuditPrefix "To Block"
 }.GetNewClosure())
+$dnsCatalogRef = Get-UltixDnsCatalog
+$dnsUiState    = @{ LastPreview = "" }
 $lblDNS = New-Object System.Windows.Forms.Label
-$lblDNS.Text = "Hardened DNS & Native DoH Enforcer (IPv4 / IPv6)"
+$lblDNS.Text = "Hardened DNS, Parental Control & Native DoH"
 $lblDNS.AccessibleName = "SectionHeader"
 $lblDNS.UseMnemonic = $false
-$lblDNS.Location = New-Object System.Drawing.Point(15, 228)
+$lblDNS.Location = New-Object System.Drawing.Point(15, 224)
 $lblDNS.Size = New-Object System.Drawing.Size(370, 20)
 $lblDNS.ForeColor = [System.Drawing.Color]::DarkGray
 $lblDNS.Font = Get-UltixFont -Role "SectionHeader"
 $comboDNS = New-Object System.Windows.Forms.ComboBox
-$comboDNS.Location = New-Object System.Drawing.Point(15, 252)
-$comboDNS.Size = New-Object System.Drawing.Size(240, 25)
+$comboDNS.Location = New-Object System.Drawing.Point(15, 247)
+$comboDNS.Size = New-Object System.Drawing.Size(260, 28)
 $comboDNS.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
 $comboDNS.ForeColor = [System.Drawing.Color]::White
 $comboDNS.DropDownStyle = "DropDownList"
-$comboDNS.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$comboDNS.Items.AddRange(@("Quad9 (9.9.9.9)", "Cloudflare (1.1.1.1)", "AdGuard (94.140.14.14)", "Google (8.8.8.8)", "OpenDNS (208.67.222.222)", "Default (DHCP)"))
+$comboDNS.DrawMode = [System.Windows.Forms.DrawMode]::OwnerDrawFixed
+$comboDNS.ItemHeight = 22
+$comboDNS.IntegralHeight = $false
+$comboDNS.MaxDropDownItems = $dnsCatalogRef.Count
+$comboDNS.DropDownHeight = [math]::Min(410, ($dnsCatalogRef.Count * 22) + 8)
+$comboDNS.DropDownWidth = 480
+$comboDNS.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+$comboDNS.Items.AddRange([object[]]@($dnsCatalogRef.Keys))
 $comboDNS.SelectedIndex = 0
+$dnsBadgeFont = New-Object System.Drawing.Font("Consolas", 8.5, [System.Drawing.FontStyle]::Bold)
+$comboDNS.Add_DrawItem({
+param($src, $e)
+if ($e.Index -lt 0 -or $e.Index -ge $src.Items.Count) { return }
+$itemName   = [string]$src.Items[$e.Index]
+$isEditBox  = (($e.State -band [System.Windows.Forms.DrawItemState]::ComboBoxEdit) -ne 0)
+$isSelected = (($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0)
+if (-not $isEditBox -and $isSelected -and $dnsUiState.LastPreview -ne $itemName) {
+$dnsUiState.LastPreview = $itemName
+Show-Description (Format-UltixDnsDescription -Provider $itemName)
+}
+$bgColor = if ($isSelected -and -not $isEditBox) {
+[System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+} elseif ($isEditBox) {
+[System.Drawing.Color]::FromArgb(255, 55, 58, 64)
+} elseif (($e.Index % 2) -eq 1) {
+[System.Drawing.Color]::FromArgb(255, 36, 39, 45)
+} else {
+[System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+}
+$bgBrush = New-Object System.Drawing.SolidBrush($bgColor)
+try {
+$e.Graphics.FillRectangle($bgBrush, $e.Bounds)
+} finally {
+$bgBrush.Dispose()
+}
+$cfg = if ($dnsCatalogRef.Contains($itemName)) { $dnsCatalogRef[$itemName] } else { $null }
+$nameColor = if ($null -ne $cfg -and $cfg.Category -eq "Parental" -and -not $isEditBox) {
+[System.Drawing.Color]::FromArgb(255, 255, 232, 165)
+} else {
+[System.Drawing.Color]::White
+}
+if ($isEditBox) {
+$editRect = New-Object System.Drawing.Rectangle(($e.Bounds.X + 2), $e.Bounds.Y, [math]::Max(10, $e.Bounds.Width - 4), $e.Bounds.Height)
+[System.Windows.Forms.TextRenderer]::DrawText(
+$e.Graphics, $itemName, $src.Font, $editRect, $nameColor,
+([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix)
+)
+return
+}
+$badgeText  = if ($null -ne $cfg) { [string]$cfg.Badge } else { "" }
+$badgeColor = [System.Drawing.Color]::Silver
+if ($null -ne $cfg) {
+switch ($cfg.Category) {
+"Parental" { $badgeColor = [System.Drawing.Color]::Gold }
+"AdBlock"  { $badgeColor = [System.Drawing.Color]::LightGreen }
+"Security" { $badgeColor = [System.Drawing.Color]::LightSkyBlue }
+"Standard" { $badgeColor = [System.Drawing.Color]::FromArgb(255, 190, 200, 212) }
+}
+}
+$badgeWidth = 175
+$nameRect   = New-Object System.Drawing.Rectangle(($e.Bounds.X + 6), $e.Bounds.Y, [math]::Max(10, $e.Bounds.Width - $badgeWidth - 12), $e.Bounds.Height)
+$badgeRect  = New-Object System.Drawing.Rectangle(($e.Bounds.Right - $badgeWidth - 6), $e.Bounds.Y, $badgeWidth, $e.Bounds.Height)
+[System.Windows.Forms.TextRenderer]::DrawText(
+$e.Graphics, $itemName, $src.Font, $nameRect, $nameColor,
+([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix)
+)
+if (-not [string]::IsNullOrWhiteSpace($badgeText)) {
+[System.Windows.Forms.TextRenderer]::DrawText(
+$e.Graphics, $badgeText, $dnsBadgeFont, $badgeRect, $badgeColor,
+([System.Windows.Forms.TextFormatFlags]::Right -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::SingleLine -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix)
+)
+}
+}.GetNewClosure())
+$comboDNS.Add_Disposed({
+if ($null -ne $dnsBadgeFont) { $dnsBadgeFont.Dispose() }
+}.GetNewClosure())
 $chkDoH = New-Object System.Windows.Forms.CheckBox
 $chkDoH.Text = "Enforce Native DNS-over-HTTPS (DoH)"
-$chkDoH.Location = New-Object System.Drawing.Point(15, 284)
+$chkDoH.Location = New-Object System.Drawing.Point(15, 280)
 $chkDoH.Size = New-Object System.Drawing.Size(235, 22)
 $chkDoH.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
 $chkDoH.ForeColor = [System.Drawing.Color]::LightGray
 $chkDoH.Checked = $true
 $chkIPv6 = New-Object System.Windows.Forms.CheckBox
 $chkIPv6.Text = "Configure IPv6 DNS"
-$chkIPv6.Location = New-Object System.Drawing.Point(255, 284)
+$chkIPv6.Location = New-Object System.Drawing.Point(255, 280)
 $chkIPv6.Size = New-Object System.Drawing.Size(135, 22)
 $chkIPv6.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
 $chkIPv6.ForeColor = [System.Drawing.Color]::LightGray
 $chkIPv6.Checked = $false
-$comboDNS.Add_SelectedIndexChanged({
-$isStatic = ([string]$comboDNS.SelectedItem -ne "Default (DHCP)")
+$syncDnsControls = ({
+$selName    = [string]$comboDNS.SelectedItem
+$isStatic   = ($selName -ne "Default (DHCP)")
+$cfg        = if ($dnsCatalogRef.Contains($selName)) { $dnsCatalogRef[$selName] } else { $null }
+$supportsV6 = ($null -ne $cfg -and @($cfg.IPv6).Count -gt 0)
 $chkDoH.Enabled  = $isStatic
-$chkIPv6.Enabled = $isStatic
+$chkIPv6.Enabled = ($isStatic -and $supportsV6)
+if (-not $supportsV6) { $chkIPv6.Checked = $false }
 }.GetNewClosure())
-$btnApplyDNS = New-UltixButton -Parent $tabSec -X 265 -Y 251 -Width 120 -Height 27 -RGB @(45, 85, 125) `
+$comboDNS.Add_SelectedIndexChanged({
+& $syncDnsControls
+$dnsUiState.LastPreview = [string]$comboDNS.SelectedItem
+Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+}.GetNewClosure())
+$comboDNS.Add_DropDownClosed({
+$dnsUiState.LastPreview = [string]$comboDNS.SelectedItem
+Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+}.GetNewClosure())
+$comboDNS.Add_MouseEnter({
+Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+}.GetNewClosure())
+$comboDNS.Add_MouseLeave({
+if (-not $comboDNS.DroppedDown) { Restore-Log }
+}.GetNewClosure())
+$btnApplyDNS = New-UltixButton -Parent $tabSec -X 285 -Y 247 -Width 100 -Height 28 -RGB @(45, 85, 125) `
 -Text "Apply DNS" `
--Description "Enforces IPv4/IPv6 DNS servers, injects kernel Dnscache DoH encryption flags, and flushes resolver cache." `
 -OnClick ({
 Set-CustomDNS -Provider ([string]$comboDNS.SelectedItem) -EnableDoH $chkDoH.Checked -EnableIPv6 $chkIPv6.Checked -ControlsToDisable $allTabButtons.ToArray()
 }.GetNewClosure())
+$btnApplyDNS.Add_MouseEnter({
+Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+}.GetNewClosure())
 $global:lblCurrentDNS = New-Object System.Windows.Forms.Label
 $global:lblCurrentDNS.Text = "Current DNS: Reading from active route..."
-$global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 310)
-$global:lblCurrentDNS.Size = New-Object System.Drawing.Size(370, 22)
-$global:lblCurrentDNS.Font = New-Object System.Drawing.Font("Consolas", 9.2, [System.Drawing.FontStyle]::Bold)
+$global:lblCurrentDNS.UseMnemonic = $false
+$global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 305)
+$global:lblCurrentDNS.Size = New-Object System.Drawing.Size(370, 34)
+$global:lblCurrentDNS.Font = New-Object System.Drawing.Font("Consolas", 8.75, [System.Drawing.FontStyle]::Bold)
 $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$global:lblCurrentDNS.Add_MouseEnter({
+if (-not [string]::IsNullOrWhiteSpace($this.AccessibleDescription)) {
+Show-Description $this.AccessibleDescription
+}
+})
+$global:lblCurrentDNS.Add_MouseLeave({ Restore-Log })
 $lblClassic = New-Object System.Windows.Forms.Label
 $lblClassic.Text = "Classic Win32 Control & Admin Applets"
 $lblClassic.AccessibleName = "SectionHeader"
@@ -10576,6 +11651,7 @@ $code = [int]$res.ExitCode
 if ($code -eq 0) {
 Write-GUI " -> [$($res.Title)] completed successfully (Exit Code: 0).`n"
 } elseif ($code -eq 3010) {
+Set-UltixRebootRequired -Reason "Servicing/DISM"
 Write-GUI " -> [$($res.Title)] completed (Exit Code: 3010 - Reboot Required to finalize changes).`n"
 } else {
 $hexCode = "0x{0:X8}" -f ([uint32]$code)
@@ -10798,6 +11874,7 @@ $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winhttp", "reset", "
 $UltixSync.Progress = 75
 $UltixSync.Logs.Enqueue(" -> [3/4] Resetting Winsock Catalog (netsh winsock reset)...")
 $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winsock", "reset") -Module "Z6_Integrity"
+Set-UltixRebootRequired -Reason "Winsock"
 $UltixSync.Progress = 95
 $UltixSync.Logs.Enqueue(" -> [4/4] Resetting TCP/IPv4 & IPv6 Stack (netsh int ip/ipv6 reset)...")
 $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("int", "ip", "reset") -Module "Z6_Integrity"
@@ -11256,7 +12333,8 @@ $req = [System.Net.HttpWebRequest]::Create($sourceUrl)
 $req.Method           = "GET"
 $req.Timeout          = 10000
 $req.ReadWriteTimeout = 15000
-$req.UserAgent        = "WinUltix-Integrity/3.19"
+$rawVer = if (-not [string]::IsNullOrWhiteSpace($AppVersion)) { $AppVersion } elseif (-not [string]::IsNullOrWhiteSpace($Global:AppVersion)) { $Global:AppVersion } else { "3.19" }
+$req.UserAgent        = "WinUltix-Integrity/$($rawVer -replace '^v', '')"
 $resp = $null
 $inStream = $null
 $outStream = $null
@@ -11761,9 +12839,33 @@ $dispE  = if ($null -ne $e)  { "$e%" }  else { "Unknown" }
 $dispD  = if ($null -ne $d)  { "$d%" }  else { "Unknown" }
 $dispPr = if ($null -ne $pr) { "$pr%" } else { "Unknown" }
 $rules = @(
-@{ KeyId = "EPP";     UIDisplayName = "Unhide: EPP [Current AC: $dispE]";          Path = "$basePath\36687f9e-e3a5-4dbf-b1dc-15eb381c6863"; Name = "Attributes"; Expected = 2; Type = "Registry" }
-@{ KeyId = "Demote";  UIDisplayName = "Unhide: Idle Demote [Current AC: $dispD]";  Path = "$basePath\4b92d758-5a24-4851-a470-815d78aee119"; Name = "Attributes"; Expected = 2; Type = "Registry" }
-@{ KeyId = "Promote"; UIDisplayName = "Unhide: Idle Promote [Current AC: $dispPr]"; Path = "$basePath\7b224883-b3cc-4d79-819f-8374152cbe7c"; Name = "Attributes"; Expected = 2; Type = "Registry" }
+@{
+KeyId         = "EPP"
+UIDisplayName = "Unhide: EPP [Current AC: $dispE]"
+Path          = "$basePath\36687f9e-e3a5-4dbf-b1dc-15eb381c6863"
+Name          = "Attributes"
+Expected      = 2
+Type          = "Registry"
+Note          = "[LIVE / NO REBOOT] Energy Performance Preference (0% = Max Boost, 100% = Power Saving). Unhiding exposes it in Power Options; ENGAGE locks EPP to 0% with a SYSTEM failsafe."
+}
+@{
+KeyId         = "Demote"
+UIDisplayName = "Unhide: Idle Demote [Current AC: $dispD]"
+Path          = "$basePath\4b92d758-5a24-4851-a470-815d78aee119"
+Name          = "Attributes"
+Expected      = 2
+Type          = "Registry"
+Note          = "[LIVE / NO REBOOT] Processor Idle Demote Threshold. Locking to 100% prevents CPU cores from dropping into deep C-States during gaming (eliminates wake-up stutter)."
+}
+@{
+KeyId         = "Promote"
+UIDisplayName = "Unhide: Idle Promote [Current AC: $dispPr]"
+Path          = "$basePath\7b224883-b3cc-4d79-819f-8374152cbe7c"
+Name          = "Attributes"
+Expected      = 2
+Type          = "Registry"
+Note          = "[LIVE / NO REBOOT] Processor Idle Promote Threshold. Locking to 100% keeps active cores out of idle sleep states until you click RELEASE (or reboot)."
+}
 )
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 foreach ($rule in $rules) {
@@ -11773,6 +12875,7 @@ if ($null -ne $val -and $val -eq $rule.Expected) { $isDetected = $false }
 $results.Add([PSCustomObject]@{
 UIDisplayName = $rule.UIDisplayName
 IsDetected    = $isDetected
+Note          = $rule.Note
 ActionData    = $rule
 })
 }
@@ -12221,9 +13324,19 @@ $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $globalOffload = Get-NetOffloadGlobalSetting -ErrorAction SilentlyContinue
 if ($globalOffload) {
 $isGlobalRssOpt = ($globalOffload.ReceiveSideScaling -eq 'Enabled')
-$results.Add([PSCustomObject]@{ UIDisplayName = "[Global] TCP Receive-Side Scaling (RSS)"; IsOptimized = $isGlobalRssOpt; ActionData = @{ Type="GlobalRSS" } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[Global] TCP Receive-Side Scaling (RSS)"
+IsOptimized   = $isGlobalRssOpt
+Note          = "[LIVE / NO REBOOT] Enables global TCP Receive-Side Scaling so network DPC processing spreads across multiple CPU cores instead of saturating Core 0."
+ActionData    = @{ Type="GlobalRSS" }
+})
 $isGlobalRscOpt = ($globalOffload.ReceiveSegmentCoalescing -eq 'Disabled')
-$results.Add([PSCustomObject]@{ UIDisplayName = "[Global] TCP Recv Segment Coalescing (RSC)"; IsOptimized = $isGlobalRscOpt; ActionData = @{ Type="GlobalRSC" } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[Global] TCP Recv Segment Coalescing (RSC)"
+IsOptimized   = $isGlobalRscOpt
+Note          = "[LIVE / NO REBOOT] Disables global TCP Receive Segment Coalescing. Stops Windows from buffering and batching incoming packets, reducing online ping jitter."
+ActionData    = @{ Type="GlobalRSC" }
+})
 }
 $adapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)
 $totalAdapters = [math]::Max(1, $adapters.Count)
@@ -12239,20 +13352,30 @@ $tcpPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\
 $tcpNoDelay = (Get-ItemProperty -Path $tcpPath -Name "TCPNoDelay" -ErrorAction SilentlyContinue).TCPNoDelay
 $tcpAck = (Get-ItemProperty -Path $tcpPath -Name "TcpAckFrequency" -ErrorAction SilentlyContinue).TcpAckFrequency
 $isTcpOpt = ($tcpNoDelay -eq 1 -and $tcpAck -eq 1)
-$results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] TCPNoDelay & AckFrequency"; IsOptimized = $isTcpOpt; ActionData = @{ Type="TCP"; AdapterName=$name; InterfaceGuid=$adapter.InterfaceGuid } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[$adapterDispName] TCPNoDelay & AckFrequency"
+IsOptimized   = $isTcpOpt
+Note          = "[ADAPTER RESTART] Sets TCPNoDelay=1 & TcpAckFrequency=1 (disables Nagle's algorithm). Dispatches small TCP packets immediately instead of waiting for ACKs."
+ActionData    = @{ Type="TCP"; AdapterName=$name; InterfaceGuid=$adapter.InterfaceGuid }
+})
 $enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($adapter.PnPDeviceID)"
 $caps = (Get-ItemProperty -Path $enumPath -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities
 $isPowerOpt = ($caps -eq 24)
-$results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Power Management (Sleep)"; IsOptimized = $isPowerOpt; ActionData = @{ Type="Power"; RegPath=$enumPath; InterfaceGuid=$adapter.InterfaceGuid } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[$adapterDispName] Power Management (Sleep)"
+IsOptimized   = $isPowerOpt
+Note          = "[REBOOT / ADAPTER RESTART] Writes PnPCapabilities=24 so Windows never powers down the NIC during idle windows (prevents sudden micro-disconnects)."
+ActionData    = @{ Type="Power"; RegPath=$enumPath; InterfaceGuid=$adapter.InterfaceGuid }
+})
 $ndisTweaks = [ordered]@{
-"*InterruptModeration" = @{ Opt = "0";    Def = "1" }
-"*FlowControl"         = @{ Opt = "0";    Def = "3" }
-"*JumboPacket"         = @{ Opt = "1514"; Def = "1514" }
-"*EEE"                 = @{ Opt = "0";    Def = "1" }
-"EEELinkAdvertisement" = @{ Opt = "0";    Def = "1" }
-"AdvancedEEE"          = @{ Opt = "0";    Def = "1" }
-"EnableGreenEthernet"  = @{ Opt = "0";    Def = "1" }
-"PowerSavingMode"      = @{ Opt = "0";    Def = "1" }
+"*InterruptModeration" = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables NIC interrupt coalescing so arriving packets raise IRQs immediately instead of waiting in a driver batching window." }
+"*FlowControl"         = @{ Opt = "0";    Def = "3";    Note = "[ADAPTER RESTART] Disables IEEE 802.3x Pause Frames. Prevents switch/router backpressure stalls during bursty traffic on gaming LANs." }
+"*JumboPacket"         = @{ Opt = "1514"; Def = "1514"; Note = "[ADAPTER RESTART] Locks standard 1514-byte Ethernet MTU. Avoids packet fragmentation overhead with internet routers and game servers." }
+"*EEE"                 = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables Energy-Efficient Ethernet (802.3az). Eliminates multi-millisecond PHY wake-up latency spikes after short idle gaps." }
+"EEELinkAdvertisement" = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Stops the NIC from negotiating Energy-Efficient Ethernet low-power idle states with your router or switch." }
+"AdvancedEEE"          = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables vendor Advanced EEE link power-down transitions that introduce periodic ping spikes." }
+"EnableGreenEthernet"  = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables Realtek Green Ethernet PHY power throttling to maintain constant link responsiveness." }
+"PowerSavingMode"      = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables adapter Power Saving Mode so transceiver clocks stay locked at full speed." }
 }
 $allAdvProps = @(Get-NetAdapterAdvancedProperty -Name $name -ErrorAction SilentlyContinue)
 foreach ($key in $ndisTweaks.Keys) {
@@ -12266,6 +13389,7 @@ $propDispName = [string]$prop.DisplayName
 $results.Add([PSCustomObject]@{
 UIDisplayName = "[$adapterDispName] NDIS: $propDispName"
 IsOptimized   = $isNdisOpt
+Note          = $ndisTweaks[$key].Note
 ActionData    = @{
 Type          = "NDIS"
 AdapterName   = $name
@@ -12281,22 +13405,42 @@ if ($null -ne $UltixSync) { $UltixSync.Progress = [math]::Min(95, $baseProg + 40
 $rss = Get-NetAdapterRss -Name $name -ErrorAction SilentlyContinue
 if ($rss) {
 $isRssOpt = ([bool]$rss.Enabled -eq $true)
-$results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Receive Side Scaling (RSS)"; IsOptimized = $isRssOpt; ActionData = @{ Type="RSS"; AdapterName=$name } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[$adapterDispName] Receive Side Scaling (RSS)"
+IsOptimized   = $isRssOpt
+Note          = "[ADAPTER RESTART] Keeps per-adapter Receive Side Scaling enabled so incoming packet queues distribute across multiple CPU cores."
+ActionData    = @{ Type="RSS"; AdapterName=$name }
+})
 }
 $rsc = Get-NetAdapterRsc -Name $name -ErrorAction SilentlyContinue
 if ($rsc) {
 $isRscOpt = ([bool]$rsc.IPv4Enabled -eq $false)
-$results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Recv Segment Coalescing (RSC)"; IsOptimized = $isRscOpt; ActionData = @{ Type="RSC"; AdapterName=$name } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[$adapterDispName] Recv Segment Coalescing (RSC)"
+IsOptimized   = $isRscOpt
+Note          = "[ADAPTER RESTART] Disables per-adapter IPv4 Receive Segment Coalescing to prevent packet batching delays in real-time games."
+ActionData    = @{ Type="RSC"; AdapterName=$name }
+})
 }
 $lso = Get-NetAdapterLso -Name $name -ErrorAction SilentlyContinue
 if ($lso) {
 $isLsoOpt = ([bool]$lso.IPv4Enabled -eq $false)
-$results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Large Send Offload (LSO)"; IsOptimized = $isLsoOpt; ActionData = @{ Type="LSO"; AdapterName=$name } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[$adapterDispName] Large Send Offload (LSO)"
+IsOptimized   = $isLsoOpt
+Note          = "[ADAPTER RESTART] Disables IPv4 Large Send Offload so the NIC stops buffering outgoing segments into oversized frames before transmission."
+ActionData    = @{ Type="LSO"; AdapterName=$name }
+})
 }
 $cso = Get-NetAdapterChecksumOffload -Name $name -ErrorAction SilentlyContinue
 if ($cso) {
 $isCsoOpt = ([bool]$cso.IpIPv4Enabled -eq $true -and [bool]$cso.TcpIPv4Enabled -eq $true)
-$results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Checksum Offload (CSO)"; IsOptimized = $isCsoOpt; ActionData = @{ Type="CSO"; AdapterName=$name } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "[$adapterDispName] Checksum Offload (CSO)"
+IsOptimized   = $isCsoOpt
+Note          = "[ADAPTER RESTART] Keeps hardware IPv4/TCP/UDP checksum offloading active on NIC silicon to save CPU cycles without adding latency."
+ActionData    = @{ Type="CSO"; AdapterName=$name }
+})
 }
 }
 if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
@@ -12311,6 +13455,7 @@ $results.Add([PSCustomObject]@{
 UIDisplayName = "Global Timer Resolution (Kernel Fix)"
 IsOptimized   = $isGlobalOpt
 ActionData    = @{ Type = "Reg"; Path = $regPath; Name = "GlobalTimerResolutionRequests"; Value = 1 }
+Note          = "[REBOOT REQUIRED] Restores pre-Windows 11 global timer propagation so a 0.5ms request applies system-wide instead of being scoped to one process."
 })
 $hpetInstance = $null
 $hpetRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\ACPI\PNP0103"
@@ -12329,6 +13474,7 @@ $results.Add([PSCustomObject]@{
 UIDisplayName = "Disable HPET (Device Manager)"
 IsOptimized   = $isHpetDisabled
 ActionData    = @{ Type = "PNP"; Instance = $hpetInstance }
+Note          = "[REBOOT REQUIRED] Disables the legacy ACPI HPET device node (ACPI\PNP0103) so the kernel relies purely on the much faster invariant CPU TSC."
 })
 }
 $bcdVerbose = (bcdedit.exe /enum "{current}" /v 2>$null) -join " "
@@ -12357,11 +13503,13 @@ $results.Add([PSCustomObject]@{
 UIDisplayName = "Disable Dynamic Tick (Power Saving)"
 IsOptimized   = $dynTickOpt
 ActionData    = @{ Type = "BCD"; Cmd = "disabledynamictick yes" }
+Note          = "[REBOOT REQUIRED] Sets BCD disabledynamictick=yes. Prevents the OS clock tick from stopping during idle windows, eliminating timer wake-up jitter on desktops."
 })
 $results.Add([PSCustomObject]@{
 UIDisplayName = "Disable Platform Clock (Force TSC)"
 IsOptimized   = $platClockOpt
 ActionData    = @{ Type = "BCD"; Cmd = "useplatformclock no" }
+Note          = "[REBOOT REQUIRED] Deletes BCD useplatformclock=yes so Windows never forces the slow motherboard HPET/PMTimer over the CPU's native TSC."
 })
 return @($results)
 }
@@ -12378,15 +13526,30 @@ $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $pciPath = "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters"
 $aspm = (Get-ItemProperty -LiteralPath $pciPath -Name "DisableASPM" -ErrorAction SilentlyContinue).DisableASPM
 $isAspmOpt = ($null -ne $aspm -and $aspm -eq 1)
-$results.Add([PSCustomObject]@{ UIDisplayName = "PCIe ASPM Global Bus Lock (DisableASPM)"; IsOptimized = $isAspmOpt; ActionData = @{ Type="Reg"; Path=$pciPath; Name="DisableASPM"; Val=1 } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "PCIe ASPM Global Bus Lock (DisableASPM)"
+IsOptimized   = $isAspmOpt
+Note          = "[REBOOT REQUIRED] Disables PCIe Active State Power Management (L0s/L1/L1.2) globally. Eliminates GPU & NVMe link wake-up micro-stutters on desktop PCs."
+ActionData    = @{ Type="Reg"; Path=$pciPath; Name="DisableASPM"; Val=1 }
+})
 $nvmePath = "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device"
 $nvmeIdle = (Get-ItemProperty -LiteralPath $nvmePath -Name "IdlePowerMode" -ErrorAction SilentlyContinue).IdlePowerMode
 $isNvmeIdleOpt = ($null -ne $nvmeIdle -and $nvmeIdle -eq 0)
-$results.Add([PSCustomObject]@{ UIDisplayName = "StorNVMe APST Driver Lock (IdlePowerMode)"; IsOptimized = $isNvmeIdleOpt; ActionData = @{ Type="Reg"; Path=$nvmePath; Name="IdlePowerMode"; Val=0 } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "StorNVMe APST Driver Lock (IdlePowerMode)"
+IsOptimized   = $isNvmeIdleOpt
+Note          = "[REBOOT REQUIRED] Sets StorNVMe IdlePowerMode=0 to block NVMe APST sleep transitions (D3hot), preventing asset-streaming hitches when drives wake up."
+ActionData    = @{ Type="Reg"; Path=$nvmePath; Name="IdlePowerMode"; Val=0 }
+})
 $sysMainStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain" -Name "Start" -ErrorAction SilentlyContinue).Start
 $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
 $isMemOpt = if ($null -ne $mmAgent) { ($mmAgent.MemoryCompression -eq $false) } else { ($sysMainStart -eq 4) }
-$results.Add([PSCustomObject]@{ UIDisplayName = "System Memory Compression (MMAgent)"; IsOptimized = $isMemOpt; ActionData = @{ Type="MMAgent" } })
+$results.Add([PSCustomObject]@{
+UIDisplayName = "System Memory Compression (MMAgent)"
+IsOptimized   = $isMemOpt
+Note          = "[LIVE / NO REBOOT] Disables Windows Memory Compression (MMAgent). Eliminates background compression CPU overhead & DPC spikes on 32GB+ RAM systems."
+ActionData    = @{ Type="MMAgent" }
+})
 return @($results)
 }
 function Set-AppAffinity {
@@ -12557,12 +13720,14 @@ param(
 [Parameter(Mandatory=$true)][System.Windows.Forms.Form]$Modal,
 [Parameter(Mandatory=$true)][System.Windows.Forms.CheckedListBox]$ChkList,
 [Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Collections.ArrayList]$LocalData,
-[Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable
+[Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable,
+[System.Windows.Forms.Label]$NoteLabel = $null
 )
 if ($Modal.IsDisposed -or $ChkList.IsDisposed) { return }
 $uiModal     = $Modal
 $uiChkList   = $ChkList
 $uiLocalData = $LocalData
+$uiNoteLabel = $NoteLabel
 $uiChkList.Items.Clear()
 $uiLocalData.Clear()
 [void]$uiChkList.Items.Add("Scanning physical adapters & NDIS properties in background...", $false)
@@ -12584,6 +13749,14 @@ if ($item.IsOptimized) {
 }
 }
 $uiChkList.EndUpdate()
+if ($null -ne $uiNoteLabel -and -not $uiNoteLabel.IsDisposed) {
+if ($uiLocalData.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($uiLocalData[0].Note)) {
+$uiChkList.SelectedIndex = 0
+$uiNoteLabel.Text = [string]$uiLocalData[0].Note
+} else {
+$uiNoteLabel.Text = "Select any network parameter above to inspect its kernel/NDIS effect."
+}
+}
 }.GetNewClosure())
 }
 function Start-NetworkOptimizationAsync {
@@ -12593,7 +13766,8 @@ param(
 [Parameter(Mandatory=$true)][System.Windows.Forms.Form]$Modal,
 [Parameter(Mandatory=$true)][System.Windows.Forms.CheckedListBox]$ChkList,
 [Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Collections.ArrayList]$LocalData,
-[AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @()
+[AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @(),
+[System.Windows.Forms.Label]$NoteLabel = $null
 )
 if ($SelectedItems.Count -eq 0) {
 Write-GUI " -> No network items selected."
@@ -12603,6 +13777,7 @@ $uiModal     = $Modal
 $uiChkList   = $ChkList
 $uiLocalData = $LocalData
 $uiButtons   = $ControlsToDisable
+$uiNoteLabel = $NoteLabel
 $verb        = if ($Mode -eq 'Apply') { "Optimization" } else { "Revert" }
 Write-GUI " -> Dispatching network adapter $verb worker to background Runspace..."
 Update-Progress 5
@@ -12803,18 +13978,20 @@ if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
 } -OnComplete ({
 Update-Progress 0
 Write-GUI " -> Network adapter $verb completed.`n"
-Update-NetworkModalList -Modal $uiModal -ChkList $uiChkList -LocalData $uiLocalData -ControlsToDisable $uiButtons
+Update-NetworkModalList -Modal $uiModal -ChkList $uiChkList -LocalData $uiLocalData -ControlsToDisable $uiButtons -NoteLabel $uiNoteLabel
 }.GetNewClosure())
 }
 function Invoke-ApplyTimerTweaks {
 param([array]$SelectedItems)
 if ($SelectedItems.Count -eq 0) { Write-GUI " -> No Timer modifications selected."; return }
+$appliedCount = 0
 foreach ($item in $SelectedItems) {
 $data = $item.ActionData
 Write-GUI " -> Configuring Timer Subsystem: $($item.UIDisplayName)"
 try {
 if ($data.Type -eq "Reg") {
 Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Value -Type DWord -Module "Z7_Hardware"
+$appliedCount++
 } elseif ($data.Type -eq "BCD") {
 $cmdArgs = $data.Cmd.Split(' ')
 if ($cmdArgs[0] -eq "useplatformclock" -and $cmdArgs[1] -eq "no") {
@@ -12822,15 +13999,20 @@ $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{c
 } else {
 $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/set", "{current}", $cmdArgs[0], $cmdArgs[1]) -Module "Z7_Hardware"
 }
+$appliedCount++
 } elseif ($data.Type -eq "PNP") {
 $null = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/disable-device", "$($data.Instance)") -Module "Z7_Hardware"
 if (-not [WinUltix.PnpTree]::IsDeviceDisabled($data.Instance)) {
 throw "pnputil failed to disable $($data.Instance)"
 }
+$appliedCount++
 }
 } catch {
 Write-GUI "    [!] Failed to apply: $($item.UIDisplayName)"
 }
+}
+if ($appliedCount -gt 0) {
+Set-UltixRebootRequired -Reason "BCD/Timer"
 }
 }
 function Invoke-ApplyNVMeTweaks {
@@ -12842,6 +14024,7 @@ Write-GUI " -> Configuring Subsystem: $($item.UIDisplayName)"
 try {
 if ($data.Type -eq "Reg") {
 Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Val -Type DWord -Module "Z7_Hardware"
+Set-UltixRebootRequired -Reason "PCIe/NVMe"
 } elseif ($data.Type -eq "MMAgent") {
 $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
 $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
@@ -13072,6 +14255,7 @@ Remove-AppAffinity -SelectedItems $localData -Execute $true -KeepConfig $true
 $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 524 -Y 594 -Width 120 -Height 38 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Left'
 $btnClose.DialogResult = "Cancel"
+$modal.CancelButton = $btnClose
 $lblTip = New-Object System.Windows.Forms.Label
 $lblTip.Text = "INFO: 'Save Roster' stores your preset in the registry. You can instantly apply it later before gaming using the 'Pre-Flight' desktop shortcut."
 $lblTip.Location = New-Object System.Drawing.Point(15, 640)
@@ -13085,13 +14269,29 @@ try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 function Show-CPPCModal {
 param ([string]$Title, [string]$Description)
 $modal = New-Object System.Windows.Forms.Form
-$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(650, 450); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-$modal.MinimumSize = New-Object System.Drawing.Size(650, 450)
+$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(680, 495); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+$modal.MinimumSize = New-Object System.Drawing.Size(680, 495)
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
-$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(600, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
-$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 60); $chkList.Size = New-Object System.Drawing.Size(600, 280); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(630, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 60); $chkList.Size = New-Object System.Drawing.Size(630, 258); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$lblItemNote = New-Object System.Windows.Forms.Label
+$lblItemNote.Location = New-Object System.Drawing.Point(15, 326)
+$lblItemNote.Size = New-Object System.Drawing.Size(630, 66)
+$lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+$lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+$lblItemNote.BorderStyle = "FixedSingle"
+$lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+$lblItemNote.Text = "Click any CPPC setting above to inspect its hardware effect."
+$lblItemNote.Anchor = 'Bottom, Left, Right'
 $localData = New-Object System.Collections.ArrayList
+$chkList.Add_SelectedIndexChanged({
+if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+$lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+}
+}.GetNewClosure())
 $refreshData = ({
+$prevIdx = $chkList.SelectedIndex
 $chkList.Items.Clear(); $localData.Clear()
 $auditData = Get-HardwareState_CPPC
 foreach ($item in $auditData) {
@@ -13102,9 +14302,14 @@ if (-not $item.IsDetected) {
 [void]$chkList.Items.Add("[ HIDDEN ]   " + $item.UIDisplayName, $true)
 }
 }
+if ($localData.Count -gt 0) {
+$targetIdx = if ($prevIdx -ge 0 -and $prevIdx -lt $localData.Count) { $prevIdx } else { 0 }
+$chkList.SelectedIndex = $targetIdx
+$lblItemNote.Text = [string]$localData[$targetIdx].Note
+}
 }.GetNewClosure())
 &$refreshData
-$btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 355 -Width 150 -Height 38 -RGB @(60, 100, 150)
+$btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 400 -Width 150 -Height 38 -RGB @(60, 100, 150)
 $btnUnhide.Anchor = 'Bottom, Left'
 $btnUnhide.Add_Click({
 $toUnhide = @()
@@ -13114,22 +14319,23 @@ if ($chkList.GetItemChecked($i)) { $toUnhide += $localData[$i] }
 if ($toUnhide.Count -gt 0) { Invoke-ApplyCPPC -SelectedItems $toUnhide }
 &$refreshData
 }.GetNewClosure())
-$btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE Max CPPC" -X 173 -Y 355 -Width 175 -Height 38 -RGB @(150, 60, 60)
+$btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE Max CPPC" -X 173 -Y 400 -Width 175 -Height 38 -RGB @(150, 60, 60)
 $btnEngage.Anchor = 'Bottom, Left'
 $btnEngage.Add_Click({
 Set-UltixCPPCState -Mode 'Engage'
 &$refreshData
 }.GetNewClosure())
-$btnRelease = New-UltixButton -Parent $modal -Text "RELEASE CPPC" -X 356 -Y 355 -Width 150 -Height 38 -RGB @(150, 100, 60)
+$btnRelease = New-UltixButton -Parent $modal -Text "RELEASE CPPC" -X 356 -Y 400 -Width 150 -Height 38 -RGB @(150, 100, 60)
 $btnRelease.Anchor = 'Bottom, Left'
 $btnRelease.Add_Click({
 Set-UltixCPPCState -Mode 'Release'
 &$refreshData
 }.GetNewClosure())
-$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 514 -Y 355 -Width 100 -Height 38 -RGB @(60, 60, 60)
+$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 514 -Y 400 -Width 131 -Height 38 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Left'
 $btnClose.DialogResult = "Cancel"
-$modal.Controls.AddRange(@($lblDesc, $chkList))
+$modal.CancelButton = $btnClose
+$modal.Controls.AddRange(@($lblDesc, $chkList, $lblItemNote))
 try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 function Show-MsiModal {
@@ -13805,7 +15011,10 @@ Write-GUI " -> [!] Failed to modify IRQ/MSI policy for $($dev.RawDeviceName): $(
 }
 }
 &$refreshData
-if ($changed -gt 0) { [System.Windows.Forms.MessageBox]::Show("Successfully configured MSI & IRQ policy for $changed device(s).`nOriginal states backed up.`nPlease reboot your PC.", "Reboot Required") }
+if ($changed -gt 0) {
+Set-UltixRebootRequired -Reason "MSI/IRQ"
+[System.Windows.Forms.MessageBox]::Show("Successfully configured MSI & IRQ policy for $changed device(s).`nOriginal states backed up.`nPlease reboot your PC.", "Reboot Required")
+}
 }.GetNewClosure())
 $btnRevertMSI = New-UltixButton -Parent $modal -Text "Restore Original State" -X 208 -Y 706 -Width 205 -Height 40 -RGB @(100, 100, 100)
 $btnRevertMSI.Anchor = 'Bottom, Left'
@@ -13879,6 +15088,7 @@ if (Test-Path -LiteralPath $affPath) { Grant-UltixRegistryKeyAccess -RegistryPat
 & $revertBlock
 }
 Write-GUI " -> Reverted IRQ/MSI state to factory defaults: $($dev.RawDeviceName)"
+Set-UltixRebootRequired -Reason "MSI/IRQ"
 } catch {
 Write-GUI " -> [!] Failed to revert IRQ/MSI state for $($dev.RawDeviceName): $($_.Exception.Message)"
 }
@@ -13888,6 +15098,7 @@ Write-GUI " -> [!] Failed to revert IRQ/MSI state for $($dev.RawDeviceName): $($
 $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 421 -Y 706 -Width 95 -Height 40 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Left'
 $btnClose.DialogResult = "Cancel"
+$modal.CancelButton = $btnClose
 $lblIrqLegend = New-Object System.Windows.Forms.Label
 $lblIrqLegend.UseMnemonic = $false
 $lblIrqLegend.Text = "IRQ MASK : Default = Core 0 | 0x.. (C#) = Hex Mask (e.g. 0xC -> Core 1) | Spread = All Cores`r`nKERNEL   : -> Mask = Inherited from PCI device | -> Mask* = Mixed masks | All / C0 = OS Timer"
@@ -13913,15 +15124,15 @@ $modal.Dispose()
 function Show-WHEAModal {
 param ([string]$Title, [string]$Description)
 $modal = New-Object System.Windows.Forms.Form
-$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(850, 500); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-$modal.MinimumSize = New-Object System.Drawing.Size(850, 500)
+$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(900, 640); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.KeyPreview = $true; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+$modal.MinimumSize = New-Object System.Drawing.Size(860, 560)
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
-$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(650, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
-$btnRefresh = New-UltixButton -Parent $modal -Text "Scan Now" -X 705 -Y 15 -Width 110 -Height 35 -RGB @(60, 100, 150)
+$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(725, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+$btnRefresh = New-UltixButton -Parent $modal -Text "Scan Now" -X 755 -Y 15 -Width 115 -Height 35 -RGB @(60, 100, 150)
 $btnRefresh.Anchor = 'Top, Right'
 $listView = New-Object System.Windows.Forms.ListView
 $listView.Location = New-Object System.Drawing.Point(15, 60)
-$listView.Size = New-Object System.Drawing.Size(800, 330)
+$listView.Size = New-Object System.Drawing.Size(855, 290)
 $listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
 $listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
 $listView.BorderStyle = "FixedSingle"
@@ -13929,20 +15140,64 @@ $listView.Font = New-Object System.Drawing.Font("Consolas", 10)
 $listView.Anchor = 'Top, Bottom, Left, Right'
 $listView.View = [System.Windows.Forms.View]::Details
 $listView.FullRowSelect = $true
+$listView.MultiSelect = $false
 $listView.GridLines = $false
 Enable-UltixDoubleBuffer -Control $listView
 $listView.Columns.Add("Time", 170) | Out-Null
-$listView.Columns.Add("Event ID", 90) | Out-Null
-$listView.Columns.Add("APIC ID", 120) | Out-Null
-$listView.Columns.Add("Error Source / Details", 405) | Out-Null
-$btnClear = New-UltixButton -Parent $modal -Text "Wipe Logs (Prepare for Test)" -X 15 -Y 405 -Width 260 -Height 38 -RGB @(150, 60, 60)
+$listView.Columns.Add("Event ID", 85) | Out-Null
+$listView.Columns.Add("APIC ID", 155) | Out-Null
+$listView.Columns.Add("Error Source / Details", 425) | Out-Null
+$lblRawHdr = New-Object System.Windows.Forms.Label
+$lblRawHdr.Text = "Raw WHEA Event Details (MCA Bank / Transaction Type / Error Source):"
+$lblRawHdr.Location = New-Object System.Drawing.Point(15, 358)
+$lblRawHdr.Size = New-Object System.Drawing.Size(855, 20)
+$lblRawHdr.Font = New-Object System.Drawing.Font("Segoe UI", 9.0, [System.Drawing.FontStyle]::Bold)
+$lblRawHdr.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$lblRawHdr.Anchor = 'Bottom, Left, Right'
+$txtRawWhea = New-Object System.Windows.Forms.TextBox
+$txtRawWhea.Location = New-Object System.Drawing.Point(15, 380)
+$txtRawWhea.Size = New-Object System.Drawing.Size(855, 160)
+$txtRawWhea.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$txtRawWhea.ForeColor = [System.Drawing.Color]::FromArgb(255, 205, 220, 235)
+$txtRawWhea.BorderStyle = "FixedSingle"
+$txtRawWhea.Multiline = $true
+$txtRawWhea.ReadOnly = $true
+$txtRawWhea.WordWrap = $true
+$txtRawWhea.ScrollBars = "Vertical"
+$txtRawWhea.Font = New-Object System.Drawing.Font("Consolas", 9.0)
+$txtRawWhea.Text = "Click any WHEA record above to inspect full raw Event Viewer payload (Ctrl+C to copy)."
+$txtRawWhea.Anchor = 'Bottom, Left, Right'
+$listView.Add_SelectedIndexChanged({
+if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+$rec = $listView.SelectedItems[0].Tag
+$rawBody = if (-not [string]::IsNullOrWhiteSpace($rec.RawMessage)) { $rec.RawMessage.Trim() } else { "(No raw Event Viewer message payload attached.)" }
+$txtRawWhea.Text = "Time: $($rec.Time) | Event ID: $($rec.EventID) | APIC: $($rec.ApicID)`r`nVerdict: $($rec.ErrorType)`r`n--------------------------------------------------------------------------------`r`n$rawBody"
+}
+}.GetNewClosure())
+$btnClear = New-UltixButton -Parent $modal -Text "Wipe Logs (Prepare for Test)" -X 15 -Y 550 -Width 255 -Height 38 -RGB @(150, 60, 60)
 $btnClear.Anchor = 'Bottom, Left'
-$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 285 -Y 405 -Width 120 -Height 38 -RGB @(60, 60, 60)
-$btnClose.Anchor = 'Bottom, Left'
+$btnCopyRaw = New-UltixButton -Parent $modal -Text "Copy Raw Log" -X 280 -Y 550 -Width 155 -Height 38 -RGB @(45, 85, 125)
+$btnCopyRaw.Anchor = 'Bottom, Left'
+$btnCopyRaw.Add_Click({
+if (-not [string]::IsNullOrWhiteSpace($txtRawWhea.Text)) {
+try { [System.Windows.Forms.Clipboard]::SetText($txtRawWhea.Text) } catch { }
+}
+}.GetNewClosure())
+$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 750 -Y 550 -Width 120 -Height 38 -RGB @(60, 60, 60)
+$btnClose.Anchor = 'Bottom, Right'
 $btnClose.DialogResult = "Cancel"
+$modal.CancelButton = $btnClose
+$modal.Add_KeyDown({
+param($src, $e)
+if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C -and $listView.Focused -and -not [string]::IsNullOrWhiteSpace($txtRawWhea.Text)) {
+try { [System.Windows.Forms.Clipboard]::SetText($txtRawWhea.Text) } catch { }
+$e.SuppressKeyPress = $true
+}
+}.GetNewClosure())
 $refreshData = ({
 $uiModal    = $modal
 $uiListView = $listView
+$uiRawBox   = $txtRawWhea
 $bgEven     = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
 $bgOdd      = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
 $bgAlert    = [System.Drawing.Color]::FromArgb(255, 50, 26, 28)
@@ -13954,6 +15209,7 @@ $loadingItem = New-Object System.Windows.Forms.ListViewItem("Scanning...")
 $loadingItem.BackColor = $bgEven
 $loadingItem.ForeColor = [System.Drawing.Color]::LightSkyBlue
 [void]$uiListView.Items.Add($loadingItem)
+$uiRawBox.Text = "Scanning System Event Log for WHEA-Logger records..."
 $sb = (Get-Command -Name Get-HardwareState_WHEA).ScriptBlock
 Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable @($btnRefresh, $btnClear) -OnComplete ({
 param($output)
@@ -13968,6 +15224,7 @@ foreach ($item in $auditData) {
 $rowBg = if (($rIdx % 2) -eq 0) { $bgEven } else { $bgOdd }
 $lvItem = New-Object System.Windows.Forms.ListViewItem([string]$item.Time)
 $lvItem.BackColor = $rowBg
+$lvItem.Tag = $item
 $idSub = $lvItem.SubItems.Add([string]$item.EventID)
 $idSub.BackColor = $rowBg
 $apicSub = $lvItem.SubItems.Add([string]$item.ApicID)
@@ -13983,6 +15240,8 @@ $errSub.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
 [void]$uiListView.Items.Add($lvItem)
 $rIdx++
 }
+$uiListView.EndUpdate()
+$uiListView.Items[0].Selected = $true
 } else {
 $lvItem = New-Object System.Windows.Forms.ListViewItem("---")
 [void]$lvItem.SubItems.Add("---")
@@ -13991,8 +15250,9 @@ $lvItem = New-Object System.Windows.Forms.ListViewItem("---")
 $lvItem.BackColor = $bgEven
 $lvItem.ForeColor = [System.Drawing.Color]::FromArgb(255, 145, 230, 165)
 [void]$uiListView.Items.Add($lvItem)
-}
 $uiListView.EndUpdate()
+$uiRawBox.Text = "Zero Microsoft-Windows-WHEA-Logger records found in the System Event Log.`r`nCPU Curve Optimizer, FCLK, DDR5 memory controller, and PCIe links show no logged hardware faults."
+}
 }.GetNewClosure())
 }.GetNewClosure())
 &$refreshData
@@ -14002,22 +15262,32 @@ Clear-WHEALogs
 &$refreshData
 [System.Windows.Forms.MessageBox]::Show("System Event Log wiped. Ready for next stability test.", "Logs Cleared")
 }.GetNewClosure())
-$modal.Controls.AddRange(@($lblDesc, $listView))
+$modal.Controls.AddRange(@($lblDesc, $listView, $lblRawHdr, $txtRawWhea))
 try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 function Show-NetworkModal {
 param ([string]$Title, [string]$Description)
 $modal = New-Object System.Windows.Forms.Form
-$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 560); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-$modal.MinimumSize = New-Object System.Drawing.Size(760, 560)
+$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(780, 620); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+$modal.MinimumSize = New-Object System.Drawing.Size(780, 620)
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
-$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
-$lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(480, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
-$btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 495 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
+$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(730, 34); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+$lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(495, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+$btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 515 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
 $btnSelAllNet.Anchor = 'Top, Right'
-$btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 615 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
+$btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 635 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
 $btnSelNoneNet.Anchor = 'Top, Right'
-$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 375); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(730, 360); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$lblItemNote = New-Object System.Windows.Forms.Label
+$lblItemNote.Location = New-Object System.Drawing.Point(15, 448)
+$lblItemNote.Size = New-Object System.Drawing.Size(730, 66)
+$lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+$lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+$lblItemNote.BorderStyle = "FixedSingle"
+$lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+$lblItemNote.Text = "Scanning physical adapters & NDIS properties..."
+$lblItemNote.Anchor = 'Bottom, Left, Right'
 $btnSelAllNet.Add_Click({
 $chkList.BeginUpdate()
 for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $true) }
@@ -14029,18 +15299,24 @@ for ($i = 0; $i -lt $chkList.Items.Count; $i++) { $chkList.SetItemChecked($i, $f
 $chkList.EndUpdate()
 }.GetNewClosure())
 $localData = New-Object System.Collections.ArrayList
-$btnEngage  = New-UltixButton -Parent $modal -Text "Optimize Checked" -X 15 -Y 468 -Width 180 -Height 38 -RGB @(150, 60, 60)
+$chkList.Add_SelectedIndexChanged({
+if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+$lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+}
+}.GetNewClosure())
+$btnEngage  = New-UltixButton -Parent $modal -Text "Optimize Checked" -X 15 -Y 524 -Width 180 -Height 38 -RGB @(150, 60, 60)
 $btnEngage.Anchor = 'Bottom, Left'
-$btnRevert  = New-UltixButton -Parent $modal -Text "Restore Checked Defaults" -X 203 -Y 468 -Width 225 -Height 38 -RGB @(100, 100, 100)
+$btnRevert  = New-UltixButton -Parent $modal -Text "Restore Checked Defaults" -X 203 -Y 524 -Width 225 -Height 38 -RGB @(100, 100, 100)
 $btnRevert.Anchor = 'Bottom, Left'
-$btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 436 -Y 468 -Width 145 -Height 38 -RGB @(60, 100, 150)
+$btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 436 -Y 524 -Width 145 -Height 38 -RGB @(60, 100, 150)
 $btnRefresh.Anchor = 'Bottom, Left'
-$btnClose   = New-UltixButton -Parent $modal -Text "Close" -X 589 -Y 468 -Width 135 -Height 38 -RGB @(60, 60, 60)
+$btnClose   = New-UltixButton -Parent $modal -Text "Close" -X 589 -Y 524 -Width 156 -Height 38 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Left'
 $btnClose.DialogResult = "Cancel"
+$modal.CancelButton = $btnClose
 $actionButtons = @($btnEngage, $btnRevert, $btnRefresh)
 $btnRefresh.Add_Click({
-Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
 }.GetNewClosure())
 $btnEngage.Add_Click({
 $queue = @()
@@ -14049,7 +15325,7 @@ if ($chkList.GetItemChecked($i) -and $i -lt $localData.Count) {
 $queue += $localData[$i]
 }
 }
-Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Apply" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Apply" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
 }.GetNewClosure())
 $btnRevert.Add_Click({
 $queue = @()
@@ -14058,29 +15334,44 @@ if ($chkList.GetItemChecked($i) -and $i -lt $localData.Count) {
 $queue += $localData[$i]
 }
 }
-Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Revert" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Revert" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
 }.GetNewClosure())
-$modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList))
-Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+$modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList, $lblItemNote))
+Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
 try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 function Show-TimerModal {
 param ([string]$Title, [string]$Description)
 $modal = New-Object System.Windows.Forms.Form
-$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 415); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-$modal.MinimumSize = New-Object System.Drawing.Size(760, 415)
+$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 485); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+$modal.MinimumSize = New-Object System.Drawing.Size(760, 485)
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
-$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 38); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
 $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] BCD modifications require a system reboot to lock the TSC hardware timer."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(710, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 $lblCurrentTimer = New-Object System.Windows.Forms.Label
-$lblCurrentTimer.Location = New-Object System.Drawing.Point(15, 345)
+$lblCurrentTimer.Location = New-Object System.Drawing.Point(15, 412)
 $lblCurrentTimer.Size = New-Object System.Drawing.Size(710, 20)
 $lblCurrentTimer.Font = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Bold)
 $lblCurrentTimer.ForeColor = [System.Drawing.Color]::Yellow
 $lblCurrentTimer.Anchor = 'Bottom, Left, Right'
-$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 200); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 196); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$lblItemNote = New-Object System.Windows.Forms.Label
+$lblItemNote.Location = New-Object System.Drawing.Point(15, 284)
+$lblItemNote.Size = New-Object System.Drawing.Size(710, 68)
+$lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+$lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+$lblItemNote.BorderStyle = "FixedSingle"
+$lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+$lblItemNote.Text = "Click any timer rule above to inspect its kernel/BCD effect."
+$lblItemNote.Anchor = 'Bottom, Left, Right'
 $localData = New-Object System.Collections.ArrayList
 $testLockState = @{ IsLocked = $false }
+$chkList.Add_SelectedIndexChanged({
+if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+$lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+}
+}.GetNewClosure())
 $updateTimerLabel = ({
 param([System.Windows.Forms.Label]$Lbl)
 if ($null -eq $Lbl -or $Lbl.IsDisposed) { return }
@@ -14096,12 +15387,18 @@ $Lbl.ForeColor = [System.Drawing.Color]::OrangeRed
 }
 }.GetNewClosure())
 $refreshData = ({
+$prevIdx = $chkList.SelectedIndex
 $chkList.Items.Clear(); $localData.Clear()
 $auditData = Get-HardwareState_Timer
 foreach ($item in $auditData) {
 [void]$localData.Add($item)
 if ($item.IsOptimized) { [void]$chkList.Items.Add("[ OPTIMIZED ]   " + $item.UIDisplayName, $false) }
 else { [void]$chkList.Items.Add("[ UNOPTIMIZED ] " + $item.UIDisplayName, $true) }
+}
+if ($localData.Count -gt 0) {
+$targetIdx = if ($prevIdx -ge 0 -and $prevIdx -lt $localData.Count) { $prevIdx } else { 0 }
+$chkList.SelectedIndex = $targetIdx
+$lblItemNote.Text = [string]$localData[$targetIdx].Note
 }
 &$updateTimerLabel $lblCurrentTimer
 }.GetNewClosure())
@@ -14122,7 +15419,7 @@ return
 & $ctx.Update $ctx.Label
 })
 $timerPoll.Start()
-$btnEngage = New-UltixButton -Parent $modal -Text "Enforce 0.5ms & TSC" -X 15 -Y 296 -Width 185 -Height 38 -RGB @(150, 60, 60)
+$btnEngage = New-UltixButton -Parent $modal -Text "Enforce 0.5ms & TSC" -X 15 -Y 362 -Width 185 -Height 38 -RGB @(150, 60, 60)
 $btnEngage.Anchor = 'Bottom, Left'
 $btnEngage.Add_Click({
 $applyQueue = @()
@@ -14135,7 +15432,7 @@ Invoke-ApplyTimerTweaks -SelectedItems $applyQueue
 }
 &$refreshData
 }.GetNewClosure())
-$btnRevert = New-UltixButton -Parent $modal -Text "Restore Defaults" -X 208 -Y 296 -Width 155 -Height 38 -RGB @(100, 100, 100)
+$btnRevert = New-UltixButton -Parent $modal -Text "Restore Defaults" -X 208 -Y 362 -Width 155 -Height 38 -RGB @(100, 100, 100)
 $btnRevert.Anchor = 'Bottom, Left'
 $btnRevert.Add_Click({
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
@@ -14153,10 +15450,11 @@ $null = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/enable-device", "
 }
 }
 Write-GUI " -> Reverted Timer Subsystem & BCD flags to OS defaults."
+Set-UltixRebootRequired -Reason "BCD/Timer"
 [System.Windows.Forms.MessageBox]::Show("Default OS timer mechanisms and BCD values restored. HPET enabled. Reboot required.", "Revert Completed")
 &$refreshData
 }.GetNewClosure())
-$btnTestPulse = New-UltixButton -Parent $modal -Text "Test 0.5ms Lock" -X 371 -Y 296 -Width 155 -Height 38 -RGB @(45, 110, 65)
+$btnTestPulse = New-UltixButton -Parent $modal -Text "Test 0.5ms Lock" -X 371 -Y 362 -Width 155 -Height 38 -RGB @(45, 110, 65)
 $btnTestPulse.Anchor = 'Bottom, Left'
 $btnTestPulse.Add_Click({
 if (-not $testLockState.IsLocked) {
@@ -14178,13 +15476,14 @@ Write-GUI " -> Released 0.5ms kernel clock test lock."
 }
 &$updateTimerLabel $lblCurrentTimer
 }.GetNewClosure())
-$btnRefresh = New-UltixButton -Parent $modal -Text "Refresh" -X 534 -Y 296 -Width 95 -Height 38 -RGB @(60, 100, 150)
+$btnRefresh = New-UltixButton -Parent $modal -Text "Refresh" -X 534 -Y 362 -Width 95 -Height 38 -RGB @(60, 100, 150)
 $btnRefresh.Anchor = 'Bottom, Left'
 $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
-$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 637 -Y 296 -Width 88 -Height 38 -RGB @(60, 60, 60)
+$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 637 -Y 362 -Width 88 -Height 38 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Left'
 $btnClose.DialogResult = "Cancel"
-$modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList, $lblCurrentTimer))
+$modal.CancelButton = $btnClose
+$modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList, $lblItemNote, $lblCurrentTimer))
 try {
 [void]$modal.ShowDialog($global:form)
 } finally {
@@ -14202,14 +15501,30 @@ $modal.Dispose()
 function Show-NVMeModal {
 param ([string]$Title, [string]$Description)
 $modal = New-Object System.Windows.Forms.Form
-$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(680, 365); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-$modal.MinimumSize = New-Object System.Drawing.Size(680, 365)
+$modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(680, 440); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+$modal.MinimumSize = New-Object System.Drawing.Size(680, 440)
 $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
-$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(630, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+$lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(630, 38); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
 $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] System reboot is strictly required to apply PCI bus and NVMe driver changes."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(630, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
-$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(630, 160); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(630, 162); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+$lblItemNote = New-Object System.Windows.Forms.Label
+$lblItemNote.Location = New-Object System.Drawing.Point(15, 250)
+$lblItemNote.Size = New-Object System.Drawing.Size(630, 72)
+$lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+$lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+$lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+$lblItemNote.BorderStyle = "FixedSingle"
+$lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+$lblItemNote.Text = "Click any I/O or memory rule above to inspect its hardware effect."
+$lblItemNote.Anchor = 'Bottom, Left, Right'
 $localData = New-Object System.Collections.ArrayList
+$chkList.Add_SelectedIndexChanged({
+if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+$lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+}
+}.GetNewClosure())
 $refreshData = ({
+$prevIdx = $chkList.SelectedIndex
 $modal.UseWaitCursor = $true
 [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
 try {
@@ -14222,13 +15537,18 @@ if ($item.IsOptimized) { [void]$chkList.Items.Add("[ OPTIMIZED ]   " + $item.UID
 else { [void]$chkList.Items.Add("[ UNOPTIMIZED ] " + $item.UIDisplayName, $true) }
 }
 $chkList.EndUpdate()
+if ($localData.Count -gt 0) {
+$targetIdx = if ($prevIdx -ge 0 -and $prevIdx -lt $localData.Count) { $prevIdx } else { 0 }
+$chkList.SelectedIndex = $targetIdx
+$lblItemNote.Text = [string]$localData[$targetIdx].Note
+}
 } finally {
 $modal.UseWaitCursor = $false
 [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 }.GetNewClosure())
 &$refreshData
-$btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 258 -Width 195 -Height 38 -RGB @(150, 60, 60)
+$btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 332 -Width 195 -Height 38 -RGB @(150, 60, 60)
 $btnEngage.Anchor = 'Bottom, Left'
 $btnEngage.Add_Click({
 $applyQueue = @()
@@ -14248,7 +15568,7 @@ $modal.UseWaitCursor = $false
 }
 &$refreshData
 }.GetNewClosure())
-$btnRevert = New-UltixButton -Parent $modal -Text "Restore OS Defaults" -X 218 -Y 258 -Width 185 -Height 38 -RGB @(100, 100, 100)
+$btnRevert = New-UltixButton -Parent $modal -Text "Restore OS Defaults" -X 218 -Y 332 -Width 185 -Height 38 -RGB @(100, 100, 100)
 $btnRevert.Anchor = 'Bottom, Left'
 $btnRevert.Add_Click({
 $modal.UseWaitCursor = $true
@@ -14274,16 +15594,18 @@ $modal.UseWaitCursor = $false
 [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 Write-GUI " -> Restored default PCI ASPM, StorNVMe APST, and MMAgent settings."
+Set-UltixRebootRequired -Reason "PCIe/NVMe"
 [System.Windows.Forms.MessageBox]::Show("Standard PCI/NVMe drivers and Memory Compression restored. Reboot is required to apply bus changes.", "Revert Completed")
 &$refreshData
 }.GetNewClosure())
-$btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 411 -Y 258 -Width 135 -Height 38 -RGB @(60, 100, 150)
+$btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 411 -Y 332 -Width 135 -Height 38 -RGB @(60, 100, 150)
 $btnRefresh.Anchor = 'Bottom, Left'
 $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
-$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 554 -Y 258 -Width 91 -Height 38 -RGB @(60, 60, 60)
+$btnClose = New-UltixButton -Parent $modal -Text "Close" -X 554 -Y 332 -Width 91 -Height 38 -RGB @(60, 60, 60)
 $btnClose.Anchor = 'Bottom, Left'
 $btnClose.DialogResult = "Cancel"
-$modal.Controls.AddRange(@($lblDesc, $chkList, $lblWarning))
+$modal.CancelButton = $btnClose
+$modal.Controls.AddRange(@($lblDesc, $chkList, $lblItemNote, $lblWarning))
 try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 function New-PreFlightShortcut {
@@ -14448,6 +15770,7 @@ if (`$isEngaged) {
 `$btnCancel.DialogResult = "Cancel"
 
 `$frm.Controls.AddRange(@(`$lblStatus, `$chkAff, `$chkCPPC, `$btnEngage, `$btnRelease, `$btnCancel))
+`$frm.CancelButton = `$btnCancel
 `$res = `$frm.ShowDialog()
 if (`$null -ne `$frm.Icon) { `$frm.Icon.Dispose() }
 `$frm.Dispose()
@@ -15185,6 +16508,7 @@ Write-GUI " -> [LIVE QUANTUM] Restored factory Win32PrioritySeparation = 0x02 (2
 }.GetNewClosure())
 $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 610 -Y 425 -Width 120 -Height 38 -RGB @(60, 60, 60)
 $btnClose.DialogResult = "Cancel"
+$modal.CancelButton = $btnClose
 $modal.Controls.AddRange(@($lblDesc, $lblTelemetry, $listBox, $lblDetail))
 try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
@@ -15196,10 +16520,12 @@ $tab.BackColor = [System.Drawing.Color]::FromArgb(255, 40, 40, 42)
 $topo = Get-CPUTopologyProfile
 $lblPreFlight = New-Object System.Windows.Forms.Label
 $lblPreFlight.Text = "Pre-Flight CPU Affinity & CPPC P-State Control"
+$lblPreFlight.AccessibleName = "SectionHeader"
+$lblPreFlight.UseMnemonic = $false
 $lblPreFlight.Location = New-Object System.Drawing.Point(15, 14)
 $lblPreFlight.Size = New-Object System.Drawing.Size(380, 20)
 $lblPreFlight.ForeColor = [System.Drawing.Color]::DarkGray
-$lblPreFlight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$lblPreFlight.Font = Get-UltixFont -Role "SectionHeader"
 if ($topo.IsSupported) {
 [void](New-UltixButton -Parent $tab -X 15 -Y 36 -Width 240 -Height 40 -RGB @(135, 50, 50) `
 -Text "Affinity Lasso (CPU Core Lock)" `
@@ -15220,52 +16546,58 @@ $btnAffinity.Enabled = $false
 -Text "Generate Pre-Flight Shortcut" `
 -Description "Create a desktop shortcut to instantly toggle CPU Affinity Lasso and Max CPPC rules right before launching a game." `
 -OnClick { New-PreFlightShortcut })
-$lblColLeft = New-Object System.Windows.Forms.Label
-$lblColLeft.Text = "Scheduler, Timer & Bus"
-$lblColLeft.Location = New-Object System.Drawing.Point(15, 138)
-$lblColLeft.Size = New-Object System.Drawing.Size(185, 20)
-$lblColLeft.ForeColor = [System.Drawing.Color]::DarkGray
-$lblColLeft.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$lblColRight = New-Object System.Windows.Forms.Label
-$lblColRight.Text = "IRQ, USB & OC Diagnostics"
-$lblColRight.Location = New-Object System.Drawing.Point(205, 138)
-$lblColRight.Size = New-Object System.Drawing.Size(195, 20)
-$lblColRight.ForeColor = [System.Drawing.Color]::DarkGray
-$lblColRight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-[void](New-UltixButton -Parent $tab -X 15 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+$lblTuners = New-Object System.Windows.Forms.Label
+$lblTuners.Text = "Kernel, Bus & Latency Tuners (Backup & Revert)"
+$lblTuners.AccessibleName = "SectionHeader"
+$lblTuners.UseMnemonic = $false
+$lblTuners.Location = New-Object System.Drawing.Point(15, 136)
+$lblTuners.Size = New-Object System.Drawing.Size(370, 19)
+$lblTuners.ForeColor = [System.Drawing.Color]::DarkGray
+$lblTuners.Font = Get-UltixFont -Role "SectionHeader"
+[void](New-UltixButton -Parent $tab -X 15 -Y 157 -Width 180 -Height 38 -RGB @(55, 58, 64) `
 -Text "Quantum Scheduler Matrix" `
--Description "Live Win32PrioritySeparation quantum tuner (0x26, 0x28, 0x2A, 0x16, 0x02). Changes apply in real time without rebooting." `
+-Description "[LIVE / NO REBOOT] Win32PrioritySeparation quantum tuner (0x26, 0x28, 0x2A, 0x16, 0x02). Applies instantly for live A/B testing in games." `
 -OnClick { Show-QuantumSchedulerModal })
-[void](New-UltixButton -Parent $tab -X 205 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+[void](New-UltixButton -Parent $tab -X 205 -Y 157 -Width 180 -Height 38 -RGB @(55, 58, 64) `
 -Text "MSI & IRQ Affinity Enforcer" `
--Description "Force Message Signaled Interrupts (MSI), set Interrupt Priority, offload IRQs from Core 0, and monitor live kernel DPCs." `
+-Description "[REBOOT REQUIRED + LIVE ETW] Force PCI MSI mode, set Interrupt Priority, offload GPU/NIC IRQs from Core 0, and profile live kernel .sys DPC load." `
 -OnClick { Show-MsiModal "MSI & IRQ Affinity Enforcer" "Force PCI devices into MSI mode, adjust interrupt priority, and offload high-DPC drivers (GPU/NIC) from Core 0." })
-[void](New-UltixButton -Parent $tab -X 15 -Y 210 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+[void](New-UltixButton -Parent $tab -X 15 -Y 201 -Width 180 -Height 38 -RGB @(55, 58, 64) `
 -Text "System Timer & TSC (0.5ms)" `
--Description "Fix Windows 11 API to allow global 0.5ms High Resolution Timers and force CPU TSC." `
+-Description "[REBOOT REQUIRED] Fix Windows 11 global 0.5ms timer requests, disable Dynamic Tick/HPET, and verify live timer resolution at 2Hz." `
 -OnClick { Show-TimerModal "Timer Resolution Subsystem" "Enable legacy 0.5ms requests globally and stabilize DPC latency." })
-[void](New-UltixButton -Parent $tab -X 205 -Y 210 -Width 180 -Height 40 -RGB @(45, 85, 125) `
--Text "USB XHCI Topology Map" `
--Description "Maps physical USB XHCI controllers to CPU Direct PCIe lanes vs Chipset PCH bridges, and spots Mouse/DAC/VR bus contention." `
--OnClick { Show-UsbTopologyModal })
-[void](New-UltixButton -Parent $tab -X 15 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+[void](New-UltixButton -Parent $tab -X 205 -Y 201 -Width 180 -Height 38 -RGB @(55, 58, 64) `
 -Text "I/O & Memory Optimizer" `
--Description "Disable NVMe APST, PCIe ASPM, and System Memory Compression to reduce CPU overhead and micro-stuttering." `
+-Description "[REBOOT REQUIRED / LIVE MMAGENT] Disable PCIe ASPM, StorNVMe APST sleep states, and System Memory Compression to eliminate micro-stutters." `
 -OnClick { Show-NVMeModal "I/O & Memory Optimizer" "Prevent NVMe and PCIe bus from entering low-power states (D3hot/L1.2) and disable RAM compression." })
-[void](New-UltixButton -Parent $tab -X 205 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
--Text "Network NDIS & TCP Tuner" `
--Description "Configure low-latency NDIS parameters, TCP properties, and offloads with full symmetric revert." `
+[void](New-UltixButton -Parent $tab -X 15 -Y 245 -Width 370 -Height 36 -RGB @(55, 58, 64) `
+-Text "Network NDIS & TCP Latency Tuner" `
+-Description "[ADAPTER RESTART] Tune low-latency NDIS properties (Interrupt Moderation, EEE, Flow Control), TCPNoDelay, RSS/RSC/LSO with full backup & revert." `
 -OnClick { Show-NetworkModal "Network Optimizer" "Disable flow control, power saving, interrupt moderation, and enforce TCPNoDelay." })
-[void](New-UltixButton -Parent $tab -X 15 -Y 310 -Width 370 -Height 40 -RGB @(45, 85, 125) `
--Text "WHEA Hardware Error Logger & OC Decoder" `
--Description "Scan system logs for hardware instability (Curve Optimizer / FCLK / DDR5 timings) and decode APIC IDs to physical CPU cores." `
--OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores or RAM." })
+$lblDiag = New-Object System.Windows.Forms.Label
+$lblDiag.Text = "Hardware Diagnostics (Read-Only / Safe to Scan)"
+$lblDiag.AccessibleName = "SectionHeader"
+$lblDiag.UseMnemonic = $false
+$lblDiag.Location = New-Object System.Drawing.Point(15, 289)
+$lblDiag.Size = New-Object System.Drawing.Size(370, 19)
+$lblDiag.ForeColor = [System.Drawing.Color]::LightSkyBlue
+$lblDiag.Font = Get-UltixFont -Role "SectionHeader"
+[void](New-UltixButton -Parent $tab -X 15 -Y 310 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+-Text "USB XHCI Topology Map" `
+-Description "[READ-ONLY DIAGNOSTIC] Maps physical USB XHCI controllers to CPU Direct PCIe lanes vs Chipset PCH bridges and flags Mouse/DAC/VR contention." `
+-OnClick { Show-UsbTopologyModal })
+[void](New-UltixButton -Parent $tab -X 205 -Y 310 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+-Text "WHEA OC Error Decoder" `
+-Description "[READ-ONLY DIAGNOSTIC] Scans System Event Logs for CPU/FCLK/DDR5/PCIe instability, maps APIC IDs to physical cores, and inspects raw MCA logs." `
+-OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores, FCLK, DDR5 timings, or PCIe links." })
 $lblDpcHeader = New-Object System.Windows.Forms.Label
 $lblDpcHeader.Text = "Live Kernel Interrupt & DPC Monitor (ntdll.dll)"
+$lblDpcHeader.AccessibleName = "SectionHeader"
+$lblDpcHeader.UseMnemonic = $false
 $lblDpcHeader.Location = New-Object System.Drawing.Point(15, 365)
 $lblDpcHeader.Size = New-Object System.Drawing.Size(380, 20)
 $lblDpcHeader.ForeColor = [System.Drawing.Color]::DarkGray
-$lblDpcHeader.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$lblDpcHeader.Font = Get-UltixFont -Role "SectionHeader"
 $lblTabDpc = New-Object System.Windows.Forms.Label
 $lblTabDpc.Location = New-Object System.Drawing.Point(15, 387)
 $lblTabDpc.Size = New-Object System.Drawing.Size(370, 68)
@@ -15355,7 +16687,7 @@ $t.Stop()
 $t.Dispose()
 }
 })
-$tab.Controls.AddRange(@($lblPreFlight, $lblColLeft, $lblColRight, $lblDpcHeader, $lblTabDpc, $lblTabLegend))
+$tab.Controls.AddRange(@($lblPreFlight, $lblTuners, $lblDiag, $lblDpcHeader, $lblTabDpc, $lblTabLegend))
 $TabControl.Controls.Add($tab)
 }
 $Global:UltixToolkitFunctions = [System.Collections.Generic.List[string]]::new()
@@ -15394,7 +16726,7 @@ $global:infoBox.DetectUrls = $false
 $global:infoBox.ScrollBars = "Vertical"
 $global:infoBox.Font = New-Object System.Drawing.Font("Consolas", 10)
 $global:infoBox.Anchor = 'Top, Bottom, Left, Right'
-Write-UltixSystemBanner -StatusMessage "Ready for deployment. Modular architecture loaded successfully."
+Write-UltixSystemBanner -StatusMessage "Ready for deployment. Modular architecture loaded successfully." -ShowQuickGuide
 $global:tabControl = New-Object WinUltix.DarkTabControl
 $global:tabControl.Font = Get-UltixFont -Role "TabHeader"
 $global:tabControl.Location = New-Object System.Drawing.Point(10, 20)
@@ -15413,6 +16745,8 @@ Initialize-Z4UI -TabControl $global:tabControl
 Initialize-Z5UI -TabControl $global:tabControl
 Initialize-Z6UI -TabControl $global:tabControl
 Initialize-Z7UI -TabControl $global:tabControl
+$global:tabControl.Add_SelectedIndexChanged({ Restore-Log })
+Restore-Log
 $footerFont = Get-UltixFont -Role "FooterButton"
 $global:btnExpertConsole = New-Object System.Windows.Forms.Button
 $global:btnExpertConsole.Text = "[ Expert: OFF ]"
@@ -15482,6 +16816,8 @@ $btnExportLog.FlatStyle = "Flat"
 $btnExportLog.Anchor = 'Bottom, Right'
 $btnExportLog.AccessibleName = "FooterButton"
 $btnExportLog.Font = Get-UltixFittedFont -Control $btnExportLog -Role "FooterButton"
+$btnExportLog.Add_MouseEnter({ Show-Description "Exports the current main diagnostic log to a UTF-8 timestamped .txt file on your Desktop." })
+$btnExportLog.Add_MouseLeave({ Restore-Log })
 $btnExportLog.Add_Click({
 if ($global:infoBox.Text.Length -gt 0) {
 try {
@@ -15507,6 +16843,8 @@ $btnClearLog.FlatStyle = "Flat"
 $btnClearLog.Anchor = 'Bottom, Right'
 $btnClearLog.AccessibleName = "FooterButton"
 $btnClearLog.Font = Get-UltixFittedFont -Control $btnClearLog -Role "FooterButton"
+$btnClearLog.Add_MouseEnter({ Show-Description "Clears the main log output and reprints the live hardware & OS system banner." })
+$btnClearLog.Add_MouseLeave({ Restore-Log })
 $btnClearLog.Add_Click({
 $global:infoBox.Clear()
 Write-UltixSystemBanner -StatusMessage "Ready for deployment."
@@ -15522,6 +16860,8 @@ $btnCredits.FlatStyle = "Flat"
 $btnCredits.Anchor = 'Bottom, Left'
 $btnCredits.AccessibleName = "FooterButton"
 $btnCredits.Font = Get-UltixFittedFont -Control $btnCredits -Role "FooterButton"
+$btnCredits.Add_MouseEnter({ Show-Description "Displays WinUltix version info, engineering credits, GitHub repository, and support links." })
+$btnCredits.Add_MouseLeave({ Restore-Log })
 $btnCredits.Add_Click({
 $aboutForm = New-Object System.Windows.Forms.Form
 $aboutForm.Text = "About WinUltix"
@@ -15536,19 +16876,25 @@ $picLogo = New-Object System.Windows.Forms.PictureBox
 $picLogo.Location = New-Object System.Drawing.Point(20, 22)
 $picLogo.Size = New-Object System.Drawing.Size(64, 64)
 $picLogo.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+$disposeSrcLogo = $false
 $srcLogo = if ($null -ne $global:UltixHighResLogo) {
 $global:UltixHighResLogo
 } elseif ($null -ne $global:UltixAppIcon) {
+$disposeSrcLogo = $true
 $global:UltixAppIcon.ToBitmap()
 } else { $null }
 if ($null -ne $srcLogo) {
 $bmpLogo = New-Object System.Drawing.Bitmap(64, 64, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $gLogo   = [System.Drawing.Graphics]::FromImage($bmpLogo)
+try {
 $gLogo.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
 $gLogo.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
 $gLogo.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
 $gLogo.DrawImage($srcLogo, 0, 0, 64, 64)
+} finally {
 $gLogo.Dispose()
+if ($disposeSrcLogo) { $srcLogo.Dispose() }
+}
 $picLogo.Image = $bmpLogo
 }
 $lblTitle = New-Object System.Windows.Forms.Label
@@ -15587,8 +16933,10 @@ $btnAboutOK.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawi
 $btnAboutOK.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
 $btnAboutOK.ForeColor = [System.Drawing.Color]::White
 $btnAboutOK.FlatStyle = "Flat"
+$btnAboutOK.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
 $btnAboutOK.Add_Click({ $aboutForm.Close() })
 $aboutForm.Controls.AddRange(@($picLogo, $lblTitle, $lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
+$aboutForm.CancelButton = $btnAboutOK
 try {
 [void]$aboutForm.ShowDialog($global:form)
 } finally {
@@ -15624,6 +16972,27 @@ $btnImportProfile.Font = Get-UltixFittedFont -Control $btnImportProfile -Role "F
 $btnImportProfile.Add_MouseEnter({ Show-Description "Imports and enforces a previously saved WinUltix JSON configuration snapshot on this machine." })
 $btnImportProfile.Add_MouseLeave({ Restore-Log })
 $btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
+$logCtxMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miLogCopy = $logCtxMenu.Items.Add("Copy Selected Text   [Ctrl+C]")
+$miLogCopy.Add_Click({
+if ($global:infoBox.SelectionLength -gt 0) {
+try { $global:infoBox.Copy() } catch { }
+}
+})
+$miLogSelAll = $logCtxMenu.Items.Add("Select All   [Ctrl+A]")
+$miLogSelAll.Add_Click({ $global:infoBox.SelectAll() })
+[void]$logCtxMenu.Items.Add("-")
+$miLogExport = $logCtxMenu.Items.Add("Export Log to Desktop")
+$miLogExport.Add_Click({ $btnExportLog.PerformClick() }.GetNewClosure())
+$miLogClear = $logCtxMenu.Items.Add("Clear Log")
+$miLogClear.Add_Click({ $btnClearLog.PerformClick() }.GetNewClosure())
+$logCtxMenu.Add_Opening({
+param($src, $e)
+$miLogCopy.Enabled   = ($global:infoBox.SelectionLength -gt 0)
+$miLogSelAll.Enabled = ($global:infoBox.TextLength -gt 0)
+$miLogExport.Enabled = ($global:infoBox.TextLength -gt 0)
+}.GetNewClosure())
+$global:infoBox.ContextMenuStrip = $logCtxMenu
 $global:form.Controls.AddRange(@(
 $global:btnExpertConsole, $global:btnFontDec, $global:btnFontInc, $btnClearLog, $btnExportLog, $global:progBar,
 $btnCredits, $btnExportProfile, $btnImportProfile,
@@ -15663,6 +17032,7 @@ try { if ($null -ne $task.Runspace) { $task.Runspace.Close(); $task.Runspace.Dis
 $global:UltixActiveTasks.Clear()
 }
 try { [WinUltix.ExpertConsole]::Shutdown() } catch { }
+if ($null -ne $logCtxMenu) { $logCtxMenu.Dispose() }
 $global:form.Dispose()
 if ($null -ne $global:UltixFontCache) {
 foreach ($fObj in $global:UltixFontCache.Values) {

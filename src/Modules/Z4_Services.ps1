@@ -382,6 +382,10 @@ function Invoke-ApplyServices {
                 $shouldAutoStart = ($Op -eq 'Revert' -and $targetValue -eq 2)
                 Set-ProtectedServiceStart -ServiceName $svc.Name -StartValue $targetValue -StartService:$shouldAutoStart -Module "Z4_Services"
 
+                if ($Op -eq 'Revert' -and $svc.Name -match '^(?i)(WaaSMedicSvc|DoSvc)$') {
+                    Set-UltixRebootRequired -Reason "Services (TI)"
+                }
+
                 # Also update UserServiceFlags (0 = disabled) for Per-User service templates when disabling
                 $svcType = (Get-ItemProperty -LiteralPath $svcRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
                 $isPerUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
@@ -393,8 +397,13 @@ function Invoke-ApplyServices {
                 }
 
                 if ($isPerUserTemplate) {
-                    Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue | ForEach-Object {
-                        Set-ProtectedServiceStart -ServiceName $_.Name -StartValue $targetValue -Module "Z4_Services"
+                    $subSvcs = @(Get-Service -Name "$($svc.Name)_*" -ErrorAction SilentlyContinue)
+                    try {
+                        foreach ($sub in $subSvcs) {
+                            Set-ProtectedServiceStart -ServiceName $sub.Name -StartValue $targetValue -Module "Z4_Services"
+                        }
+                    } finally {
+                        foreach ($sub in $subSvcs) { if ($null -ne $sub) { $sub.Dispose() } }
                     }
                 }
 
@@ -485,6 +494,7 @@ function Get-SystemServicesTable_Worker {
             })
         }
     } finally {
+        foreach ($s in $rawServices) { if ($null -ne $s) { $s.Dispose() } }
         if ($null -ne $svcRoot) { $svcRoot.Dispose() }
     }
 
@@ -509,6 +519,7 @@ function Show-ServicesGrid {
         $modal.MinimumSize = New-Object System.Drawing.Size(980, 580)
         $modal.StartPosition = "CenterParent"
         $modal.FormBorderStyle = "Sizable"
+        $modal.KeyPreview = $true
         $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 26, 27, 30)
         $modal.ForeColor = [System.Drawing.Color]::White
         $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
@@ -829,6 +840,9 @@ function Show-ServicesGrid {
 
                                 if ($curStart -eq 4 -or $baseStart -eq 4) {
                                     $UltixSync.Logs.Enqueue(" -> Auto-unlocking Disabled service '$sName' to Manual (Start=3) & Starting...")
+                                    if ($baseSvcName -match '^(?i)(WaaSMedicSvc|DoSvc)$') {
+                                        Set-UltixRebootRequired -Reason "Services (TI)"
+                                    }
                                     $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
                                     $isUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
                                     if ($isUserTemplate) {
@@ -874,12 +888,14 @@ function Show-ServicesGrid {
                                 $UltixSync.Logs.Enqueue(" -> Setting StartType [$modeLabel]: $sName ($($svc.DisplayName))")
                                 Set-ProtectedServiceStart -ServiceName $sName -StartValue $targetStart -Module "Z4_Services"
 
+                                $isPerUserTemplate = $false
                                 if (Test-Path -LiteralPath $baseRegPath) {
                                     if ($baseSvcName -ne $sName) {
                                         Set-ProtectedServiceStart -ServiceName $baseSvcName -StartValue $targetStart -Module "Z4_Services"
                                     }
                                     $svcType = (Get-ItemProperty -LiteralPath $baseRegPath -Name "Type" -ErrorAction SilentlyContinue).Type
-                                    if ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0)) {
+                                    $isPerUserTemplate = ($null -ne $svcType -and (([int]$svcType -band 0x40) -ne 0))
+                                    if ($isPerUserTemplate) {
                                         try {
                                             Set-UltixRegValue -Path $baseRegPath -Name "UserServiceFlags" -Value $flagVal -Type DWord -Module "Z4_Services"
                                         } catch { }
@@ -892,9 +908,12 @@ function Show-ServicesGrid {
                                 }
 
                                 if ($targetStart -eq 4) {
-                                    Stop-UltixService -ServiceName $baseSvcName -IncludePerUserInstances:($baseSvcName -ne $sName) -Module "Z4_Services"
+                                    Stop-UltixService -ServiceName $baseSvcName -IncludePerUserInstances:($isPerUserTemplate -or $baseSvcName -ne $sName) -Module "Z4_Services"
                                     $UltixSync.Logs.Enqueue("    [OK] $sName locked to Disabled (Start=4) and stopped.")
                                 } else {
+                                    if ($baseSvcName -match '^(?i)(WaaSMedicSvc|DoSvc)$') {
+                                        Set-UltixRebootRequired -Reason "Services (TI)"
+                                    }
                                     $UltixSync.Logs.Enqueue("    [OK] $sName StartType updated to $modeLabel in Registry & live SCM.")
                                 }
                             }
@@ -965,6 +984,56 @@ function Show-ServicesGrid {
 
         $txtSearch.Add_TextChanged({ & $state.PopulateList $state.TxtSearch.Text }.GetNewClosure())
 
+        $txtSearch.Add_KeyDown({
+            param($src, $e)
+            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+                $e.SuppressKeyPress = $true
+                [void]$state.ListView.Focus()
+            }
+        }.GetNewClosure())
+
+        $copySelectedServices = ({
+            if ($state.ListView.SelectedItems.Count -eq 0) { return }
+            $buf = [System.Collections.Generic.List[string]]::new()
+            foreach ($sel in $state.ListView.SelectedItems) {
+                $buf.Add("$($sel.Text) | $($sel.SubItems[1].Text) | $($sel.SubItems[2].Text) | $($sel.SubItems[3].Text)")
+            }
+            if ($buf.Count -gt 0) {
+                try { [System.Windows.Forms.Clipboard]::SetText($buf -join "`r`n") } catch { }
+            }
+        }.GetNewClosure())
+
+        $svcCtxMenu = New-Object System.Windows.Forms.ContextMenuStrip
+        $miCopySvcRow = $svcCtxMenu.Items.Add("Copy Selected Row   [Ctrl+C]")
+        $miCopySvcRow.Add_Click({ & $copySelectedServices }.GetNewClosure())
+        $miCopySvcName = $svcCtxMenu.Items.Add("Copy Service Name")
+        $miCopySvcName.Add_Click({
+            if ($state.ListView.SelectedItems.Count -gt 0) {
+                try { [System.Windows.Forms.Clipboard]::SetText([string]$state.ListView.SelectedItems[0].Text) } catch { }
+            }
+        }.GetNewClosure())
+        $svcCtxMenu.Add_Opening({
+            param($src, $e)
+            $hasSel = ($state.ListView.SelectedItems.Count -gt 0)
+            $miCopySvcRow.Enabled  = $hasSel
+            $miCopySvcName.Enabled = $hasSel
+        }.GetNewClosure())
+        $listView.ContextMenuStrip = $svcCtxMenu
+
+        $modal.Add_KeyDown({
+            param($src, $e)
+            if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+                [void]$state.TxtSearch.Focus()
+                $state.TxtSearch.SelectAll()
+                $e.SuppressKeyPress = $true
+            } elseif ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C) {
+                if ($state.ListView.Focused -and $state.ListView.SelectedItems.Count -gt 0) {
+                    & $copySelectedServices
+                    $e.SuppressKeyPress = $true
+                }
+            }
+        }.GetNewClosure())
+
         $btnSelVis.Add_Click({
             $state.SuppressEvents = $true
             $state.ListView.BeginUpdate()
@@ -1011,6 +1080,7 @@ function Show-ServicesGrid {
         try {
             [void]$modal.ShowDialog($global:form)
         } finally {
+            $svcCtxMenu.Dispose()
             $modal.Dispose()
         }
     }.GetNewClosure())

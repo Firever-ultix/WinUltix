@@ -461,9 +461,33 @@ function Get-HardwareState_CPPC {
     $dispPr = if ($null -ne $pr) { "$pr%" } else { "Unknown" }
 
     $rules = @(
-        @{ KeyId = "EPP";     UIDisplayName = "Unhide: EPP [Current AC: $dispE]";          Path = "$basePath\36687f9e-e3a5-4dbf-b1dc-15eb381c6863"; Name = "Attributes"; Expected = 2; Type = "Registry" }
-        @{ KeyId = "Demote";  UIDisplayName = "Unhide: Idle Demote [Current AC: $dispD]";  Path = "$basePath\4b92d758-5a24-4851-a470-815d78aee119"; Name = "Attributes"; Expected = 2; Type = "Registry" }
-        @{ KeyId = "Promote"; UIDisplayName = "Unhide: Idle Promote [Current AC: $dispPr]"; Path = "$basePath\7b224883-b3cc-4d79-819f-8374152cbe7c"; Name = "Attributes"; Expected = 2; Type = "Registry" }
+        @{
+            KeyId         = "EPP"
+            UIDisplayName = "Unhide: EPP [Current AC: $dispE]"
+            Path          = "$basePath\36687f9e-e3a5-4dbf-b1dc-15eb381c6863"
+            Name          = "Attributes"
+            Expected      = 2
+            Type          = "Registry"
+            Note          = "[LIVE / NO REBOOT] Energy Performance Preference (0% = Max Boost, 100% = Power Saving). Unhiding exposes it in Power Options; ENGAGE locks EPP to 0% with a SYSTEM failsafe."
+        }
+        @{
+            KeyId         = "Demote"
+            UIDisplayName = "Unhide: Idle Demote [Current AC: $dispD]"
+            Path          = "$basePath\4b92d758-5a24-4851-a470-815d78aee119"
+            Name          = "Attributes"
+            Expected      = 2
+            Type          = "Registry"
+            Note          = "[LIVE / NO REBOOT] Processor Idle Demote Threshold. Locking to 100% prevents CPU cores from dropping into deep C-States during gaming (eliminates wake-up stutter)."
+        }
+        @{
+            KeyId         = "Promote"
+            UIDisplayName = "Unhide: Idle Promote [Current AC: $dispPr]"
+            Path          = "$basePath\7b224883-b3cc-4d79-819f-8374152cbe7c"
+            Name          = "Attributes"
+            Expected      = 2
+            Type          = "Registry"
+            Note          = "[LIVE / NO REBOOT] Processor Idle Promote Threshold. Locking to 100% keeps active cores out of idle sleep states until you click RELEASE (or reboot)."
+        }
     )
 
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -475,6 +499,7 @@ function Get-HardwareState_CPPC {
         $results.Add([PSCustomObject]@{
             UIDisplayName = $rule.UIDisplayName
             IsDetected    = $isDetected
+            Note          = $rule.Note
             ActionData    = $rule
         })
     }
@@ -979,10 +1004,20 @@ function Get-HardwareState_Network {
     $globalOffload = Get-NetOffloadGlobalSetting -ErrorAction SilentlyContinue
     if ($globalOffload) {
         $isGlobalRssOpt = ($globalOffload.ReceiveSideScaling -eq 'Enabled')
-        $results.Add([PSCustomObject]@{ UIDisplayName = "[Global] TCP Receive-Side Scaling (RSS)"; IsOptimized = $isGlobalRssOpt; ActionData = @{ Type="GlobalRSS" } })
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = "[Global] TCP Receive-Side Scaling (RSS)"
+            IsOptimized   = $isGlobalRssOpt
+            Note          = "[LIVE / NO REBOOT] Enables global TCP Receive-Side Scaling so network DPC processing spreads across multiple CPU cores instead of saturating Core 0."
+            ActionData    = @{ Type="GlobalRSS" }
+        })
         
         $isGlobalRscOpt = ($globalOffload.ReceiveSegmentCoalescing -eq 'Disabled')
-        $results.Add([PSCustomObject]@{ UIDisplayName = "[Global] TCP Recv Segment Coalescing (RSC)"; IsOptimized = $isGlobalRscOpt; ActionData = @{ Type="GlobalRSC" } })
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = "[Global] TCP Recv Segment Coalescing (RSC)"
+            IsOptimized   = $isGlobalRscOpt
+            Note          = "[LIVE / NO REBOOT] Disables global TCP Receive Segment Coalescing. Stops Windows from buffering and batching incoming packets, reducing online ping jitter."
+            ActionData    = @{ Type="GlobalRSC" }
+        })
     }
 
     $adapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)
@@ -1003,24 +1038,34 @@ function Get-HardwareState_Network {
         $tcpNoDelay = (Get-ItemProperty -Path $tcpPath -Name "TCPNoDelay" -ErrorAction SilentlyContinue).TCPNoDelay
         $tcpAck = (Get-ItemProperty -Path $tcpPath -Name "TcpAckFrequency" -ErrorAction SilentlyContinue).TcpAckFrequency
         $isTcpOpt = ($tcpNoDelay -eq 1 -and $tcpAck -eq 1)
-        $results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] TCPNoDelay & AckFrequency"; IsOptimized = $isTcpOpt; ActionData = @{ Type="TCP"; AdapterName=$name; InterfaceGuid=$adapter.InterfaceGuid } })
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = "[$adapterDispName] TCPNoDelay & AckFrequency"
+            IsOptimized   = $isTcpOpt
+            Note          = "[ADAPTER RESTART] Sets TCPNoDelay=1 & TcpAckFrequency=1 (disables Nagle's algorithm). Dispatches small TCP packets immediately instead of waiting for ACKs."
+            ActionData    = @{ Type="TCP"; AdapterName=$name; InterfaceGuid=$adapter.InterfaceGuid }
+        })
 
         # 2. Power Management (Registry PnPCapabilities)
         $enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($adapter.PnPDeviceID)"
         $caps = (Get-ItemProperty -Path $enumPath -Name "PnPCapabilities" -ErrorAction SilentlyContinue).PnPCapabilities
         $isPowerOpt = ($caps -eq 24)
-        $results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Power Management (Sleep)"; IsOptimized = $isPowerOpt; ActionData = @{ Type="Power"; RegPath=$enumPath; InterfaceGuid=$adapter.InterfaceGuid } })
+        $results.Add([PSCustomObject]@{
+            UIDisplayName = "[$adapterDispName] Power Management (Sleep)"
+            IsOptimized   = $isPowerOpt
+            Note          = "[REBOOT / ADAPTER RESTART] Writes PnPCapabilities=24 so Windows never powers down the NIC during idle windows (prevents sudden micro-disconnects)."
+            ActionData    = @{ Type="Power"; RegPath=$enumPath; InterfaceGuid=$adapter.InterfaceGuid }
+        })
 
         # 3. NDIS Advanced Properties (Single CIM query per adapter + exact -eq match to prevent *EEE wildcard collisions)
         $ndisTweaks = [ordered]@{
-            "*InterruptModeration" = @{ Opt = "0";    Def = "1" }
-            "*FlowControl"         = @{ Opt = "0";    Def = "3" }
-            "*JumboPacket"         = @{ Opt = "1514"; Def = "1514" }
-            "*EEE"                 = @{ Opt = "0";    Def = "1" }
-            "EEELinkAdvertisement" = @{ Opt = "0";    Def = "1" }
-            "AdvancedEEE"          = @{ Opt = "0";    Def = "1" }
-            "EnableGreenEthernet"  = @{ Opt = "0";    Def = "1" }
-            "PowerSavingMode"      = @{ Opt = "0";    Def = "1" }
+            "*InterruptModeration" = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables NIC interrupt coalescing so arriving packets raise IRQs immediately instead of waiting in a driver batching window." }
+            "*FlowControl"         = @{ Opt = "0";    Def = "3";    Note = "[ADAPTER RESTART] Disables IEEE 802.3x Pause Frames. Prevents switch/router backpressure stalls during bursty traffic on gaming LANs." }
+            "*JumboPacket"         = @{ Opt = "1514"; Def = "1514"; Note = "[ADAPTER RESTART] Locks standard 1514-byte Ethernet MTU. Avoids packet fragmentation overhead with internet routers and game servers." }
+            "*EEE"                 = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables Energy-Efficient Ethernet (802.3az). Eliminates multi-millisecond PHY wake-up latency spikes after short idle gaps." }
+            "EEELinkAdvertisement" = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Stops the NIC from negotiating Energy-Efficient Ethernet low-power idle states with your router or switch." }
+            "AdvancedEEE"          = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables vendor Advanced EEE link power-down transitions that introduce periodic ping spikes." }
+            "EnableGreenEthernet"  = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables Realtek Green Ethernet PHY power throttling to maintain constant link responsiveness." }
+            "PowerSavingMode"      = @{ Opt = "0";    Def = "1";    Note = "[ADAPTER RESTART] Disables adapter Power Saving Mode so transceiver clocks stay locked at full speed." }
         }
         $allAdvProps = @(Get-NetAdapterAdvancedProperty -Name $name -ErrorAction SilentlyContinue)
         foreach ($key in $ndisTweaks.Keys) {
@@ -1034,6 +1079,7 @@ function Get-HardwareState_Network {
                 $results.Add([PSCustomObject]@{
                     UIDisplayName = "[$adapterDispName] NDIS: $propDispName"
                     IsOptimized   = $isNdisOpt
+                    Note          = $ndisTweaks[$key].Note
                     ActionData    = @{
                         Type          = "NDIS"
                         AdapterName   = $name
@@ -1052,25 +1098,45 @@ function Get-HardwareState_Network {
         $rss = Get-NetAdapterRss -Name $name -ErrorAction SilentlyContinue
         if ($rss) { 
             $isRssOpt = ([bool]$rss.Enabled -eq $true)
-            $results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Receive Side Scaling (RSS)"; IsOptimized = $isRssOpt; ActionData = @{ Type="RSS"; AdapterName=$name } }) 
+            $results.Add([PSCustomObject]@{
+                UIDisplayName = "[$adapterDispName] Receive Side Scaling (RSS)"
+                IsOptimized   = $isRssOpt
+                Note          = "[ADAPTER RESTART] Keeps per-adapter Receive Side Scaling enabled so incoming packet queues distribute across multiple CPU cores."
+                ActionData    = @{ Type="RSS"; AdapterName=$name }
+            }) 
         }
 
         $rsc = Get-NetAdapterRsc -Name $name -ErrorAction SilentlyContinue
         if ($rsc) { 
             $isRscOpt = ([bool]$rsc.IPv4Enabled -eq $false)
-            $results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Recv Segment Coalescing (RSC)"; IsOptimized = $isRscOpt; ActionData = @{ Type="RSC"; AdapterName=$name } }) 
+            $results.Add([PSCustomObject]@{
+                UIDisplayName = "[$adapterDispName] Recv Segment Coalescing (RSC)"
+                IsOptimized   = $isRscOpt
+                Note          = "[ADAPTER RESTART] Disables per-adapter IPv4 Receive Segment Coalescing to prevent packet batching delays in real-time games."
+                ActionData    = @{ Type="RSC"; AdapterName=$name }
+            }) 
         }
 
         $lso = Get-NetAdapterLso -Name $name -ErrorAction SilentlyContinue
         if ($lso) { 
             $isLsoOpt = ([bool]$lso.IPv4Enabled -eq $false)
-            $results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Large Send Offload (LSO)"; IsOptimized = $isLsoOpt; ActionData = @{ Type="LSO"; AdapterName=$name } }) 
+            $results.Add([PSCustomObject]@{
+                UIDisplayName = "[$adapterDispName] Large Send Offload (LSO)"
+                IsOptimized   = $isLsoOpt
+                Note          = "[ADAPTER RESTART] Disables IPv4 Large Send Offload so the NIC stops buffering outgoing segments into oversized frames before transmission."
+                ActionData    = @{ Type="LSO"; AdapterName=$name }
+            }) 
         }
 
         $cso = Get-NetAdapterChecksumOffload -Name $name -ErrorAction SilentlyContinue
         if ($cso) { 
             $isCsoOpt = ([bool]$cso.IpIPv4Enabled -eq $true -and [bool]$cso.TcpIPv4Enabled -eq $true)
-            $results.Add([PSCustomObject]@{ UIDisplayName = "[$adapterDispName] Checksum Offload (CSO)"; IsOptimized = $isCsoOpt; ActionData = @{ Type="CSO"; AdapterName=$name } }) 
+            $results.Add([PSCustomObject]@{
+                UIDisplayName = "[$adapterDispName] Checksum Offload (CSO)"
+                IsOptimized   = $isCsoOpt
+                Note          = "[ADAPTER RESTART] Keeps hardware IPv4/TCP/UDP checksum offloading active on NIC silicon to save CPU cycles without adding latency."
+                ActionData    = @{ Type="CSO"; AdapterName=$name }
+            }) 
         }
     }
     if ($null -ne $UltixSync) { $UltixSync.Progress = 100 }
@@ -1087,6 +1153,7 @@ function Get-HardwareState_Timer {
         UIDisplayName = "Global Timer Resolution (Kernel Fix)"
         IsOptimized   = $isGlobalOpt
         ActionData    = @{ Type = "Reg"; Path = $regPath; Name = "GlobalTimerResolutionRequests"; Value = 1 }
+        Note          = "[REBOOT REQUIRED] Restores pre-Windows 11 global timer propagation so a 0.5ms request applies system-wide instead of being scoped to one process."
     })
     
     $hpetInstance = $null
@@ -1106,6 +1173,7 @@ function Get-HardwareState_Timer {
             UIDisplayName = "Disable HPET (Device Manager)"
             IsOptimized   = $isHpetDisabled
             ActionData    = @{ Type = "PNP"; Instance = $hpetInstance }
+            Note          = "[REBOOT REQUIRED] Disables the legacy ACPI HPET device node (ACPI\PNP0103) so the kernel relies purely on the much faster invariant CPU TSC."
         })
     }
 
@@ -1139,12 +1207,14 @@ function Get-HardwareState_Timer {
         UIDisplayName = "Disable Dynamic Tick (Power Saving)"
         IsOptimized   = $dynTickOpt
         ActionData    = @{ Type = "BCD"; Cmd = "disabledynamictick yes" }
+        Note          = "[REBOOT REQUIRED] Sets BCD disabledynamictick=yes. Prevents the OS clock tick from stopping during idle windows, eliminating timer wake-up jitter on desktops."
     })
 
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Disable Platform Clock (Force TSC)"
         IsOptimized   = $platClockOpt
         ActionData    = @{ Type = "BCD"; Cmd = "useplatformclock no" }
+        Note          = "[REBOOT REQUIRED] Deletes BCD useplatformclock=yes so Windows never forces the slow motherboard HPET/PMTimer over the CPU's native TSC."
     })
 
     return @($results)
@@ -1165,18 +1235,33 @@ function Get-HardwareState_NVMe {
     $pciPath = "HKLM:\SYSTEM\CurrentControlSet\Services\PCI\Parameters"
     $aspm = (Get-ItemProperty -LiteralPath $pciPath -Name "DisableASPM" -ErrorAction SilentlyContinue).DisableASPM
     $isAspmOpt = ($null -ne $aspm -and $aspm -eq 1)
-    $results.Add([PSCustomObject]@{ UIDisplayName = "PCIe ASPM Global Bus Lock (DisableASPM)"; IsOptimized = $isAspmOpt; ActionData = @{ Type="Reg"; Path=$pciPath; Name="DisableASPM"; Val=1 } })
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "PCIe ASPM Global Bus Lock (DisableASPM)"
+        IsOptimized   = $isAspmOpt
+        Note          = "[REBOOT REQUIRED] Disables PCIe Active State Power Management (L0s/L1/L1.2) globally. Eliminates GPU & NVMe link wake-up micro-stutters on desktop PCs."
+        ActionData    = @{ Type="Reg"; Path=$pciPath; Name="DisableASPM"; Val=1 }
+    })
 
     $nvmePath = "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme\Parameters\Device"
     $nvmeIdle = (Get-ItemProperty -LiteralPath $nvmePath -Name "IdlePowerMode" -ErrorAction SilentlyContinue).IdlePowerMode
     $isNvmeIdleOpt = ($null -ne $nvmeIdle -and $nvmeIdle -eq 0)
-    $results.Add([PSCustomObject]@{ UIDisplayName = "StorNVMe APST Driver Lock (IdlePowerMode)"; IsOptimized = $isNvmeIdleOpt; ActionData = @{ Type="Reg"; Path=$nvmePath; Name="IdlePowerMode"; Val=0 } })
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "StorNVMe APST Driver Lock (IdlePowerMode)"
+        IsOptimized   = $isNvmeIdleOpt
+        Note          = "[REBOOT REQUIRED] Sets StorNVMe IdlePowerMode=0 to block NVMe APST sleep transitions (D3hot), preventing asset-streaming hitches when drives wake up."
+        ActionData    = @{ Type="Reg"; Path=$nvmePath; Name="IdlePowerMode"; Val=0 }
+    })
 
     $sysMainStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain" -Name "Start" -ErrorAction SilentlyContinue).Start
     $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
     # When SysMain is disabled (Start=4), Memory Compression is inactive at the kernel level and Get-MMAgent returns $null
     $isMemOpt = if ($null -ne $mmAgent) { ($mmAgent.MemoryCompression -eq $false) } else { ($sysMainStart -eq 4) }
-    $results.Add([PSCustomObject]@{ UIDisplayName = "System Memory Compression (MMAgent)"; IsOptimized = $isMemOpt; ActionData = @{ Type="MMAgent" } })
+    $results.Add([PSCustomObject]@{
+        UIDisplayName = "System Memory Compression (MMAgent)"
+        IsOptimized   = $isMemOpt
+        Note          = "[LIVE / NO REBOOT] Disables Windows Memory Compression (MMAgent). Eliminates background compression CPU overhead & DPC spikes on 32GB+ RAM systems."
+        ActionData    = @{ Type="MMAgent" }
+    })
 
     return @($results)
 }
@@ -1375,7 +1460,8 @@ function Update-NetworkModalList {
         [Parameter(Mandatory=$true)][System.Windows.Forms.Form]$Modal,
         [Parameter(Mandatory=$true)][System.Windows.Forms.CheckedListBox]$ChkList,
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Collections.ArrayList]$LocalData,
-        [Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable,
+        [System.Windows.Forms.Label]$NoteLabel = $null
     )
 
     if ($Modal.IsDisposed -or $ChkList.IsDisposed) { return }
@@ -1383,6 +1469,7 @@ function Update-NetworkModalList {
     $uiModal     = $Modal
     $uiChkList   = $ChkList
     $uiLocalData = $LocalData
+    $uiNoteLabel = $NoteLabel
 
     $uiChkList.Items.Clear()
     $uiLocalData.Clear()
@@ -1408,6 +1495,14 @@ function Update-NetworkModalList {
             }
         }
         $uiChkList.EndUpdate()
+        if ($null -ne $uiNoteLabel -and -not $uiNoteLabel.IsDisposed) {
+            if ($uiLocalData.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($uiLocalData[0].Note)) {
+                $uiChkList.SelectedIndex = 0
+                $uiNoteLabel.Text = [string]$uiLocalData[0].Note
+            } else {
+                $uiNoteLabel.Text = "Select any network parameter above to inspect its kernel/NDIS effect."
+            }
+        }
     }.GetNewClosure())
 }
 
@@ -1418,7 +1513,8 @@ function Start-NetworkOptimizationAsync {
         [Parameter(Mandatory=$true)][System.Windows.Forms.Form]$Modal,
         [Parameter(Mandatory=$true)][System.Windows.Forms.CheckedListBox]$ChkList,
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Collections.ArrayList]$LocalData,
-        [AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @()
+        [AllowEmptyCollection()][System.Windows.Forms.Control[]]$ControlsToDisable = @(),
+        [System.Windows.Forms.Label]$NoteLabel = $null
     )
 
     if ($SelectedItems.Count -eq 0) {
@@ -1430,6 +1526,7 @@ function Start-NetworkOptimizationAsync {
     $uiChkList   = $ChkList
     $uiLocalData = $LocalData
     $uiButtons   = $ControlsToDisable
+    $uiNoteLabel = $NoteLabel
     $verb        = if ($Mode -eq 'Apply') { "Optimization" } else { "Revert" }
 
     Write-GUI " -> Dispatching network adapter $verb worker to background Runspace..."
@@ -1641,7 +1738,7 @@ function Start-NetworkOptimizationAsync {
     } -OnComplete ({
         Update-Progress 0
         Write-GUI " -> Network adapter $verb completed.`n"
-        Update-NetworkModalList -Modal $uiModal -ChkList $uiChkList -LocalData $uiLocalData -ControlsToDisable $uiButtons
+        Update-NetworkModalList -Modal $uiModal -ChkList $uiChkList -LocalData $uiLocalData -ControlsToDisable $uiButtons -NoteLabel $uiNoteLabel
     }.GetNewClosure())
 }
 
@@ -1649,6 +1746,7 @@ function Invoke-ApplyTimerTweaks {
     param([array]$SelectedItems)
     if ($SelectedItems.Count -eq 0) { Write-GUI " -> No Timer modifications selected."; return }
 
+    $appliedCount = 0
     foreach ($item in $SelectedItems) {
         $data = $item.ActionData
         Write-GUI " -> Configuring Timer Subsystem: $($item.UIDisplayName)"
@@ -1656,6 +1754,7 @@ function Invoke-ApplyTimerTweaks {
         try {
             if ($data.Type -eq "Reg") {
                 Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Value -Type DWord -Module "Z7_Hardware"
+                $appliedCount++
             } elseif ($data.Type -eq "BCD") {
                 $cmdArgs = $data.Cmd.Split(' ')
                 if ($cmdArgs[0] -eq "useplatformclock" -and $cmdArgs[1] -eq "no") {
@@ -1663,15 +1762,21 @@ function Invoke-ApplyTimerTweaks {
                 } else {
                     $null = Invoke-UltixExe -FilePath "bcdedit.exe" -Arguments @("/set", "{current}", $cmdArgs[0], $cmdArgs[1]) -Module "Z7_Hardware"
                 }
+                $appliedCount++
             } elseif ($data.Type -eq "PNP") {
                 $null = Invoke-UltixExe -FilePath "pnputil.exe" -Arguments @("/disable-device", "$($data.Instance)") -Module "Z7_Hardware"
                 if (-not [WinUltix.PnpTree]::IsDeviceDisabled($data.Instance)) {
                     throw "pnputil failed to disable $($data.Instance)"
                 }
+                $appliedCount++
             }
         } catch {
             Write-GUI "    [!] Failed to apply: $($item.UIDisplayName)"
         }
+    }
+
+    if ($appliedCount -gt 0) {
+        Set-UltixRebootRequired -Reason "BCD/Timer"
     }
 }
 
@@ -1686,6 +1791,7 @@ function Invoke-ApplyNVMeTweaks {
         try {
             if ($data.Type -eq "Reg") {
                 Set-UltixRegValue -Path $data.Path -Name $data.Name -Value $data.Val -Type DWord -Module "Z7_Hardware"
+                Set-UltixRebootRequired -Reason "PCIe/NVMe"
             } elseif ($data.Type -eq "MMAgent") {
                 $smReg   = "HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"
                 $smStart = (Get-ItemProperty -LiteralPath $smReg -Name "Start" -ErrorAction SilentlyContinue).Start
@@ -1953,6 +2059,7 @@ function Show-AffinityModal {
     $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 524 -Y 594 -Width 120 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
 
     $lblTip = New-Object System.Windows.Forms.Label
     $lblTip.Text = "INFO: 'Save Roster' stores your preset in the registry. You can instantly apply it later before gaming using the 'Pre-Flight' desktop shortcut."
@@ -1970,17 +2077,35 @@ function Show-CPPCModal {
     param ([string]$Title, [string]$Description)
     
     $modal = New-Object System.Windows.Forms.Form
-    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(650, 450); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(650, 450)
+    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(680, 495); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.MinimumSize = New-Object System.Drawing.Size(680, 495)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(600, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(630, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
     
-    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 60); $chkList.Size = New-Object System.Drawing.Size(600, 280); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 60); $chkList.Size = New-Object System.Drawing.Size(630, 258); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+
+    $lblItemNote = New-Object System.Windows.Forms.Label
+    $lblItemNote.Location = New-Object System.Drawing.Point(15, 326)
+    $lblItemNote.Size = New-Object System.Drawing.Size(630, 66)
+    $lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+    $lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $lblItemNote.BorderStyle = "FixedSingle"
+    $lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+    $lblItemNote.Text = "Click any CPPC setting above to inspect its hardware effect."
+    $lblItemNote.Anchor = 'Bottom, Left, Right'
     
     $localData = New-Object System.Collections.ArrayList
 
+    $chkList.Add_SelectedIndexChanged({
+        if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+            $lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+        }
+    }.GetNewClosure())
+
     $refreshData = ({
+        $prevIdx = $chkList.SelectedIndex
         $chkList.Items.Clear(); $localData.Clear()
         $auditData = Get-HardwareState_CPPC
         foreach ($item in $auditData) {
@@ -1991,10 +2116,15 @@ function Show-CPPCModal {
                 [void]$chkList.Items.Add("[ HIDDEN ]   " + $item.UIDisplayName, $true)
             }
         }
+        if ($localData.Count -gt 0) {
+            $targetIdx = if ($prevIdx -ge 0 -and $prevIdx -lt $localData.Count) { $prevIdx } else { 0 }
+            $chkList.SelectedIndex = $targetIdx
+            $lblItemNote.Text = [string]$localData[$targetIdx].Note
+        }
     }.GetNewClosure())
     &$refreshData 
 
-    $btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 355 -Width 150 -Height 38 -RGB @(60, 100, 150)
+    $btnUnhide = New-UltixButton -Parent $modal -Text "Unhide Checked" -X 15 -Y 400 -Width 150 -Height 38 -RGB @(60, 100, 150)
     $btnUnhide.Anchor = 'Bottom, Left'
     $btnUnhide.Add_Click({
         $toUnhide = @()
@@ -2005,25 +2135,26 @@ function Show-CPPCModal {
         &$refreshData 
     }.GetNewClosure())
 
-    $btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE Max CPPC" -X 173 -Y 355 -Width 175 -Height 38 -RGB @(150, 60, 60)
+    $btnEngage = New-UltixButton -Parent $modal -Text "ENGAGE Max CPPC" -X 173 -Y 400 -Width 175 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
         Set-UltixCPPCState -Mode 'Engage'
         &$refreshData
     }.GetNewClosure())
 
-    $btnRelease = New-UltixButton -Parent $modal -Text "RELEASE CPPC" -X 356 -Y 355 -Width 150 -Height 38 -RGB @(150, 100, 60)
+    $btnRelease = New-UltixButton -Parent $modal -Text "RELEASE CPPC" -X 356 -Y 400 -Width 150 -Height 38 -RGB @(150, 100, 60)
     $btnRelease.Anchor = 'Bottom, Left'
     $btnRelease.Add_Click({
         Set-UltixCPPCState -Mode 'Release'
         &$refreshData
     }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 514 -Y 355 -Width 100 -Height 38 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 514 -Y 400 -Width 131 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
 
-    $modal.Controls.AddRange(@($lblDesc, $chkList))
+    $modal.Controls.AddRange(@($lblDesc, $chkList, $lblItemNote))
     try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 
@@ -2775,7 +2906,10 @@ function Show-MsiModal {
             }
         }
         &$refreshData
-        if ($changed -gt 0) { [System.Windows.Forms.MessageBox]::Show("Successfully configured MSI & IRQ policy for $changed device(s).`nOriginal states backed up.`nPlease reboot your PC.", "Reboot Required") }
+        if ($changed -gt 0) {
+            Set-UltixRebootRequired -Reason "MSI/IRQ"
+            [System.Windows.Forms.MessageBox]::Show("Successfully configured MSI & IRQ policy for $changed device(s).`nOriginal states backed up.`nPlease reboot your PC.", "Reboot Required")
+        }
     }.GetNewClosure())
 
     $btnRevertMSI = New-UltixButton -Parent $modal -Text "Restore Original State" -X 208 -Y 706 -Width 205 -Height 40 -RGB @(100, 100, 100)
@@ -2856,6 +2990,7 @@ function Show-MsiModal {
                     & $revertBlock
                 }
                 Write-GUI " -> Reverted IRQ/MSI state to factory defaults: $($dev.RawDeviceName)"
+                Set-UltixRebootRequired -Reason "MSI/IRQ"
             } catch {
                 Write-GUI " -> [!] Failed to revert IRQ/MSI state for $($dev.RawDeviceName): $($_.Exception.Message)"
             }
@@ -2866,6 +3001,7 @@ function Show-MsiModal {
     $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 421 -Y 706 -Width 95 -Height 40 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
 
     $lblIrqLegend = New-Object System.Windows.Forms.Label
     $lblIrqLegend.UseMnemonic = $false
@@ -2895,18 +3031,18 @@ function Show-WHEAModal {
     param ([string]$Title, [string]$Description)
     
     $modal = New-Object System.Windows.Forms.Form
-    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(850, 500); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(850, 500)
+    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(900, 640); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.KeyPreview = $true; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.MinimumSize = New-Object System.Drawing.Size(860, 560)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
     
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(650, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(725, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Scan Now" -X 705 -Y 15 -Width 110 -Height 35 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Scan Now" -X 755 -Y 15 -Width 115 -Height 35 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Top, Right'
 
     $listView = New-Object System.Windows.Forms.ListView
     $listView.Location = New-Object System.Drawing.Point(15, 60)
-    $listView.Size = New-Object System.Drawing.Size(800, 330)
+    $listView.Size = New-Object System.Drawing.Size(855, 290)
     $listView.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
     $listView.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245)
     $listView.BorderStyle = "FixedSingle"
@@ -2914,24 +3050,73 @@ function Show-WHEAModal {
     $listView.Anchor = 'Top, Bottom, Left, Right'
     $listView.View = [System.Windows.Forms.View]::Details
     $listView.FullRowSelect = $true
+    $listView.MultiSelect = $false
     $listView.GridLines = $false
     Enable-UltixDoubleBuffer -Control $listView
 
     $listView.Columns.Add("Time", 170) | Out-Null
-    $listView.Columns.Add("Event ID", 90) | Out-Null
-    $listView.Columns.Add("APIC ID", 120) | Out-Null
-    $listView.Columns.Add("Error Source / Details", 405) | Out-Null
+    $listView.Columns.Add("Event ID", 85) | Out-Null
+    $listView.Columns.Add("APIC ID", 155) | Out-Null
+    $listView.Columns.Add("Error Source / Details", 425) | Out-Null
 
-    $btnClear = New-UltixButton -Parent $modal -Text "Wipe Logs (Prepare for Test)" -X 15 -Y 405 -Width 260 -Height 38 -RGB @(150, 60, 60)
+    $lblRawHdr = New-Object System.Windows.Forms.Label
+    $lblRawHdr.Text = "Raw WHEA Event Details (MCA Bank / Transaction Type / Error Source):"
+    $lblRawHdr.Location = New-Object System.Drawing.Point(15, 358)
+    $lblRawHdr.Size = New-Object System.Drawing.Size(855, 20)
+    $lblRawHdr.Font = New-Object System.Drawing.Font("Segoe UI", 9.0, [System.Drawing.FontStyle]::Bold)
+    $lblRawHdr.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $lblRawHdr.Anchor = 'Bottom, Left, Right'
+
+    $txtRawWhea = New-Object System.Windows.Forms.TextBox
+    $txtRawWhea.Location = New-Object System.Drawing.Point(15, 380)
+    $txtRawWhea.Size = New-Object System.Drawing.Size(855, 160)
+    $txtRawWhea.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $txtRawWhea.ForeColor = [System.Drawing.Color]::FromArgb(255, 205, 220, 235)
+    $txtRawWhea.BorderStyle = "FixedSingle"
+    $txtRawWhea.Multiline = $true
+    $txtRawWhea.ReadOnly = $true
+    $txtRawWhea.WordWrap = $true
+    $txtRawWhea.ScrollBars = "Vertical"
+    $txtRawWhea.Font = New-Object System.Drawing.Font("Consolas", 9.0)
+    $txtRawWhea.Text = "Click any WHEA record above to inspect full raw Event Viewer payload (Ctrl+C to copy)."
+    $txtRawWhea.Anchor = 'Bottom, Left, Right'
+
+    $listView.Add_SelectedIndexChanged({
+        if ($listView.SelectedItems.Count -gt 0 -and $null -ne $listView.SelectedItems[0].Tag) {
+            $rec = $listView.SelectedItems[0].Tag
+            $rawBody = if (-not [string]::IsNullOrWhiteSpace($rec.RawMessage)) { $rec.RawMessage.Trim() } else { "(No raw Event Viewer message payload attached.)" }
+            $txtRawWhea.Text = "Time: $($rec.Time) | Event ID: $($rec.EventID) | APIC: $($rec.ApicID)`r`nVerdict: $($rec.ErrorType)`r`n--------------------------------------------------------------------------------`r`n$rawBody"
+        }
+    }.GetNewClosure())
+
+    $btnClear = New-UltixButton -Parent $modal -Text "Wipe Logs (Prepare for Test)" -X 15 -Y 550 -Width 255 -Height 38 -RGB @(150, 60, 60)
     $btnClear.Anchor = 'Bottom, Left'
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 285 -Y 405 -Width 120 -Height 38 -RGB @(60, 60, 60)
-    $btnClose.Anchor = 'Bottom, Left'
+    $btnCopyRaw = New-UltixButton -Parent $modal -Text "Copy Raw Log" -X 280 -Y 550 -Width 155 -Height 38 -RGB @(45, 85, 125)
+    $btnCopyRaw.Anchor = 'Bottom, Left'
+    $btnCopyRaw.Add_Click({
+        if (-not [string]::IsNullOrWhiteSpace($txtRawWhea.Text)) {
+            try { [System.Windows.Forms.Clipboard]::SetText($txtRawWhea.Text) } catch { }
+        }
+    }.GetNewClosure())
+
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 750 -Y 550 -Width 120 -Height 38 -RGB @(60, 60, 60)
+    $btnClose.Anchor = 'Bottom, Right'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
+
+    $modal.Add_KeyDown({
+        param($src, $e)
+        if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C -and $listView.Focused -and -not [string]::IsNullOrWhiteSpace($txtRawWhea.Text)) {
+            try { [System.Windows.Forms.Clipboard]::SetText($txtRawWhea.Text) } catch { }
+            $e.SuppressKeyPress = $true
+        }
+    }.GetNewClosure())
 
     $refreshData = ({
         $uiModal    = $modal
         $uiListView = $listView
+        $uiRawBox   = $txtRawWhea
         $bgEven     = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
         $bgOdd      = [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
         $bgAlert    = [System.Drawing.Color]::FromArgb(255, 50, 26, 28)
@@ -2944,6 +3129,7 @@ function Show-WHEAModal {
         $loadingItem.BackColor = $bgEven
         $loadingItem.ForeColor = [System.Drawing.Color]::LightSkyBlue
         [void]$uiListView.Items.Add($loadingItem)
+        $uiRawBox.Text = "Scanning System Event Log for WHEA-Logger records..."
 
         $sb = (Get-Command -Name Get-HardwareState_WHEA).ScriptBlock
         Invoke-AsyncTask -ScriptBlock $sb -ControlsToDisable @($btnRefresh, $btnClear) -OnComplete ({
@@ -2961,6 +3147,7 @@ function Show-WHEAModal {
                     $rowBg = if (($rIdx % 2) -eq 0) { $bgEven } else { $bgOdd }
                     $lvItem = New-Object System.Windows.Forms.ListViewItem([string]$item.Time)
                     $lvItem.BackColor = $rowBg
+                    $lvItem.Tag = $item
 
                     $idSub = $lvItem.SubItems.Add([string]$item.EventID)
                     $idSub.BackColor = $rowBg
@@ -2979,6 +3166,8 @@ function Show-WHEAModal {
                     [void]$uiListView.Items.Add($lvItem)
                     $rIdx++
                 }
+                $uiListView.EndUpdate()
+                $uiListView.Items[0].Selected = $true
             } else {
                 $lvItem = New-Object System.Windows.Forms.ListViewItem("---")
                 [void]$lvItem.SubItems.Add("---")
@@ -2987,8 +3176,9 @@ function Show-WHEAModal {
                 $lvItem.BackColor = $bgEven
                 $lvItem.ForeColor = [System.Drawing.Color]::FromArgb(255, 145, 230, 165)
                 [void]$uiListView.Items.Add($lvItem)
+                $uiListView.EndUpdate()
+                $uiRawBox.Text = "Zero Microsoft-Windows-WHEA-Logger records found in the System Event Log.`r`nCPU Curve Optimizer, FCLK, DDR5 memory controller, and PCIe links show no logged hardware faults."
             }
-            $uiListView.EndUpdate()
         }.GetNewClosure())
     }.GetNewClosure())
     
@@ -3001,7 +3191,7 @@ function Show-WHEAModal {
         [System.Windows.Forms.MessageBox]::Show("System Event Log wiped. Ready for next stability test.", "Logs Cleared")
     }.GetNewClosure())
 
-    $modal.Controls.AddRange(@($lblDesc, $listView))
+    $modal.Controls.AddRange(@($lblDesc, $listView, $lblRawHdr, $txtRawWhea))
     try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 
@@ -3009,21 +3199,32 @@ function Show-NetworkModal {
     param ([string]$Title, [string]$Description)
     
     $modal = New-Object System.Windows.Forms.Form
-    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 560); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(760, 560)
+    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(780, 620); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.MinimumSize = New-Object System.Drawing.Size(780, 620)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(730, 34); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
     
-    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(480, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
+    $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] Applying or reverting NDIS settings will momentarily re-initialize the network adapter."; $lblWarning.Location = New-Object System.Drawing.Point(15, 52); $lblWarning.Size = New-Object System.Drawing.Size(495, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
-    $btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 495 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
+    $btnSelAllNet  = New-UltixButton -Parent $modal -Text "Select All" -X 515 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
     $btnSelAllNet.Anchor = 'Top, Right'
 
-    $btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 615 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
+    $btnSelNoneNet = New-UltixButton -Parent $modal -Text "Deselect All" -X 635 -Y 47 -Width 110 -Height 28 -RGB @(50, 53, 58)
     $btnSelNoneNet.Anchor = 'Top, Right'
 
-    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 375); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(730, 360); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+
+    $lblItemNote = New-Object System.Windows.Forms.Label
+    $lblItemNote.Location = New-Object System.Drawing.Point(15, 448)
+    $lblItemNote.Size = New-Object System.Drawing.Size(730, 66)
+    $lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+    $lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $lblItemNote.BorderStyle = "FixedSingle"
+    $lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+    $lblItemNote.Text = "Scanning physical adapters & NDIS properties..."
+    $lblItemNote.Anchor = 'Bottom, Left, Right'
 
     $btnSelAllNet.Add_Click({
         $chkList.BeginUpdate()
@@ -3039,23 +3240,30 @@ function Show-NetworkModal {
     
     $localData = New-Object System.Collections.ArrayList
 
-    $btnEngage  = New-UltixButton -Parent $modal -Text "Optimize Checked" -X 15 -Y 468 -Width 180 -Height 38 -RGB @(150, 60, 60)
+    $chkList.Add_SelectedIndexChanged({
+        if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+            $lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+        }
+    }.GetNewClosure())
+
+    $btnEngage  = New-UltixButton -Parent $modal -Text "Optimize Checked" -X 15 -Y 524 -Width 180 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
 
-    $btnRevert  = New-UltixButton -Parent $modal -Text "Restore Checked Defaults" -X 203 -Y 468 -Width 225 -Height 38 -RGB @(100, 100, 100)
+    $btnRevert  = New-UltixButton -Parent $modal -Text "Restore Checked Defaults" -X 203 -Y 524 -Width 225 -Height 38 -RGB @(100, 100, 100)
     $btnRevert.Anchor = 'Bottom, Left'
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 436 -Y 468 -Width 145 -Height 38 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 436 -Y 524 -Width 145 -Height 38 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Bottom, Left'
 
-    $btnClose   = New-UltixButton -Parent $modal -Text "Close" -X 589 -Y 468 -Width 135 -Height 38 -RGB @(60, 60, 60)
+    $btnClose   = New-UltixButton -Parent $modal -Text "Close" -X 589 -Y 524 -Width 156 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
 
     $actionButtons = @($btnEngage, $btnRevert, $btnRefresh)
 
     $btnRefresh.Add_Click({
-        Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+        Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
     }.GetNewClosure())
 
     $btnEngage.Add_Click({
@@ -3065,7 +3273,7 @@ function Show-NetworkModal {
                 $queue += $localData[$i]
             }
         }
-        Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Apply" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+        Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Apply" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
     }.GetNewClosure())
 
     $btnRevert.Add_Click({
@@ -3075,12 +3283,12 @@ function Show-NetworkModal {
                 $queue += $localData[$i]
             }
         }
-        Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Revert" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+        Start-NetworkOptimizationAsync -SelectedItems $queue -Mode "Revert" -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
     }.GetNewClosure())
 
-    $modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList))
+    $modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList, $lblItemNote))
 
-    Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons
+    Update-NetworkModalList -Modal $modal -ChkList $chkList -LocalData $localData -ControlsToDisable $actionButtons -NoteLabel $lblItemNote
 
     try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
@@ -3089,25 +3297,42 @@ function Show-TimerModal {
     param ([string]$Title, [string]$Description)
     
     $modal = New-Object System.Windows.Forms.Form
-    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 415); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(760, 415)
+    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(760, 485); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.MinimumSize = New-Object System.Drawing.Size(760, 485)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(710, 38); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
     
     $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] BCD modifications require a system reboot to lock the TSC hardware timer."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(710, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
     $lblCurrentTimer = New-Object System.Windows.Forms.Label
-    $lblCurrentTimer.Location = New-Object System.Drawing.Point(15, 345)
+    $lblCurrentTimer.Location = New-Object System.Drawing.Point(15, 412)
     $lblCurrentTimer.Size = New-Object System.Drawing.Size(710, 20)
     $lblCurrentTimer.Font = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Bold)
     $lblCurrentTimer.ForeColor = [System.Drawing.Color]::Yellow
     $lblCurrentTimer.Anchor = 'Bottom, Left, Right'
 	
-    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 200); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(710, 196); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+
+    $lblItemNote = New-Object System.Windows.Forms.Label
+    $lblItemNote.Location = New-Object System.Drawing.Point(15, 284)
+    $lblItemNote.Size = New-Object System.Drawing.Size(710, 68)
+    $lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+    $lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $lblItemNote.BorderStyle = "FixedSingle"
+    $lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+    $lblItemNote.Text = "Click any timer rule above to inspect its kernel/BCD effect."
+    $lblItemNote.Anchor = 'Bottom, Left, Right'
     
     $localData = New-Object System.Collections.ArrayList
     $testLockState = @{ IsLocked = $false }
+
+    $chkList.Add_SelectedIndexChanged({
+        if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+            $lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+        }
+    }.GetNewClosure())
 
     $updateTimerLabel = ({
         param([System.Windows.Forms.Label]$Lbl)
@@ -3125,12 +3350,18 @@ function Show-TimerModal {
     }.GetNewClosure())
 
     $refreshData = ({
+        $prevIdx = $chkList.SelectedIndex
         $chkList.Items.Clear(); $localData.Clear()
         $auditData = Get-HardwareState_Timer
         foreach ($item in $auditData) {
             [void]$localData.Add($item)
             if ($item.IsOptimized) { [void]$chkList.Items.Add("[ OPTIMIZED ]   " + $item.UIDisplayName, $false) } 
             else { [void]$chkList.Items.Add("[ UNOPTIMIZED ] " + $item.UIDisplayName, $true) }
+        }
+        if ($localData.Count -gt 0) {
+            $targetIdx = if ($prevIdx -ge 0 -and $prevIdx -lt $localData.Count) { $prevIdx } else { 0 }
+            $chkList.SelectedIndex = $targetIdx
+            $lblItemNote.Text = [string]$localData[$targetIdx].Note
         }
         &$updateTimerLabel $lblCurrentTimer
     }.GetNewClosure())
@@ -3153,7 +3384,7 @@ function Show-TimerModal {
     })
     $timerPoll.Start()
 
-    $btnEngage = New-UltixButton -Parent $modal -Text "Enforce 0.5ms & TSC" -X 15 -Y 296 -Width 185 -Height 38 -RGB @(150, 60, 60)
+    $btnEngage = New-UltixButton -Parent $modal -Text "Enforce 0.5ms & TSC" -X 15 -Y 362 -Width 185 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
         $applyQueue = @()
@@ -3167,7 +3398,7 @@ function Show-TimerModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnRevert = New-UltixButton -Parent $modal -Text "Restore Defaults" -X 208 -Y 296 -Width 155 -Height 38 -RGB @(100, 100, 100)
+    $btnRevert = New-UltixButton -Parent $modal -Text "Restore Defaults" -X 208 -Y 362 -Width 155 -Height 38 -RGB @(100, 100, 100)
     $btnRevert.Anchor = 'Bottom, Left'
     $btnRevert.Add_Click({
         $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
@@ -3188,11 +3419,12 @@ function Show-TimerModal {
         }
         
         Write-GUI " -> Reverted Timer Subsystem & BCD flags to OS defaults."
+        Set-UltixRebootRequired -Reason "BCD/Timer"
         [System.Windows.Forms.MessageBox]::Show("Default OS timer mechanisms and BCD values restored. HPET enabled. Reboot required.", "Revert Completed")
         &$refreshData
     }.GetNewClosure())
 
-    $btnTestPulse = New-UltixButton -Parent $modal -Text "Test 0.5ms Lock" -X 371 -Y 296 -Width 155 -Height 38 -RGB @(45, 110, 65)
+    $btnTestPulse = New-UltixButton -Parent $modal -Text "Test 0.5ms Lock" -X 371 -Y 362 -Width 155 -Height 38 -RGB @(45, 110, 65)
     $btnTestPulse.Anchor = 'Bottom, Left'
     $btnTestPulse.Add_Click({
         if (-not $testLockState.IsLocked) {
@@ -3215,15 +3447,16 @@ function Show-TimerModal {
         &$updateTimerLabel $lblCurrentTimer
     }.GetNewClosure())
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh" -X 534 -Y 296 -Width 95 -Height 38 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh" -X 534 -Y 362 -Width 95 -Height 38 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Bottom, Left'
     $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 637 -Y 296 -Width 88 -Height 38 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 637 -Y 362 -Width 88 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
 
-    $modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList, $lblCurrentTimer))
+    $modal.Controls.AddRange(@($lblDesc, $lblWarning, $chkList, $lblItemNote, $lblCurrentTimer))
     try {
         [void]$modal.ShowDialog($global:form)
     } finally {
@@ -3243,19 +3476,37 @@ function Show-NVMeModal {
     param ([string]$Title, [string]$Description)
     
     $modal = New-Object System.Windows.Forms.Form
-    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(680, 365); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
-    $modal.MinimumSize = New-Object System.Drawing.Size(680, 365)
+    $modal.Text = $Title; $modal.Size = New-Object System.Drawing.Size(680, 440); $modal.StartPosition = "CenterParent"; $modal.FormBorderStyle = "Sizable"; $modal.BackColor = [System.Drawing.Color]::FromArgb(255, 30, 30, 30); $modal.ForeColor = [System.Drawing.Color]::White
+    $modal.MinimumSize = New-Object System.Drawing.Size(680, 440)
     $modal.Add_HandleCreated({ Enable-WinUltixDarkTitleBar -Form $this })
 
-    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(630, 40); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
+    $lblDesc = New-Object System.Windows.Forms.Label; $lblDesc.Text = $Description; $lblDesc.Location = New-Object System.Drawing.Point(15, 15); $lblDesc.Size = New-Object System.Drawing.Size(630, 38); $lblDesc.Font = New-Object System.Drawing.Font("Segoe UI", 10); $lblDesc.Anchor = 'Top, Left, Right'
 
     $lblWarning = New-Object System.Windows.Forms.Label; $lblWarning.Text = "[!] System reboot is strictly required to apply PCI bus and NVMe driver changes."; $lblWarning.Location = New-Object System.Drawing.Point(15, 55); $lblWarning.Size = New-Object System.Drawing.Size(630, 20); $lblWarning.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $lblWarning.ForeColor = [System.Drawing.Color]::Orange; $lblWarning.Anchor = 'Top, Left, Right'
 
-    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(630, 160); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+    $chkList = New-Object System.Windows.Forms.CheckedListBox; $chkList.Location = New-Object System.Drawing.Point(15, 80); $chkList.Size = New-Object System.Drawing.Size(630, 162); $chkList.BackColor = [System.Drawing.Color]::FromArgb(255, 32, 34, 38); $chkList.ForeColor = [System.Drawing.Color]::FromArgb(255, 235, 240, 245); $chkList.BorderStyle = "FixedSingle"; $chkList.Font = New-Object System.Drawing.Font("Consolas", 10.5); $chkList.CheckOnClick = $false; $chkList.HorizontalScrollbar = $true; $chkList.Anchor = 'Top, Bottom, Left, Right'
+
+    $lblItemNote = New-Object System.Windows.Forms.Label
+    $lblItemNote.Location = New-Object System.Drawing.Point(15, 250)
+    $lblItemNote.Size = New-Object System.Drawing.Size(630, 72)
+    $lblItemNote.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 22, 25)
+    $lblItemNote.ForeColor = [System.Drawing.Color]::FromArgb(255, 195, 215, 235)
+    $lblItemNote.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
+    $lblItemNote.BorderStyle = "FixedSingle"
+    $lblItemNote.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 4)
+    $lblItemNote.Text = "Click any I/O or memory rule above to inspect its hardware effect."
+    $lblItemNote.Anchor = 'Bottom, Left, Right'
     
     $localData = New-Object System.Collections.ArrayList
 
+    $chkList.Add_SelectedIndexChanged({
+        if ($chkList.SelectedIndex -ge 0 -and $chkList.SelectedIndex -lt $localData.Count) {
+            $lblItemNote.Text = [string]$localData[$chkList.SelectedIndex].Note
+        }
+    }.GetNewClosure())
+
     $refreshData = ({
+        $prevIdx = $chkList.SelectedIndex
         $modal.UseWaitCursor = $true
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
         try {
@@ -3268,6 +3519,11 @@ function Show-NVMeModal {
                 else { [void]$chkList.Items.Add("[ UNOPTIMIZED ] " + $item.UIDisplayName, $true) }
             }
             $chkList.EndUpdate()
+            if ($localData.Count -gt 0) {
+                $targetIdx = if ($prevIdx -ge 0 -and $prevIdx -lt $localData.Count) { $prevIdx } else { 0 }
+                $chkList.SelectedIndex = $targetIdx
+                $lblItemNote.Text = [string]$localData[$targetIdx].Note
+            }
         } finally {
             $modal.UseWaitCursor = $false
             [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
@@ -3275,7 +3531,7 @@ function Show-NVMeModal {
     }.GetNewClosure())
     &$refreshData 
 
-    $btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 258 -Width 195 -Height 38 -RGB @(150, 60, 60)
+    $btnEngage = New-UltixButton -Parent $modal -Text "Disable Power States" -X 15 -Y 332 -Width 195 -Height 38 -RGB @(150, 60, 60)
     $btnEngage.Anchor = 'Bottom, Left'
     $btnEngage.Add_Click({
         $applyQueue = @()
@@ -3296,7 +3552,7 @@ function Show-NVMeModal {
         &$refreshData
     }.GetNewClosure())
 
-    $btnRevert = New-UltixButton -Parent $modal -Text "Restore OS Defaults" -X 218 -Y 258 -Width 185 -Height 38 -RGB @(100, 100, 100)
+    $btnRevert = New-UltixButton -Parent $modal -Text "Restore OS Defaults" -X 218 -Y 332 -Width 185 -Height 38 -RGB @(100, 100, 100)
     $btnRevert.Anchor = 'Bottom, Left'
     $btnRevert.Add_Click({
         $modal.UseWaitCursor = $true
@@ -3323,19 +3579,21 @@ function Show-NVMeModal {
         }
         
         Write-GUI " -> Restored default PCI ASPM, StorNVMe APST, and MMAgent settings."
+        Set-UltixRebootRequired -Reason "PCIe/NVMe"
         [System.Windows.Forms.MessageBox]::Show("Standard PCI/NVMe drivers and Memory Compression restored. Reboot is required to apply bus changes.", "Revert Completed")
         &$refreshData
     }.GetNewClosure())
 
-    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 411 -Y 258 -Width 135 -Height 38 -RGB @(60, 100, 150)
+    $btnRefresh = New-UltixButton -Parent $modal -Text "Refresh Audit" -X 411 -Y 332 -Width 135 -Height 38 -RGB @(60, 100, 150)
     $btnRefresh.Anchor = 'Bottom, Left'
     $btnRefresh.Add_Click({ &$refreshData }.GetNewClosure())
 
-    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 554 -Y 258 -Width 91 -Height 38 -RGB @(60, 60, 60)
+    $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 554 -Y 332 -Width 91 -Height 38 -RGB @(60, 60, 60)
     $btnClose.Anchor = 'Bottom, Left'
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
 
-    $modal.Controls.AddRange(@($lblDesc, $chkList, $lblWarning))
+    $modal.Controls.AddRange(@($lblDesc, $chkList, $lblItemNote, $lblWarning))
     try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
 }
 
@@ -3508,6 +3766,7 @@ if (`$isEngaged) {
 `$btnCancel.DialogResult = "Cancel"
 
 `$frm.Controls.AddRange(@(`$lblStatus, `$chkAff, `$chkCPPC, `$btnEngage, `$btnRelease, `$btnCancel))
+`$frm.CancelButton = `$btnCancel
 `$res = `$frm.ShowDialog()
 if (`$null -ne `$frm.Icon) { `$frm.Icon.Dispose() }
 `$frm.Dispose()
@@ -4330,6 +4589,7 @@ function Show-QuantumSchedulerModal {
 
     $btnClose = New-UltixButton -Parent $modal -Text "Close" -X 610 -Y 425 -Width 120 -Height 38 -RGB @(60, 60, 60)
     $btnClose.DialogResult = "Cancel"
+    $modal.CancelButton = $btnClose
 
     $modal.Controls.AddRange(@($lblDesc, $lblTelemetry, $listBox, $lblDetail))
     try { [void]$modal.ShowDialog($global:form) } finally { $modal.Dispose() }
@@ -4350,10 +4610,12 @@ function Initialize-Z7UI {
     # --- SECTION 1: PRE-FLIGHT CPU TOPOLOGY & P-STATE CONTROL ---
     $lblPreFlight = New-Object System.Windows.Forms.Label
     $lblPreFlight.Text = "Pre-Flight CPU Affinity & CPPC P-State Control"
+    $lblPreFlight.AccessibleName = "SectionHeader"
+    $lblPreFlight.UseMnemonic = $false
     $lblPreFlight.Location = New-Object System.Drawing.Point(15, 14)
     $lblPreFlight.Size = New-Object System.Drawing.Size(380, 20)
     $lblPreFlight.ForeColor = [System.Drawing.Color]::DarkGray
-    $lblPreFlight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $lblPreFlight.Font = Get-UltixFont -Role "SectionHeader"
 
     if ($topo.IsSupported) {
         [void](New-UltixButton -Parent $tab -X 15 -Y 36 -Width 240 -Height 40 -RGB @(135, 50, 50) `
@@ -4378,67 +4640,74 @@ function Initialize-Z7UI {
         -Description "Create a desktop shortcut to instantly toggle CPU Affinity Lasso and Max CPPC rules right before launching a game." `
         -OnClick { New-PreFlightShortcut })
 
-    # --- SECTION 2: 2-COLUMN LOW-LATENCY HARDWARE & BUS TUNING ---
-    $lblColLeft = New-Object System.Windows.Forms.Label
-    $lblColLeft.Text = "Scheduler, Timer & Bus"
-    $lblColLeft.Location = New-Object System.Drawing.Point(15, 138)
-    $lblColLeft.Size = New-Object System.Drawing.Size(185, 20)
-    $lblColLeft.ForeColor = [System.Drawing.Color]::DarkGray
-    $lblColLeft.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    # --- SECTION 2A: LOW-LATENCY KERNEL & BUS TUNERS (REVERSIBLE) ---
+    $lblTuners = New-Object System.Windows.Forms.Label
+    $lblTuners.Text = "Kernel, Bus & Latency Tuners (Backup & Revert)"
+    $lblTuners.AccessibleName = "SectionHeader"
+    $lblTuners.UseMnemonic = $false
+    $lblTuners.Location = New-Object System.Drawing.Point(15, 136)
+    $lblTuners.Size = New-Object System.Drawing.Size(370, 19)
+    $lblTuners.ForeColor = [System.Drawing.Color]::DarkGray
+    $lblTuners.Font = Get-UltixFont -Role "SectionHeader"
 
-    $lblColRight = New-Object System.Windows.Forms.Label
-    $lblColRight.Text = "IRQ, USB & OC Diagnostics"
-    $lblColRight.Location = New-Object System.Drawing.Point(205, 138)
-    $lblColRight.Size = New-Object System.Drawing.Size(195, 20)
-    $lblColRight.ForeColor = [System.Drawing.Color]::DarkGray
-    $lblColRight.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-
-    # Row 1 (Y = 160)
-    [void](New-UltixButton -Parent $tab -X 15 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+    # Row 1 (Y = 157)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 157 -Width 180 -Height 38 -RGB @(55, 58, 64) `
         -Text "Quantum Scheduler Matrix" `
-        -Description "Live Win32PrioritySeparation quantum tuner (0x26, 0x28, 0x2A, 0x16, 0x02). Changes apply in real time without rebooting." `
+        -Description "[LIVE / NO REBOOT] Win32PrioritySeparation quantum tuner (0x26, 0x28, 0x2A, 0x16, 0x02). Applies instantly for live A/B testing in games." `
         -OnClick { Show-QuantumSchedulerModal })
 
-    [void](New-UltixButton -Parent $tab -X 205 -Y 160 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+    [void](New-UltixButton -Parent $tab -X 205 -Y 157 -Width 180 -Height 38 -RGB @(55, 58, 64) `
         -Text "MSI & IRQ Affinity Enforcer" `
-        -Description "Force Message Signaled Interrupts (MSI), set Interrupt Priority, offload IRQs from Core 0, and monitor live kernel DPCs." `
+        -Description "[REBOOT REQUIRED + LIVE ETW] Force PCI MSI mode, set Interrupt Priority, offload GPU/NIC IRQs from Core 0, and profile live kernel .sys DPC load." `
         -OnClick { Show-MsiModal "MSI & IRQ Affinity Enforcer" "Force PCI devices into MSI mode, adjust interrupt priority, and offload high-DPC drivers (GPU/NIC) from Core 0." })
 
-    # Row 2 (Y = 210)
-    [void](New-UltixButton -Parent $tab -X 15 -Y 210 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+    # Row 2 (Y = 201)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 201 -Width 180 -Height 38 -RGB @(55, 58, 64) `
         -Text "System Timer & TSC (0.5ms)" `
-        -Description "Fix Windows 11 API to allow global 0.5ms High Resolution Timers and force CPU TSC." `
+        -Description "[REBOOT REQUIRED] Fix Windows 11 global 0.5ms timer requests, disable Dynamic Tick/HPET, and verify live timer resolution at 2Hz." `
         -OnClick { Show-TimerModal "Timer Resolution Subsystem" "Enable legacy 0.5ms requests globally and stabilize DPC latency." })
 
-    [void](New-UltixButton -Parent $tab -X 205 -Y 210 -Width 180 -Height 40 -RGB @(45, 85, 125) `
-        -Text "USB XHCI Topology Map" `
-        -Description "Maps physical USB XHCI controllers to CPU Direct PCIe lanes vs Chipset PCH bridges, and spots Mouse/DAC/VR bus contention." `
-        -OnClick { Show-UsbTopologyModal })
-
-    # Row 3 (Y = 260)
-    [void](New-UltixButton -Parent $tab -X 15 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
+    [void](New-UltixButton -Parent $tab -X 205 -Y 201 -Width 180 -Height 38 -RGB @(55, 58, 64) `
         -Text "I/O & Memory Optimizer" `
-        -Description "Disable NVMe APST, PCIe ASPM, and System Memory Compression to reduce CPU overhead and micro-stuttering." `
+        -Description "[REBOOT REQUIRED / LIVE MMAGENT] Disable PCIe ASPM, StorNVMe APST sleep states, and System Memory Compression to eliminate micro-stutters." `
         -OnClick { Show-NVMeModal "I/O & Memory Optimizer" "Prevent NVMe and PCIe bus from entering low-power states (D3hot/L1.2) and disable RAM compression." })
 
-    [void](New-UltixButton -Parent $tab -X 205 -Y 260 -Width 180 -Height 40 -RGB @(55, 58, 64) `
-        -Text "Network NDIS & TCP Tuner" `
-        -Description "Configure low-latency NDIS parameters, TCP properties, and offloads with full symmetric revert." `
+    # Row 3 (Y = 245 - Full Width)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 245 -Width 370 -Height 36 -RGB @(55, 58, 64) `
+        -Text "Network NDIS & TCP Latency Tuner" `
+        -Description "[ADAPTER RESTART] Tune low-latency NDIS properties (Interrupt Moderation, EEE, Flow Control), TCPNoDelay, RSS/RSC/LSO with full backup & revert." `
         -OnClick { Show-NetworkModal "Network Optimizer" "Disable flow control, power saving, interrupt moderation, and enforce TCPNoDelay." })
 
-    # Row 4 (Y = 310 - Full Width)
-    [void](New-UltixButton -Parent $tab -X 15 -Y 310 -Width 370 -Height 40 -RGB @(45, 85, 125) `
-        -Text "WHEA Hardware Error Logger & OC Decoder" `
-        -Description "Scan system logs for hardware instability (Curve Optimizer / FCLK / DDR5 timings) and decode APIC IDs to physical CPU cores." `
-        -OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores or RAM." })
+    # --- SECTION 2B: READ-ONLY HARDWARE DIAGNOSTICS ---
+    $lblDiag = New-Object System.Windows.Forms.Label
+    $lblDiag.Text = "Hardware Diagnostics (Read-Only / Safe to Scan)"
+    $lblDiag.AccessibleName = "SectionHeader"
+    $lblDiag.UseMnemonic = $false
+    $lblDiag.Location = New-Object System.Drawing.Point(15, 289)
+    $lblDiag.Size = New-Object System.Drawing.Size(370, 19)
+    $lblDiag.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $lblDiag.Font = Get-UltixFont -Role "SectionHeader"
+
+    # Row 4 (Y = 310)
+    [void](New-UltixButton -Parent $tab -X 15 -Y 310 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "USB XHCI Topology Map" `
+        -Description "[READ-ONLY DIAGNOSTIC] Maps physical USB XHCI controllers to CPU Direct PCIe lanes vs Chipset PCH bridges and flags Mouse/DAC/VR contention." `
+        -OnClick { Show-UsbTopologyModal })
+
+    [void](New-UltixButton -Parent $tab -X 205 -Y 310 -Width 180 -Height 40 -RGB @(45, 85, 125) `
+        -Text "WHEA OC Error Decoder" `
+        -Description "[READ-ONLY DIAGNOSTIC] Scans System Event Logs for CPU/FCLK/DDR5/PCIe instability, maps APIC IDs to physical cores, and inspects raw MCA logs." `
+        -OnClick { Show-WHEAModal "WHEA Logger" "Analyze hardware errors to find unstable CPU cores, FCLK, DDR5 timings, or PCIe links." })
 
     # --- SECTION 3: LIVE KERNEL INTERRUPT / DPC TELEMETRY PANEL (Y = 365) ---
     $lblDpcHeader = New-Object System.Windows.Forms.Label
     $lblDpcHeader.Text = "Live Kernel Interrupt & DPC Monitor (ntdll.dll)"
+    $lblDpcHeader.AccessibleName = "SectionHeader"
+    $lblDpcHeader.UseMnemonic = $false
     $lblDpcHeader.Location = New-Object System.Drawing.Point(15, 365)
     $lblDpcHeader.Size = New-Object System.Drawing.Size(380, 20)
     $lblDpcHeader.ForeColor = [System.Drawing.Color]::DarkGray
-    $lblDpcHeader.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+    $lblDpcHeader.Font = Get-UltixFont -Role "SectionHeader"
 
     $lblTabDpc = New-Object System.Windows.Forms.Label
     $lblTabDpc.Location = New-Object System.Drawing.Point(15, 387)
@@ -4540,6 +4809,6 @@ function Initialize-Z7UI {
         }
     })
 
-    $tab.Controls.AddRange(@($lblPreFlight, $lblColLeft, $lblColRight, $lblDpcHeader, $lblTabDpc, $lblTabLegend))
+    $tab.Controls.AddRange(@($lblPreFlight, $lblTuners, $lblDiag, $lblDpcHeader, $lblTabDpc, $lblTabLegend))
     $TabControl.Controls.Add($tab)
 }

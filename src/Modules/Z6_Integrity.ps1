@@ -66,6 +66,7 @@ function Start-ExternalConsoleAsync {
             if ($code -eq 0) {
                 Write-GUI " -> [$($res.Title)] completed successfully (Exit Code: 0).`n"
             } elseif ($code -eq 3010) {
+                Set-UltixRebootRequired -Reason "Servicing/DISM"
                 Write-GUI " -> [$($res.Title)] completed (Exit Code: 3010 - Reboot Required to finalize changes).`n"
             } else {
                 $hexCode = "0x{0:X8}" -f ([uint32]$code)
@@ -339,6 +340,7 @@ function Clear-NetworkStack {
             $UltixSync.Progress = 75
             $UltixSync.Logs.Enqueue(" -> [3/4] Resetting Winsock Catalog (netsh winsock reset)...")
             $null = Invoke-UltixExe -FilePath "netsh.exe" -Arguments @("winsock", "reset") -Module "Z6_Integrity"
+            Set-UltixRebootRequired -Reason "Winsock"
 
             $UltixSync.Progress = 95
             $UltixSync.Logs.Enqueue(" -> [4/4] Resetting TCP/IPv4 & IPv6 Stack (netsh int ip/ipv6 reset)...")
@@ -865,7 +867,8 @@ function Repair-UwpGamingRuntime {
                         $req.Method           = "GET"
                         $req.Timeout          = 10000
                         $req.ReadWriteTimeout = 15000
-                        $req.UserAgent        = "WinUltix-Integrity/3.19"
+                        $rawVer = if (-not [string]::IsNullOrWhiteSpace($AppVersion)) { $AppVersion } elseif (-not [string]::IsNullOrWhiteSpace($Global:AppVersion)) { $Global:AppVersion } else { "3.19" }
+                        $req.UserAgent        = "WinUltix-Integrity/$($rawVer -replace '^v', '')"
 
                         $resp = $null
                         $inStream = $null

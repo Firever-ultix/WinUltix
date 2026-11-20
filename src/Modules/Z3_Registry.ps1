@@ -538,6 +538,14 @@ function Invoke-ApplyRegistry {
             }
         }
 
+        $markRebootIfNeeded = {
+            param($RuleObj)
+            if ($RuleObj.Name -in @("PlatformAoAcOverride", "DisableWpbtExecution", "SvcHostSplitThresholdInKB", "HwSchMode", "OverlayTestMode", "DisablePagingExecutive", "EnableVirtualizationBasedSecurity") -or
+                $RuleObj.Path -match 'HypervisorEnforcedCodeIntegrity') {
+                Set-UltixRebootRequired -Reason "Kernel/Boot Reg"
+            }
+        }
+
         foreach ($item in $Items) {
             $current++
             if ($null -ne $UltixSync) {
@@ -587,6 +595,7 @@ function Invoke-ApplyRegistry {
                             & $invokeWithAclEscalation $reg.Path {
                                 Remove-UltixRegItem -Path $reg.Path -Name $reg.Name -IgnoreMissing -Module "Z3_Registry"
                             }
+                            & $markRebootIfNeeded $reg
                         }
                     }
                     continue
@@ -613,12 +622,14 @@ function Invoke-ApplyRegistry {
                 # Sync 25H2/26H2 DisableWidgetsBoard policy & proactively disarm UCPD.sys if active
                 $altSynced = $false
                 if ($reg.ContainsKey("AltName")) {
-                    $ucpdSvc = Get-Service -Name "UCPD" -ErrorAction SilentlyContinue
-                    if ($null -ne $ucpdSvc -and $ucpdSvc.Status -eq 'Running') {
+                    $ucpdRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\UCPD"
+                    $ucpdStart   = (Get-ItemProperty -LiteralPath $ucpdRegPath -Name "Start" -ErrorAction SilentlyContinue).Start
+                    if ($null -ne $ucpdStart -and [int]$ucpdStart -ne 4) {
                         Set-ProtectedServiceStart -ServiceName "UCPD" -StartValue 4 -Module "Z3_Registry"
                         Invoke-UltixStep -Command "Disable-ScheduledTask -TaskPath '\Microsoft\Windows\AppxDeploymentClient\' -TaskName 'UCPD velocity'" -Action {
                             Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "UCPD velocity" -ErrorAction SilentlyContinue | Out-Null
                         } -SuccessOutput "Disarmed UCPD velocity task" -Module "Z3_Registry"
+                        Set-UltixRebootRequired -Reason "UCPD Filter"
                     }
                     if ($Op -eq 'Apply') {
                         try {
@@ -648,6 +659,7 @@ function Invoke-ApplyRegistry {
                     & $invokeWithAclEscalation $reg.Path {
                         Set-UltixRegValue -Path $reg.Path -Name $reg.Name -Value $targetValue -Type $reg.Type -Module "Z3_Registry"
                     }
+                    & $markRebootIfNeeded $reg
                 }
             } catch {
                 # Symmetric UCPD.sys kernel filter bypass for both Apply and Revert on Windows 11 24H2/25H2/26H2
@@ -672,6 +684,7 @@ function Invoke-ApplyRegistry {
                                 Remove-UltixRegItem -Path $reg.Path -Name "DisableWidgetsOnLockScreen" -IgnoreMissing -Module "Z3_Registry"
                             }
                             & $logLine "    [+] Reverted $($reg.AltName) policy & disarmed UCPD filter (Reboot unlocks $($reg.Name))."
+                            Set-UltixRebootRequired -Reason "UCPD Filter"
                         }
                     } catch {
                         & $logLine "    [!] Failed to modify key (Permissions/Lock): $($reg.Name)"
@@ -834,7 +847,7 @@ function Clear-StartMenu {
             $UltixSync.Progress = 40
             Invoke-UltixStep -Command "Stop-UltixProcess -Name 'StartMenuExperienceHost','ShellExperienceHost','explorer'" -Action {
                 if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
-                    Stop-UltixProcess -Name @("StartMenuExperienceHost", "ShellExperienceHost", "explorer")
+                    [void](Stop-UltixProcess -Name @("StartMenuExperienceHost", "ShellExperienceHost", "explorer"))
                 } else {
                     Stop-Process -Name "StartMenuExperienceHost", "ShellExperienceHost", "explorer" -Force -ErrorAction SilentlyContinue
                 }
@@ -1012,7 +1025,7 @@ function Clear-StartMenu {
             $stopShellHosts = {
                 param([string[]]$Names)
                 if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
-                    Stop-UltixProcess -Name $Names
+                    [void](Stop-UltixProcess -Name $Names)
                 } else {
                     Stop-Process -Name $Names -Force -ErrorAction SilentlyContinue
                 }
@@ -1112,7 +1125,7 @@ function Clear-StartMenu {
                 Remove-Item -LiteralPath $enrollmentPath -Recurse -Force -ErrorAction SilentlyContinue
             }
             if (Get-Command -Name Stop-UltixProcess -ErrorAction SilentlyContinue) {
-                Stop-UltixProcess -Name @("StartMenuExperienceHost")
+                [void](Stop-UltixProcess -Name @("StartMenuExperienceHost"))
             } else {
                 Stop-Process -Name "StartMenuExperienceHost" -Force -ErrorAction SilentlyContinue
             }
@@ -1214,7 +1227,7 @@ function Get-PowerDisplayState {
     $cabcVal = Get-UltixPowerAcIndex -SubGroupGuid "7516b95f-f776-4464-8c53-06167f40cc99" -SettingGuid "aded5e82-b909-4619-9949-f5d71dac0bcb" -IncludeHidden
     $cabcReg = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "DisableCABC" -ErrorAction SilentlyContinue).DisableCABC
     $isCabcOpt = (($null -eq $cabcVal -or $cabcVal -eq 0) -and $cabcReg -eq 1)
-    $cabcStatus = "AC: $(if($null -ne $cabcVal){$cabcVal}else{'N/A'}), Reg: $(if($cabcReg -eq 1){'Disabled'}else{'Default'})"
+    $cabcStatus = "Current AC: $(if($null -ne $cabcVal){$cabcVal}else{'N/A'}), Reg: $(if($cabcReg -eq 1){'Disabled'}else{'Default'})"
     $results.Add([PSCustomObject]@{
         UIDisplayName = "Display: Disable Content Adaptive Brightness (CABC / OLED Auto-Dimming) ($cabcStatus)"
         IsDetected    = (-not $isCabcOpt)

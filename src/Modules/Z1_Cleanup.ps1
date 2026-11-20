@@ -1394,7 +1394,7 @@ function Get-RegistryOrphans_Worker {
                 if (Test-IsOrphanedDiskPath -RawPath $exePath) {
                     $extraProps = @{}
                     foreach ($pName in $sub.Property) {
-                        if (-not [string]::IsNullOrEmpty($pName)) {
+                        if (-not [string]::IsNullOrEmpty($pName) -and $pName -ne "(Default)") {
                             $extraProps[$pName] = [string]$sub.GetValue($pName)
                         }
                     }
@@ -1502,6 +1502,7 @@ function Show-RegistryOrphanSweeper {
                         Set-UltixRegValue -Path $entry.RegPath -Name "(Default)" -Value ([string]$entry.RawValueData) -Type String -Module "Z1_Cleanup"
                         if ($entry.PSObject.Properties.Match("SubValues").Count -gt 0 -and $null -ne $entry.SubValues) {
                             foreach ($sp in $entry.SubValues.PSObject.Properties) {
+                                if ([string]::IsNullOrEmpty($sp.Name) -or $sp.Name -eq "(Default)") { continue }
                                 Set-UltixRegValue -Path $entry.RegPath -Name $sp.Name -Value ([string]$sp.Value) -Type String -Module "Z1_Cleanup"
                             }
                         }

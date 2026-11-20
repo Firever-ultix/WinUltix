@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo.png" alt="WinUltix Logo" width="128" height="128" />
   <h1>WinUltix 3.19</h1>
-  <p><b>A 800 KB Zero-WMI Windows 11 &amp; 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
+  <p><b>A ~800 KB Zero-WMI Windows 11 &amp; 10 Hardware Tuner, Debloater, and System First-Aid Toolkit</b></p>
 </div>
 
 > 🔗 **Part of the Ultix Ecosystem:**
@@ -10,7 +10,7 @@
 
 Most Windows utilities force a bad compromise: bloated 150 MB background apps that eat RAM, or reckless "black-box" scripts that break Windows Update and Xbox/Steam logins.
 
-I built **WinUltix** to be the opposite: a **fast, 100% transparent, zero-dependency toolkit** (`757 KB` script / `796 KB` standalone `.exe`) for Windows 11 (24H2–26H2) and Windows 10. It replaces **10 standalone tools** (*DriverStore Explorer, PatchCleaner, MSI Utility, Process Lasso, LatencyMon, USB Tree Viewer, TimerResolution, Autoruns, TCP Optimizer, and Debloaters*) inside one dark native interface. Every tweak is explained on hover, runs asynchronously without freezing the UI, streams its exact commands to a **Live Expert Console**, and supports **1-click Revert**.
+I built **WinUltix** to be the opposite: a **fast, 100% transparent, zero-dependency toolkit** for Windows 11 (24H2–26H2) and Windows 10. It replaces **10 standalone tools** (*DriverStore Explorer, PatchCleaner, MSI Utility, Process Lasso, LatencyMon, USB Tree Viewer, TimerResolution, Autoruns, TCP Optimizer, and Debloaters*) inside one dark native interface. Every tweak is explained on hover, runs asynchronously without freezing the UI, streams its exact commands to a **Live Expert Console**, and supports **1-click Revert**.
 
 ![WinUltix Main Interface](assets/1.png)
 
@@ -25,13 +25,13 @@ irm https://raw.githubusercontent.com/Firever-ultix/WinUltix/main/build/WinUltix
 ```
 
 **Prefer a standalone executable?** Download `WinUltix.exe` (`796 KB`) from **[Releases](https://github.com/Firever-ultix/WinUltix/releases)**.
-* **`WinUltix.exe` (v3.19) SHA-256:** `34AEE417FDA72492B41E2AE856C5CAF7A3D323390359B42B2180839678A83A55`
+* **`WinUltix.exe` (v3.19) SHA-256:** `8009DF441BD9D885764FC0BC844744FD83B24FC33C3428A24F991C31EC30C587`
 
 ---
 
 ### 🔥 What Makes WinUltix Different
 
-* **Zero Black Boxes (`[ Expert: OFF/ON ]`):** Toggle a live Win32 diagnostic console in the footer to watch every exact registry edit, service change, and CLI command with real exit codes—close-safe and immune to console selection freezes.
+* **Zero Black Boxes (`[ Expert: OFF/ON ]` & Guided UX):** Opens with a built-in Quick Start legend and per-tab descriptions; every checklist and inspector modal supports live `Ctrl+F` filtering, color-coded status columns, untruncated row inspection (`Ctrl+C`), 2-click Revert (`Select Optimized`), and a live Win32 Expert Console showing exact commands and exit codes. A discreet `[Reboot Recommended]` title-bar tracker tracks pending kernel/BCD changes without nagging popups.
 * **USB XHCI Topology &amp; Contention Mapper:** Maps every USB controller in the background so you can see which ports wire **directly to your CPU (SoC lanes)** vs. **Chipset (PCH)** bridges. Displays live port speeds (USB 2.0 / 3.0 / SS+ 10–20 Gbps / USB4), flags USB 3.x drives throttled to USB 2.0, deduplicates wireless dongles, and warns when a gaming mouse shares a controller with a USB DAC or external SSD.
 * **Core 0 IRQ Offload + Live Kernel Driver Profiler:** Offloads GPU and NIC interrupts away from CPU Core 0 to stop audio crackles and 1% low drops, while profiling live ISR/DPC latency (`Avg µs/s`, `1s Load`, `Max Peak µs`) for both PCI drivers (`nvlddmkm.sys`, `amdkmdag.sys`, `USBXHCI.sys`) and OS subsystems (`dxgkrnl.sys`, `tcpip.sys`, `ntoskrnl.exe`).
 * **Live Scheduler &amp; 0.5ms Timer Controls:** Switch `Win32PrioritySeparation` quantum presets live without rebooting, enforce TSC clock timing, and test global `0.5ms` timer precision in real time.
@@ -65,7 +65,7 @@ Buttons are color-coded for fast scanning: **Slate** = Standard Action, **Steel 
 
 #### 🛡️ 5. `Security` (13 Tools)
 * **4-Layer USB &amp; BadUSB Perimeter Guard:** Independently toggle USB/MTP Read-Only, USB `.exe` Execute-Deny, full USB storage blackout (`USBSTOR` + `UASPStor`), and Lock-Screen BadUSB/DMA protection.
-* **Privacy, Kernel Locks &amp; Encrypted DNS:** 52 Privacy/AppPrivacy rules, UEFI WPBT block, SvcHost consolidation, dual-layer **`SRP + scoped IFEO`** execution locks (telemetry or custom `.exe` paths), **Hardened DNS + Native DoH** (Quad9, Cloudflare, AdGuard, Google, OpenDNS over IPv4/IPv6), plus 8 classic Win32 Control Panel applets.
+* **Privacy, Kernel Locks &amp; Encrypted / Parental DNS:** 53 Privacy/AppPrivacy rules, UEFI WPBT block, SvcHost consolidation, dual-layer **`SRP + scoped IFEO`** execution locks (telemetry or custom `.exe` paths), **16 Hardened &amp; Parental Control DNS + Native DoH profiles** (Quad9, Cloudflare Standard/Security/Family, AdGuard Standard/Family, DNS4EU Protective/AdBlock/Child/Child+Ads, Control D Ads+Malware/Family, CleanBrowsing Family, OpenDNS Standard/FamilyShield, Google over IPv4/IPv6 with live hover specs), plus 8 classic Win32 Control Panel applets.
 
 #### 🚑 6. `Integrity` (9 Tools)
 * **OS Health &amp; WinSxS Compression:** Fast `<3s` `DISM /CheckHealth` + NTFS dirty-bit audit, automated `ChkDisk + DISM + SFC` repair console, and `DISM /ResetBase` to reclaim 5–15 GB of old update files.
@@ -75,7 +75,7 @@ Buttons are color-coded for fast scanning: **Slate** = Standard Action, **Steel 
 
 #### 🔧 7. `Hardware` (11 Tools)
 * **CPU Affinity Lasso &amp; Pre-Flight Mode:** Auto-detects **AMD 3D V-Cache** and **Intel Hybrid (P + E + LP-E)** CPUs to pin background apps away from gaming cores, unlocks hidden **CPPC P-States** with a boot-safe Dead Man's Switch, and creates a desktop **Pre-Flight Game Mode** toggle.
-* **I/O, NIC &amp; WHEA OC Decoder:** Disable PCIe ASPM, NVMe APST, and RAM compression; tune NIC NDIS properties and `TCPNoDelay` with symmetric backup/restore; and decode **WHEA hardware errors** directly to exact logical threads and physical cores (Curve Optimizer ID 18, FCLK/SoC ID 19, RAM ID 47, PCIe ID 1/17).
+* **I/O, NIC &amp; WHEA OC Decoder:** Cleanly separated into reversible **Kernel/Bus Tuners** (with inline engineering notes &amp; reboot tags per setting for CPPC, Timer, NVMe, and NDIS/TCP) and **Read-Only Hardware Diagnostics** (USB XHCI Map, Live DPC, and **WHEA OC Decoder** mapping raw `APIC IDs` to physical cores with a built-in raw MCA Event Viewer log inspector).
 
 ![WinUltix 7](assets/7.png)
 
@@ -83,7 +83,7 @@ Buttons are color-coded for fast scanning: **Slate** = Standard Action, **Steel 
 
 ### 💾 Portable Profiles &amp; Live Scaling
 
-* **Export / Import JSON Profiles:** Snapshot your active Registry tweaks, Start Menu clean state, DNS/DoH provider, Quantum Scheduler preset, Power/Display settings, USB Guard, SRP locks, Services, and Affinity Lasso list—and replicate your setup on any PC in one click.
+* **Export / Selective Import JSON Profiles:** Snapshot your active Registry tweaks, Start Menu clean state, DNS/DoH provider, Quantum Scheduler preset, Power/Display settings, USB Guard, SRP locks, Services, Hardware locks, and Affinity Lasso list—then inspect exact category contents and selectively pick what to apply in a 2-pane preview modal before importing.
 * **Live Font Scaling (`[ A- ]` / `[ A+ ]`):** Adjust interface typography live on high-DPI displays without restarting.
 
 ---

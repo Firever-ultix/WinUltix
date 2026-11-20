@@ -95,7 +95,7 @@ $global:infoBox.DetectUrls = $false
 $global:infoBox.ScrollBars = "Vertical"
 $global:infoBox.Font = New-Object System.Drawing.Font("Consolas", 10)
 $global:infoBox.Anchor = 'Top, Bottom, Left, Right'
-Write-UltixSystemBanner -StatusMessage "Ready for deployment. Modular architecture loaded successfully."
+Write-UltixSystemBanner -StatusMessage "Ready for deployment. Modular architecture loaded successfully." -ShowQuickGuide
 
 $global:tabControl = New-Object WinUltix.DarkTabControl
 $global:tabControl.Font = Get-UltixFont -Role "TabHeader"
@@ -120,6 +120,9 @@ Initialize-Z4UI -TabControl $global:tabControl
 Initialize-Z5UI -TabControl $global:tabControl
 Initialize-Z6UI -TabControl $global:tabControl
 Initialize-Z7UI -TabControl $global:tabControl
+
+$global:tabControl.Add_SelectedIndexChanged({ Restore-Log })
+Restore-Log
 
 # ------------------------------------------
 # 4. GLOBAL FOOTER BUTTONS
@@ -197,7 +200,9 @@ $btnExportLog.FlatStyle = "Flat"
 $btnExportLog.Anchor = 'Bottom, Right'
 $btnExportLog.AccessibleName = "FooterButton"
 $btnExportLog.Font = Get-UltixFittedFont -Control $btnExportLog -Role "FooterButton"
-$btnExportLog.Add_Click({ 
+$btnExportLog.Add_MouseEnter({ Show-Description "Exports the current main diagnostic log to a UTF-8 timestamped .txt file on your Desktop." })
+$btnExportLog.Add_MouseLeave({ Restore-Log })
+$btnExportLog.Add_Click({
     if ($global:infoBox.Text.Length -gt 0) { 
         try {
             $desktop = [Environment]::GetFolderPath("Desktop")
@@ -223,7 +228,9 @@ $btnClearLog.FlatStyle = "Flat"
 $btnClearLog.Anchor = 'Bottom, Right'
 $btnClearLog.AccessibleName = "FooterButton"
 $btnClearLog.Font = Get-UltixFittedFont -Control $btnClearLog -Role "FooterButton"
-$btnClearLog.Add_Click({ 
+$btnClearLog.Add_MouseEnter({ Show-Description "Clears the main log output and reprints the live hardware & OS system banner." })
+$btnClearLog.Add_MouseLeave({ Restore-Log })
+$btnClearLog.Add_Click({
     $global:infoBox.Clear()
     Write-UltixSystemBanner -StatusMessage "Ready for deployment."
 })
@@ -239,7 +246,9 @@ $btnCredits.FlatStyle = "Flat"
 $btnCredits.Anchor = 'Bottom, Left'
 $btnCredits.AccessibleName = "FooterButton"
 $btnCredits.Font = Get-UltixFittedFont -Control $btnCredits -Role "FooterButton"
-$btnCredits.Add_Click({ 
+$btnCredits.Add_MouseEnter({ Show-Description "Displays WinUltix version info, engineering credits, GitHub repository, and support links." })
+$btnCredits.Add_MouseLeave({ Restore-Log })
+$btnCredits.Add_Click({
     $aboutForm = New-Object System.Windows.Forms.Form
     $aboutForm.Text = "About WinUltix"
     $aboutForm.Size = New-Object System.Drawing.Size(420, 270)
@@ -255,20 +264,26 @@ $btnCredits.Add_Click({
     $picLogo.Size = New-Object System.Drawing.Size(64, 64)
     $picLogo.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
 
+    $disposeSrcLogo = $false
     $srcLogo = if ($null -ne $global:UltixHighResLogo) {
         $global:UltixHighResLogo
     } elseif ($null -ne $global:UltixAppIcon) {
+        $disposeSrcLogo = $true
         $global:UltixAppIcon.ToBitmap()
     } else { $null }
 
     if ($null -ne $srcLogo) {
         $bmpLogo = New-Object System.Drawing.Bitmap(64, 64, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $gLogo   = [System.Drawing.Graphics]::FromImage($bmpLogo)
-        $gLogo.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $gLogo.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-        $gLogo.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-        $gLogo.DrawImage($srcLogo, 0, 0, 64, 64)
-        $gLogo.Dispose()
+        try {
+            $gLogo.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $gLogo.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+            $gLogo.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $gLogo.DrawImage($srcLogo, 0, 0, 64, 64)
+        } finally {
+            $gLogo.Dispose()
+            if ($disposeSrcLogo) { $srcLogo.Dispose() }
+        }
         $picLogo.Image = $bmpLogo
     }
 
@@ -312,9 +327,11 @@ $btnCredits.Add_Click({
     $btnAboutOK.BackColor = [System.Drawing.Color]::FromArgb(255, 60, 60, 60)
     $btnAboutOK.ForeColor = [System.Drawing.Color]::White
     $btnAboutOK.FlatStyle = "Flat"
+    $btnAboutOK.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $btnAboutOK.Add_Click({ $aboutForm.Close() })
     
     $aboutForm.Controls.AddRange(@($picLogo, $lblTitle, $lblAbout, $linkGit, $linkcoffee, $btnAboutOK))
+    $aboutForm.CancelButton = $btnAboutOK
     try {
         [void]$aboutForm.ShowDialog($global:form)
     } finally {
@@ -352,6 +369,28 @@ $btnImportProfile.Font = Get-UltixFittedFont -Control $btnImportProfile -Role "F
 $btnImportProfile.Add_MouseEnter({ Show-Description "Imports and enforces a previously saved WinUltix JSON configuration snapshot on this machine." })
 $btnImportProfile.Add_MouseLeave({ Restore-Log })
 $btnImportProfile.Add_Click({ Import-WinUltixProfile -ControlsToDisable @($btnExportProfile, $btnImportProfile, $global:tabControl) })
+
+$logCtxMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miLogCopy = $logCtxMenu.Items.Add("Copy Selected Text   [Ctrl+C]")
+$miLogCopy.Add_Click({
+    if ($global:infoBox.SelectionLength -gt 0) {
+        try { $global:infoBox.Copy() } catch { }
+    }
+})
+$miLogSelAll = $logCtxMenu.Items.Add("Select All   [Ctrl+A]")
+$miLogSelAll.Add_Click({ $global:infoBox.SelectAll() })
+[void]$logCtxMenu.Items.Add("-")
+$miLogExport = $logCtxMenu.Items.Add("Export Log to Desktop")
+$miLogExport.Add_Click({ $btnExportLog.PerformClick() }.GetNewClosure())
+$miLogClear = $logCtxMenu.Items.Add("Clear Log")
+$miLogClear.Add_Click({ $btnClearLog.PerformClick() }.GetNewClosure())
+$logCtxMenu.Add_Opening({
+    param($src, $e)
+    $miLogCopy.Enabled   = ($global:infoBox.SelectionLength -gt 0)
+    $miLogSelAll.Enabled = ($global:infoBox.TextLength -gt 0)
+    $miLogExport.Enabled = ($global:infoBox.TextLength -gt 0)
+}.GetNewClosure())
+$global:infoBox.ContextMenuStrip = $logCtxMenu
 
 $global:form.Controls.AddRange(@(
     $global:btnExpertConsole, $global:btnFontDec, $global:btnFontInc, $btnClearLog, $btnExportLog, $global:progBar, 
@@ -398,6 +437,7 @@ try {
         $global:UltixActiveTasks.Clear()
     }
     try { [WinUltix.ExpertConsole]::Shutdown() } catch { }
+    if ($null -ne $logCtxMenu) { $logCtxMenu.Dispose() }
     $global:form.Dispose()
     if ($null -ne $global:UltixFontCache) {
         foreach ($fObj in $global:UltixFontCache.Values) {

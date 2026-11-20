@@ -165,6 +165,7 @@ function Invoke-ApplyUsbSecurity {
                             }
                         }
                     }
+                    Set-UltixRebootRequired -Reason "USB Guard"
                 }
                 "LockScreenGuard" {
                     if ($Op -eq 'Apply') {
@@ -174,6 +175,7 @@ function Invoke-ApplyUsbSecurity {
                         Remove-UltixRegItem -Path $fveKey -Name "DisableExternalDMAUnderLock" -IgnoreMissing -Module "Z5_Utilities"
                         Remove-UltixRegItem -Path $pwrKey -Name "DisableUsbEnumerationOnLock" -IgnoreMissing -Module "Z5_Utilities"
                     }
+                    Set-UltixRebootRequired -Reason "USB Guard"
                 }
             }
         }
@@ -202,36 +204,9 @@ function Set-CustomDNS {
     Invoke-AsyncTask -ControlsToDisable $ControlsToDisable -Arguments @($Provider, $EnableDoH, $EnableIPv6) -ScriptBlock {
         param([string]$TargetProvider, [bool]$UseDoH, [bool]$UseIPv6)
 
-        $dnsCatalog = @{
-            "Quad9 (9.9.9.9)" = @{
-                IPv4     = @("9.9.9.9", "149.112.112.112")
-                IPv6     = @("2620:fe::fe", "2620:fe::9")
-                Template = "https://dns.quad9.net/dns-query"
-            }
-            "Cloudflare (1.1.1.1)" = @{
-                IPv4     = @("1.1.1.1", "1.0.0.1")
-                IPv6     = @("2606:4700:4700::1111", "2606:4700:4700::1001")
-                Template = "https://cloudflare-dns.com/dns-query"
-            }
-            "AdGuard (94.140.14.14)" = @{
-                IPv4     = @("94.140.14.14", "94.140.15.15")
-                IPv6     = @("2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff")
-                Template = "https://dns.adguard-dns.com/dns-query"
-            }
-            "Google (8.8.8.8)" = @{
-                IPv4     = @("8.8.8.8", "8.8.4.4")
-                IPv6     = @("2001:4860:4860::8888", "2001:4860:4860::8844")
-                Template = "https://dns.google/dns-query"
-            }
-            "OpenDNS (208.67.222.222)" = @{
-                IPv4     = @("208.67.222.222", "208.67.220.220")
-                IPv6     = @("2620:119:35::35", "2620:119:53::53")
-                Template = "https://doh.opendns.com/dns-query"
-            }
-        }
-
-        $isDhcp = ($TargetProvider -eq "Default (DHCP)")
-        $cfg    = if (-not $isDhcp) { $dnsCatalog[$TargetProvider] } else { $null }
+        $dnsCatalog = Get-UltixDnsCatalog
+        $isDhcp     = ($TargetProvider -eq "Default (DHCP)")
+        $cfg        = if (-not $isDhcp -and $dnsCatalog.Contains($TargetProvider)) { $dnsCatalog[$TargetProvider] } else { $null }
         if (-not $isDhcp -and $null -eq $cfg) {
             $UltixSync.Logs.Enqueue(" [!] Unknown DNS provider profile '$TargetProvider'. Aborting without changes.")
             return
@@ -281,7 +256,17 @@ function Set-CustomDNS {
 
             $allServers = [System.Collections.Generic.List[string]]::new()
             $v4List     = @($cfg.IPv4)
+            $v6List     = @($cfg.IPv6)
             $v4Literal  = ($v4List | ForEach-Object { "'$_'" }) -join ","
+
+            # Flush live NSI IPv6 static DNS before applying IPv4-only targets so Dnscache drops old IPv6 resolvers immediately
+            if ((-not $UseIPv6 -or $v6List.Count -eq 0) -and -not [string]::IsNullOrWhiteSpace($nicInfo.StaticNameServerV6)) {
+                try {
+                    Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses" -Action {
+                        Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses -ErrorAction Stop
+                    } -SuccessOutput "Cleared live static IPv6 DNS in NSI on [$ifName]" -Module "Z5_Utilities"
+                } catch { }
+            }
 
             try {
                 Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($v4Literal)" -Action {
@@ -292,8 +277,7 @@ function Set-CustomDNS {
                 $UltixSync.Logs.Enqueue(" [!] [$ifName]: Error setting IPv4 DNS servers: $($_.Exception.Message)")
             }
 
-            if ($UseIPv6) {
-                $v6List    = @($cfg.IPv6)
+            if ($UseIPv6 -and $v6List.Count -gt 0) {
                 $v6Literal = ($v6List | ForEach-Object { "'$_'" }) -join ","
                 try {
                     Invoke-UltixStep -Command "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($v6Literal)" -Action {
@@ -304,7 +288,10 @@ function Set-CustomDNS {
                     $UltixSync.Logs.Enqueue(" [!] [$ifName]: IPv6 stack unbound or unavailable ($($_.Exception.Message)).")
                 }
             } else {
-                # Clear static IPv6 NameServer directly in Tcpip6 registry only if previously populated
+                if ($UseIPv6 -and $v6List.Count -eq 0) {
+                    $UltixSync.Logs.Enqueue(" [!] [$ifName]: '$TargetProvider' is IPv4-only (no native IPv6 DNS). Cleared static IPv6 override to prevent filter bypass.")
+                }
+                # Fallback: ensure Tcpip6 static NameServer registry value is empty if NSI reset did not reach an unbound IPv6 stack
                 $tcp6IfKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$ifGuid"
                 if (Test-Path -LiteralPath $tcp6IfKey) {
                     $curV6Ns = (Get-ItemProperty -LiteralPath $tcp6IfKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer
@@ -577,29 +564,117 @@ function Initialize-Z5UI {
                 -AuditPrefix "To Block"
         }.GetNewClosure())
 
-    # 5. Hardened DNS & Native DoH Enforcer (IPv4 + IPv6)
+    # 5. Hardened DNS, Parental Control & Native DoH Enforcer (IPv4 + IPv6)
+    $dnsCatalogRef = Get-UltixDnsCatalog
+    $dnsUiState    = @{ LastPreview = "" }
+
     $lblDNS = New-Object System.Windows.Forms.Label
-    $lblDNS.Text = "Hardened DNS & Native DoH Enforcer (IPv4 / IPv6)"
+    $lblDNS.Text = "Hardened DNS, Parental Control & Native DoH"
     $lblDNS.AccessibleName = "SectionHeader"
     $lblDNS.UseMnemonic = $false
-    $lblDNS.Location = New-Object System.Drawing.Point(15, 228)
+    $lblDNS.Location = New-Object System.Drawing.Point(15, 224)
     $lblDNS.Size = New-Object System.Drawing.Size(370, 20)
     $lblDNS.ForeColor = [System.Drawing.Color]::DarkGray
     $lblDNS.Font = Get-UltixFont -Role "SectionHeader"
 
     $comboDNS = New-Object System.Windows.Forms.ComboBox
-    $comboDNS.Location = New-Object System.Drawing.Point(15, 252)
-    $comboDNS.Size = New-Object System.Drawing.Size(240, 25)
+    $comboDNS.Location = New-Object System.Drawing.Point(15, 247)
+    $comboDNS.Size = New-Object System.Drawing.Size(260, 28)
     $comboDNS.BackColor = [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
     $comboDNS.ForeColor = [System.Drawing.Color]::White
     $comboDNS.DropDownStyle = "DropDownList"
-    $comboDNS.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $comboDNS.Items.AddRange(@("Quad9 (9.9.9.9)", "Cloudflare (1.1.1.1)", "AdGuard (94.140.14.14)", "Google (8.8.8.8)", "OpenDNS (208.67.222.222)", "Default (DHCP)"))
+    $comboDNS.DrawMode = [System.Windows.Forms.DrawMode]::OwnerDrawFixed
+    $comboDNS.ItemHeight = 22
+    $comboDNS.IntegralHeight = $false
+    $comboDNS.MaxDropDownItems = $dnsCatalogRef.Count
+    $comboDNS.DropDownHeight = [math]::Min(410, ($dnsCatalogRef.Count * 22) + 8)
+    $comboDNS.DropDownWidth = 480
+    $comboDNS.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $comboDNS.Items.AddRange([object[]]@($dnsCatalogRef.Keys))
     $comboDNS.SelectedIndex = 0
+
+    $dnsBadgeFont = New-Object System.Drawing.Font("Consolas", 8.5, [System.Drawing.FontStyle]::Bold)
+
+    $comboDNS.Add_DrawItem({
+        param($src, $e)
+        if ($e.Index -lt 0 -or $e.Index -ge $src.Items.Count) { return }
+
+        $itemName   = [string]$src.Items[$e.Index]
+        $isEditBox  = (($e.State -band [System.Windows.Forms.DrawItemState]::ComboBoxEdit) -ne 0)
+        $isSelected = (($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0)
+
+        if (-not $isEditBox -and $isSelected -and $dnsUiState.LastPreview -ne $itemName) {
+            $dnsUiState.LastPreview = $itemName
+            Show-Description (Format-UltixDnsDescription -Provider $itemName)
+        }
+
+        $bgColor = if ($isSelected -and -not $isEditBox) {
+            [System.Drawing.Color]::FromArgb(255, 45, 85, 125)
+        } elseif ($isEditBox) {
+            [System.Drawing.Color]::FromArgb(255, 55, 58, 64)
+        } elseif (($e.Index % 2) -eq 1) {
+            [System.Drawing.Color]::FromArgb(255, 36, 39, 45)
+        } else {
+            [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+        }
+
+        $bgBrush = New-Object System.Drawing.SolidBrush($bgColor)
+        try {
+            $e.Graphics.FillRectangle($bgBrush, $e.Bounds)
+        } finally {
+            $bgBrush.Dispose()
+        }
+
+        $cfg = if ($dnsCatalogRef.Contains($itemName)) { $dnsCatalogRef[$itemName] } else { $null }
+        $nameColor = if ($null -ne $cfg -and $cfg.Category -eq "Parental" -and -not $isEditBox) {
+            [System.Drawing.Color]::FromArgb(255, 255, 232, 165)
+        } else {
+            [System.Drawing.Color]::White
+        }
+
+        if ($isEditBox) {
+            $editRect = New-Object System.Drawing.Rectangle(($e.Bounds.X + 2), $e.Bounds.Y, [math]::Max(10, $e.Bounds.Width - 4), $e.Bounds.Height)
+            [System.Windows.Forms.TextRenderer]::DrawText(
+                $e.Graphics, $itemName, $src.Font, $editRect, $nameColor,
+                ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix)
+            )
+            return
+        }
+
+        $badgeText  = if ($null -ne $cfg) { [string]$cfg.Badge } else { "" }
+        $badgeColor = [System.Drawing.Color]::Silver
+        if ($null -ne $cfg) {
+            switch ($cfg.Category) {
+                "Parental" { $badgeColor = [System.Drawing.Color]::Gold }
+                "AdBlock"  { $badgeColor = [System.Drawing.Color]::LightGreen }
+                "Security" { $badgeColor = [System.Drawing.Color]::LightSkyBlue }
+                "Standard" { $badgeColor = [System.Drawing.Color]::FromArgb(255, 190, 200, 212) }
+            }
+        }
+
+        $badgeWidth = 175
+        $nameRect   = New-Object System.Drawing.Rectangle(($e.Bounds.X + 6), $e.Bounds.Y, [math]::Max(10, $e.Bounds.Width - $badgeWidth - 12), $e.Bounds.Height)
+        $badgeRect  = New-Object System.Drawing.Rectangle(($e.Bounds.Right - $badgeWidth - 6), $e.Bounds.Y, $badgeWidth, $e.Bounds.Height)
+
+        [System.Windows.Forms.TextRenderer]::DrawText(
+            $e.Graphics, $itemName, $src.Font, $nameRect, $nameColor,
+            ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix)
+        )
+        if (-not [string]::IsNullOrWhiteSpace($badgeText)) {
+            [System.Windows.Forms.TextRenderer]::DrawText(
+                $e.Graphics, $badgeText, $dnsBadgeFont, $badgeRect, $badgeColor,
+                ([System.Windows.Forms.TextFormatFlags]::Right -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::SingleLine -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix)
+            )
+        }
+    }.GetNewClosure())
+
+    $comboDNS.Add_Disposed({
+        if ($null -ne $dnsBadgeFont) { $dnsBadgeFont.Dispose() }
+    }.GetNewClosure())
 
     $chkDoH = New-Object System.Windows.Forms.CheckBox
     $chkDoH.Text = "Enforce Native DNS-over-HTTPS (DoH)"
-    $chkDoH.Location = New-Object System.Drawing.Point(15, 284)
+    $chkDoH.Location = New-Object System.Drawing.Point(15, 280)
     $chkDoH.Size = New-Object System.Drawing.Size(235, 22)
     $chkDoH.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
     $chkDoH.ForeColor = [System.Drawing.Color]::LightGray
@@ -607,31 +682,65 @@ function Initialize-Z5UI {
 
     $chkIPv6 = New-Object System.Windows.Forms.CheckBox
     $chkIPv6.Text = "Configure IPv6 DNS"
-    $chkIPv6.Location = New-Object System.Drawing.Point(255, 284)
+    $chkIPv6.Location = New-Object System.Drawing.Point(255, 280)
     $chkIPv6.Size = New-Object System.Drawing.Size(135, 22)
     $chkIPv6.Font = New-Object System.Drawing.Font("Segoe UI", 9.0)
     $chkIPv6.ForeColor = [System.Drawing.Color]::LightGray
     $chkIPv6.Checked = $false
 
-    $comboDNS.Add_SelectedIndexChanged({
-        $isStatic = ([string]$comboDNS.SelectedItem -ne "Default (DHCP)")
+    $syncDnsControls = ({
+        $selName    = [string]$comboDNS.SelectedItem
+        $isStatic   = ($selName -ne "Default (DHCP)")
+        $cfg        = if ($dnsCatalogRef.Contains($selName)) { $dnsCatalogRef[$selName] } else { $null }
+        $supportsV6 = ($null -ne $cfg -and @($cfg.IPv6).Count -gt 0)
+
         $chkDoH.Enabled  = $isStatic
-        $chkIPv6.Enabled = $isStatic
+        $chkIPv6.Enabled = ($isStatic -and $supportsV6)
+        if (-not $supportsV6) { $chkIPv6.Checked = $false }
     }.GetNewClosure())
 
-    $btnApplyDNS = New-UltixButton -Parent $tabSec -X 265 -Y 251 -Width 120 -Height 27 -RGB @(45, 85, 125) `
+    $comboDNS.Add_SelectedIndexChanged({
+        & $syncDnsControls
+        $dnsUiState.LastPreview = [string]$comboDNS.SelectedItem
+        Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+    }.GetNewClosure())
+
+    $comboDNS.Add_DropDownClosed({
+        $dnsUiState.LastPreview = [string]$comboDNS.SelectedItem
+        Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+    }.GetNewClosure())
+
+    $comboDNS.Add_MouseEnter({
+        Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+    }.GetNewClosure())
+
+    $comboDNS.Add_MouseLeave({
+        if (-not $comboDNS.DroppedDown) { Restore-Log }
+    }.GetNewClosure())
+
+    $btnApplyDNS = New-UltixButton -Parent $tabSec -X 285 -Y 247 -Width 100 -Height 28 -RGB @(45, 85, 125) `
         -Text "Apply DNS" `
-        -Description "Enforces IPv4/IPv6 DNS servers, injects kernel Dnscache DoH encryption flags, and flushes resolver cache." `
         -OnClick ({
             Set-CustomDNS -Provider ([string]$comboDNS.SelectedItem) -EnableDoH $chkDoH.Checked -EnableIPv6 $chkIPv6.Checked -ControlsToDisable $allTabButtons.ToArray()
         }.GetNewClosure())
 
+    $btnApplyDNS.Add_MouseEnter({
+        Show-Description (Format-UltixDnsDescription -Provider ([string]$comboDNS.SelectedItem))
+    }.GetNewClosure())
+
     $global:lblCurrentDNS = New-Object System.Windows.Forms.Label
     $global:lblCurrentDNS.Text = "Current DNS: Reading from active route..."
-    $global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 310)
-    $global:lblCurrentDNS.Size = New-Object System.Drawing.Size(370, 22)
-    $global:lblCurrentDNS.Font = New-Object System.Drawing.Font("Consolas", 9.2, [System.Drawing.FontStyle]::Bold)
+    $global:lblCurrentDNS.UseMnemonic = $false
+    $global:lblCurrentDNS.Location = New-Object System.Drawing.Point(15, 305)
+    $global:lblCurrentDNS.Size = New-Object System.Drawing.Size(370, 34)
+    $global:lblCurrentDNS.Font = New-Object System.Drawing.Font("Consolas", 8.75, [System.Drawing.FontStyle]::Bold)
     $global:lblCurrentDNS.ForeColor = [System.Drawing.Color]::LightSkyBlue
+    $global:lblCurrentDNS.Add_MouseEnter({
+        if (-not [string]::IsNullOrWhiteSpace($this.AccessibleDescription)) {
+            Show-Description $this.AccessibleDescription
+        }
+    })
+    $global:lblCurrentDNS.Add_MouseLeave({ Restore-Log })
 
     # 6. Classic Windows Control Applets (8 Tools)
     $lblClassic = New-Object System.Windows.Forms.Label

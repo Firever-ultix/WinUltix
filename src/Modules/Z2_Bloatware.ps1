@@ -1018,14 +1018,16 @@ function Invoke-RemoveBloatware {
                     }
                     try {
                         Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -Remove -NoRestart" -Module "Z2_Bloatware"
-                        Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -Remove -NoRestart -ErrorAction Stop | Out-Null
+                        $recallRes = Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -Remove -NoRestart -ErrorAction Stop
                         Write-UltixExpertResult -OutputText "Recall feature disabled and payload removed" -ExitCode 0 -Module "Z2_Bloatware"
+                        if ($null -ne $recallRes -and $recallRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Recall Feature" }
                         if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled and payload removed.") }
                     } catch {
                         try {
                             Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -NoRestart" -Module "Z2_Bloatware"
-                            Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -NoRestart -ErrorAction Stop | Out-Null
+                            $recallRes = Disable-WindowsOptionalFeature -Online -FeatureName "Recall" -NoRestart -ErrorAction Stop
                             Write-UltixExpertResult -OutputText "Recall feature disabled" -ExitCode 0 -Module "Z2_Bloatware"
+                            if ($null -ne $recallRes -and $recallRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Recall Feature" }
                             if ($null -ne $UltixSync) { $UltixSync.Logs.Enqueue("    [+] Windows Recall feature disabled.") }
                         } catch {
                             Write-UltixExpertResult -OutputText $_.Exception.Message -ExitCode 1 -Module "Z2_Bloatware"
@@ -1100,8 +1102,9 @@ function Invoke-RemoveBloatware {
 
                     # Lock Deprovisioned registry key even for provisioned-only packages
                     $pkgParts = $prov.PackageName -split '_'
-                    if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
-                        $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
+                    if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[-1])) {
+                        $provName = ($pkgParts[0..($pkgParts.Count - 5)] -join '_')
+                        $provPfn  = "${provName}_$($pkgParts[-1])"
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
                         if (-not (Test-Path -LiteralPath $deprovPath)) {
                             Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
@@ -1296,8 +1299,9 @@ function Show-AppxProvGrid {
                     Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
                     Write-UltixExpertResult -OutputText "$($app.DisplayName) deprovisioned from base image" -ExitCode 0 -Module "Z2_Bloatware"
                     $pkgParts = $app.PackageName -split '_'
-                    if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[4])) {
-                        $provPfn = "$($pkgParts[0])_$($pkgParts[4])"
+                    if ($pkgParts.Count -ge 5 -and -not [string]::IsNullOrWhiteSpace($pkgParts[0]) -and -not [string]::IsNullOrWhiteSpace($pkgParts[-1])) {
+                        $provName = ($pkgParts[0..($pkgParts.Count - 5)] -join '_')
+                        $provPfn  = "${provName}_$($pkgParts[-1])"
                         $deprovPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned\$provPfn"
                         if (-not (Test-Path -LiteralPath $deprovPath)) {
                             Write-UltixExpertCommand -CommandText "New-Item -Path '$deprovPath' -Force" -Module "Z2_Bloatware"
@@ -1474,14 +1478,16 @@ function Show-OptFeaturesGrid {
                     if ($Action -eq "Primary") {
                         $UltixSync.Logs.Enqueue(" -> Disabling feature: $($feat.FeatureName)")
                         Write-UltixExpertCommand -CommandText "Disable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -NoRestart" -Module "Z2_Bloatware"
-                        Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop | Out-Null
+                        $featRes = Disable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -NoRestart -ErrorAction Stop
                         Write-UltixExpertResult -OutputText "$($feat.FeatureName) disabled" -ExitCode 0 -Module "Z2_Bloatware"
+                        if ($null -ne $featRes -and $featRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Optional Features" }
                         $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) disabled (Reboot may be required).")
                     } else {
                         $UltixSync.Logs.Enqueue(" -> Enabling feature: $($feat.FeatureName)")
                         Write-UltixExpertCommand -CommandText "Enable-WindowsOptionalFeature -Online -FeatureName '$($feat.FeatureName)' -All -NoRestart" -Module "Z2_Bloatware"
-                        Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop | Out-Null
+                        $featRes = Enable-WindowsOptionalFeature -Online -FeatureName $feat.FeatureName -All -NoRestart -ErrorAction Stop
                         Write-UltixExpertResult -OutputText "$($feat.FeatureName) enabled" -ExitCode 0 -Module "Z2_Bloatware"
+                        if ($null -ne $featRes -and $featRes.RestartNeeded) { Set-UltixRebootRequired -Reason "Optional Features" }
                         $UltixSync.Logs.Enqueue("    [OK] $($feat.FeatureName) enabled (Reboot may be required).")
                     }
                 } catch {
